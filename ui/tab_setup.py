@@ -75,6 +75,9 @@ class LedScanThread(QThread):
 class SetupTab(QWidget):
     N_WRAPS = 2  # 바퀴 수 고정
 
+    # ★ 미러링 중지 요청 시그널 — LED 연결 시도 전 MainWindow로 전송
+    request_mirror_stop = pyqtSignal()
+
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
@@ -274,15 +277,29 @@ class SetupTab(QWidget):
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
     # --- 연결 ---
-    def _toggle_connection(self):
+    def force_disconnect(self):
+        """★ 외부(MainWindow 등)에서 강제로 기기 연결을 해제하고 UI를 초기화합니다.
+        미러링 시작 시 MainWindow._start_mirror()에서 호출됩니다.
+        """
         if self.device and self.device.connected:
             self._stop_scan()
+            try:
+                self.device.turn_off()
+            except Exception:
+                pass
             self.device.disconnect()
             self.device = None
             self.conn_label.setText("연결 안 됨")
             self.conn_label.setStyleSheet("color: #c0392b;")
             self.btn_connect.setText("🔌 LED 연결")
+
+    def _toggle_connection(self):
+        if self.device and self.device.connected:
+            self.force_disconnect()
         else:
+            # ★ 새 연결 전 미러링 강제 종료 요청 (MainWindow._stop_mirror_sync 호출)
+            self.request_mirror_stop.emit()
+
             try:
                 dev_cfg = self.config["device"]
                 self.device = NanoleafDevice(

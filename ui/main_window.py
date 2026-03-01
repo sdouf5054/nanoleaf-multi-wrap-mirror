@@ -89,6 +89,10 @@ class MainWindow(QMainWindow):
             self._on_smoothing_changed
         )
 
+        # ★ LED 설정 탭 / 색상 보정 탭에서 연결 시도 전 미러링 중지 요청
+        self.tab_setup.request_mirror_stop.connect(self._stop_mirror_sync)
+        self.tab_color.request_mirror_stop.connect(self._stop_mirror_sync)
+
         # --- 잠금 감지 ---
         self._was_mirroring_before_lock = False
         self._session_filter = SessionEventFilter(self._on_session_event)
@@ -115,6 +119,10 @@ class MainWindow(QMainWindow):
 
     def _start_mirror(self):
         """미러링 시작"""
+        # ★ 미러링 시작 전 설정/보정 탭의 LED 연결을 강제 해제하여 USB 충돌 방지
+        self.tab_setup.force_disconnect()
+        self.tab_color.force_disconnect()
+
         self.tab_mirror.apply_to_config()
         save_config(self.config)
 
@@ -139,6 +147,18 @@ class MainWindow(QMainWindow):
         if self.mirror_thread and self.mirror_thread.isRunning():
             self.mirror_thread.stop_mirror()
             self.tab_mirror.update_status("중지 중...")
+
+    def _stop_mirror_sync(self):
+        """★ 설정/보정 탭에서 LED 연결 전 호출 — 미러링을 완전히 종료하고 대기.
+
+        MirrorThread의 finally 블록에서 device.disconnect()가 실행될 때까지
+        최대 2초 블로킹 대기하여 USB 자원이 확실히 해제된 뒤 다음 연결이
+        진행되도록 합니다.
+        """
+        if self.mirror_thread and self.mirror_thread.isRunning():
+            self.mirror_thread.stop_mirror()
+            self.mirror_thread.wait(2000)  # 최대 2초 대기
+            self.tab_mirror.update_status("설정 모드 진입으로 중지됨")
 
     def _on_mirror_finished(self):
         self.tab_mirror.set_running_state(False)
@@ -191,7 +211,7 @@ class MainWindow(QMainWindow):
                 and minimize and QSystemTrayIcon.isSystemTrayAvailable()):
             event.ignore()
             self.hide()
-            
+
             # --- 변수값이 False일 때만 1회 알림을 띄우고 True로 변경 ---
             if not self._has_shown_tray_message:
                 self.tray.showMessage(
