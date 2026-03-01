@@ -76,6 +76,14 @@
     "decay_radius": 0.3,
     "parallel_penalty": 5.0,
     "smoothing_factor": 0.5,
-    "brightness": 1.0
+    "brightness": 1.0,
+    "orientation": "auto",
+    "portrait_rotation": "cw"
+  },
+  "options": {
+    "tray_enabled": true,
+    "hotkey_enabled": true,
+    "minimize_to_tray": true,
+    "auto_start_mirror": true
   }
 }

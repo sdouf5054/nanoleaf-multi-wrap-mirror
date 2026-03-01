@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 mirror_debug.log
 NanoleafMirror.lnk
+build/
+dist/
+*.spec

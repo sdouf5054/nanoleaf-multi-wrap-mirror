@@ -130,6 +130,10 @@ class OptionsTab(QWidget):
         self.chk_startup.setChecked(_is_startup_registered())
         startup_layout.addWidget(self.chk_startup)
 
+        self.chk_auto_mirror = QCheckBox("실행 시 미러링 자동 시작")
+        self.chk_auto_mirror.setChecked(self.opt.get("auto_start_mirror", False))
+        startup_layout.addWidget(self.chk_auto_mirror)
+
         startup_note = QLabel("※ 시작프로그램 폴더에 바로가기를 생성합니다.")
         startup_note.setStyleSheet("color: #888;")
         startup_layout.addWidget(startup_note)
@@ -155,6 +159,7 @@ class OptionsTab(QWidget):
         self.opt["tray_enabled"] = self.chk_tray.isChecked()
         self.opt["hotkey_enabled"] = self.chk_hotkey.isChecked()
         self.opt["minimize_to_tray"] = self.chk_minimize.isChecked()
+        self.opt["auto_start_mirror"] = self.chk_auto_mirror.isChecked()
         save_config(self.config)
 
         # 시작프로그램 등록/해제
