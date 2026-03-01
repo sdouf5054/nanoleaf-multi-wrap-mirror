@@ -1,6 +1,7 @@
 """시스템 트레이 아이콘 + 글로벌 핫키"""
 
 import os
+import sys
 from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QWidgetAction, QSlider, QLabel, QHBoxLayout, QWidget
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt, QTimer
@@ -26,10 +27,15 @@ class SystemTray(QSystemTrayIcon):
     """
 
     def __init__(self, main_window, parent=None):
-        # 아이콘 로드
-        icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "assets", "icon.png"
-        )
+        # PyInstaller 실행 환경 분기 처리
+        # exe 실행 시: 리소스는 _MEIPASS 임시 폴더에서 찾음
+        # 스크립트 실행 시: 프로젝트 루트 assets 폴더에서 찾음
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.dirname(__file__))
+
+        icon_path = os.path.join(base_path, "assets", "icon.png")
         if os.path.exists(icon_path):
             icon = QIcon(icon_path)
         else:

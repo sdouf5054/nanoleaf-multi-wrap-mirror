@@ -3,6 +3,7 @@
 import json
 import os
 import copy
+import sys
 
 DEFAULT_CONFIG = {
     "device": {
@@ -56,8 +57,13 @@ DEFAULT_CONFIG = {
 
 
 def _config_path():
-    """config.json 경로 — 실행 파일과 같은 디렉토리"""
-    return os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+    """config.json 경로 — exe 실행 시 exe 폴더, 스크립트 실행 시 루트 폴더"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller로 빌드된 exe: 임시 _MEIPASS가 아닌 실제 exe 위치에 저장
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+    return os.path.join(base_dir, "config.json")
 
 
 def load_config():

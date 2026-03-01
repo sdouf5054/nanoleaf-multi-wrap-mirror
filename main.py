@@ -26,7 +26,11 @@ except Exception:
         pass
 
 # === 3) 작업 디렉토리를 main.py 위치로 강제 설정 ===
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+# PyInstaller exe 실행 시 sys.executable 기준, 스크립트 실행 시 __file__ 기준
+if getattr(sys, 'frozen', False):
+    os.chdir(os.path.dirname(sys.executable))
+else:
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # === 4) Windows 콘솔 창 숨기기 (python.exe로 실행해도 콘솔 안 보임) ===
 try:
@@ -46,6 +50,10 @@ from ui.main_window import MainWindow
 
 def main():
     app = QApplication(sys.argv)
+
+    # 마지막 창이 닫혀도 프로그램이 종료되지 않도록 설정 (트레이 대기용)
+    app.setQuitOnLastWindowClosed(False)
+
     app.setStyle("Fusion")
 
     # DPI 스케일 팩터 계산
