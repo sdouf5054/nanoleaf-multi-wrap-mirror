@@ -99,6 +99,19 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def nativeEvent(self, eventType, message):
+        """OS에서 전달된 메시지를 가로채어 처리합니다."""
+        try:
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            if msg.message == 0x8001:  # 중복 실행 시 main.py에서 보낸 신호
+                self.showNormal()      # 최소화 해제 및 창 표시
+                self.activateWindow()  # 창 활성화
+                self.raise_()          # 창을 최상단으로 끌어올림
+                return True, 0
+        except Exception:
+            pass
+        return super().nativeEvent(eventType, message)
+
     def _start_mirror(self):
         """미러링 시작"""
         self.tab_mirror.apply_to_config()
