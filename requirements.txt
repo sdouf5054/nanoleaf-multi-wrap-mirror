@@ -1,0 +1,7 @@
+hidapi
+dxcam
+numpy
+opencv-python
+PyQt5
+keyboard
+Pillow
