@@ -35,7 +35,7 @@ class SystemTray(QSystemTrayIcon):
         else:
             base_path = os.path.dirname(os.path.dirname(__file__))
 
-        icon_path = os.path.join(base_path, "assets", "icon.png")
+        icon_path = os.path.join(base_path, "assets", "icon.ico")
         if os.path.exists(icon_path):
             icon = QIcon(icon_path)
         else:

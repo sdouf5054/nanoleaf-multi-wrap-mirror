@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
             self.tray.showMessage(
                 "Nanoleaf Mirror",
                 "트레이에서 실행 중입니다. 우클릭으로 제어하세요.",
-                QSystemTrayIcon.Information,
+                self.tray.icon(),
                 2000
             )
         else:
@@ -204,3 +204,4 @@ class MainWindow(QMainWindow):
             pass
         self.tab_mirror.apply_to_config()
         save_config(self.config)
+        QApplication.instance().quit()

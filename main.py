@@ -44,17 +44,37 @@ QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
 QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QIcon  # 앱 아이콘 설정을 위해 추가
 from core.config import load_config
 from ui.main_window import MainWindow
 
 
 def main():
+    # === 6) Windows에 독립된 앱으로 인식시키기 (알림창 이름 & 아이콘 캐시 우회) ===
+    # python.exe 프로세스로 묶이지 않도록 고유 앱 ID 부여
+    try:
+        myappid = 'NanoleafMirror'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
 
     # 마지막 창이 닫혀도 프로그램이 종료되지 않도록 설정 (트레이 대기용)
     app.setQuitOnLastWindowClosed(False)
 
     app.setStyle("Fusion")
+
+    # === 7) 프로그램 전체 아이콘 설정 (작업 표시줄, 알림창 등) ===
+    # PyInstaller exe: sys._MEIPASS, 스크립트 실행: __file__ 기준 경로
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    icon_path = os.path.join(base_path, "assets", "icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     # DPI 스케일 팩터 계산
     screen = app.primaryScreen()
