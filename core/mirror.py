@@ -71,11 +71,20 @@ class MirrorThread(QThread):
                 orientation=mirror_cfg.get("orientation", "auto"),
                 portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
             )
+            # 변별 파라미터: per_side가 있으면 기본값과 병합
+            base_decay = mirror_cfg["decay_radius"]
+            per_decay = mirror_cfg.get("decay_radius_per_side", {})
+            decay_param = {s: per_decay.get(s, base_decay) for s in ("top", "bottom", "left", "right")} if per_decay else base_decay
+
+            base_penalty = mirror_cfg["parallel_penalty"]
+            per_penalty = mirror_cfg.get("parallel_penalty_per_side", {})
+            penalty_param = {s: per_penalty.get(s, base_penalty) for s in ("top", "bottom", "left", "right")} if per_penalty else base_penalty
+
             weight_matrix = build_weight_matrix(
                 capture.screen_w, capture.screen_h,
                 led_positions, led_sides,
                 mirror_cfg["grid_cols"], mirror_cfg["grid_rows"],
-                mirror_cfg["decay_radius"], mirror_cfg["parallel_penalty"]
+                decay_param, penalty_param
             )
             logging.debug(f"weight_matrix: {weight_matrix.shape}, sum[0]: {weight_matrix[0].sum():.3f}")
 

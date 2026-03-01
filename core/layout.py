@@ -100,6 +100,10 @@ def build_weight_matrix(screen_w, screen_h, led_positions, led_sides,
     """
     타원형 감쇠 가중치 행렬.
     변에 수직 방향은 넓게, 평행 방향은 좁게.
+
+    decay_radius / parallel_penalty:
+        float → 모든 변에 동일 적용
+        dict  → {"top": v, "bottom": v, "left": v, "right": v} 변별 값
     """
     n_leds = led_positions.shape[0]
     n_cells = grid_rows * grid_cols
@@ -112,7 +116,12 @@ def build_weight_matrix(screen_w, screen_h, led_positions, led_sides,
             cell_centers[r * grid_cols + c] = [(c + 0.5) * cell_w, (r + 0.5) * cell_h]
 
     diag = np.sqrt(screen_w ** 2 + screen_h ** 2)
-    max_dist = diag * decay_radius
+
+    # 변별 값 해석 헬퍼
+    def _get(param, side, default):
+        if isinstance(param, dict):
+            return param.get(side, default)
+        return param
 
     weight_matrix = np.zeros((n_leds, n_cells), dtype=np.float32)
 
@@ -122,10 +131,14 @@ def build_weight_matrix(screen_w, screen_h, led_positions, led_sides,
         dy = cell_centers[:, 1] - led_pos[1]
 
         side = led_sides[i]
+        pp = _get(parallel_penalty, side, 5.0)
+        dr = _get(decay_radius, side, 0.3)
+        max_dist = diag * dr
+
         if side in ("top", "bottom"):
-            distances = np.sqrt((dx * parallel_penalty) ** 2 + dy ** 2)
+            distances = np.sqrt((dx * pp) ** 2 + dy ** 2)
         elif side in ("left", "right"):
-            distances = np.sqrt(dx ** 2 + (dy * parallel_penalty) ** 2)
+            distances = np.sqrt(dx ** 2 + (dy * pp) ** 2)
         else:
             distances = np.sqrt(dx ** 2 + dy ** 2)
 

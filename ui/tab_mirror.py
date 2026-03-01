@@ -130,6 +130,48 @@ class MirrorTab(QWidget):
         decay_row.addStretch()
         opt_layout.addLayout(decay_row)
 
+        # 변별 오버라이드
+        self.chk_per_side = QCheckBox("변별 값 사용")
+        per_decay = self.mirror_cfg.get("decay_radius_per_side", {})
+        per_penalty = self.mirror_cfg.get("parallel_penalty_per_side", {})
+        has_per_side = bool(per_decay or per_penalty)
+        self.chk_per_side.setChecked(has_per_side)
+        opt_layout.addWidget(self.chk_per_side)
+
+        from PyQt5.QtWidgets import QGridLayout
+        self.per_side_grid = QGridLayout()
+        sides = ["top", "bottom", "left", "right"]
+        side_labels = {"top": "상단", "bottom": "하단", "left": "좌측", "right": "우측"}
+
+        self.per_side_grid.addWidget(QLabel(""), 0, 0)
+        self.per_side_grid.addWidget(QLabel("감쇠 반경"), 0, 1)
+        self.per_side_grid.addWidget(QLabel("타원 페널티"), 0, 2)
+
+        self.spin_decay_per = {}
+        self.spin_penalty_per = {}
+        for row_i, side in enumerate(sides, 1):
+            self.per_side_grid.addWidget(QLabel(side_labels[side]), row_i, 0)
+
+            sp_d = QDoubleSpinBox()
+            sp_d.setRange(0.05, 1.0)
+            sp_d.setSingleStep(0.05)
+            sp_d.setValue(per_decay.get(side, self.mirror_cfg["decay_radius"]))
+            self.spin_decay_per[side] = sp_d
+            self.per_side_grid.addWidget(sp_d, row_i, 1)
+
+            sp_p = QDoubleSpinBox()
+            sp_p.setRange(1.0, 10.0)
+            sp_p.setSingleStep(0.5)
+            sp_p.setValue(per_penalty.get(side, self.mirror_cfg["parallel_penalty"]))
+            self.spin_penalty_per[side] = sp_p
+            self.per_side_grid.addWidget(sp_p, row_i, 2)
+
+        self.per_side_widget = QWidget()
+        self.per_side_widget.setLayout(self.per_side_grid)
+        self.per_side_widget.setVisible(has_per_side)
+        self.chk_per_side.stateChanged.connect(lambda s: self.per_side_widget.setVisible(bool(s)))
+        opt_layout.addWidget(self.per_side_widget)
+
         # 화면 방향
         orient_row = QHBoxLayout()
         orient_row.addWidget(QLabel("화면 방향:"))
@@ -171,6 +213,19 @@ class MirrorTab(QWidget):
         self.mirror_cfg["target_fps"] = self.spin_fps.value()
         self.mirror_cfg["decay_radius"] = self.spin_decay.value()
         self.mirror_cfg["parallel_penalty"] = self.spin_penalty.value()
+
+        # 변별 오버라이드
+        if self.chk_per_side.isChecked():
+            self.mirror_cfg["decay_radius_per_side"] = {
+                side: self.spin_decay_per[side].value() for side in self.spin_decay_per
+            }
+            self.mirror_cfg["parallel_penalty_per_side"] = {
+                side: self.spin_penalty_per[side].value() for side in self.spin_penalty_per
+            }
+        else:
+            self.mirror_cfg["decay_radius_per_side"] = {}
+            self.mirror_cfg["parallel_penalty_per_side"] = {}
+
         orient_map = {0: "auto", 1: "landscape", 2: "portrait"}
         self.mirror_cfg["orientation"] = orient_map.get(
             self.combo_orientation.currentIndex(), "auto"
@@ -187,6 +242,8 @@ class MirrorTab(QWidget):
         self.spin_fps.setEnabled(not running)
         self.spin_decay.setEnabled(not running)
         self.spin_penalty.setEnabled(not running)
+        self.chk_per_side.setEnabled(not running)
+        self.per_side_widget.setEnabled(not running)
         self.combo_orientation.setEnabled(not running)
         self.combo_rotation.setEnabled(not running)
 

@@ -43,6 +43,8 @@ DEFAULT_CONFIG = {
         "grid_rows": 32,
         "decay_radius": 0.30,
         "parallel_penalty": 5.0,
+        "decay_radius_per_side": {},
+        "parallel_penalty_per_side": {},
         "smoothing_factor": 0.5,
         "brightness": 1.0,
         "orientation": "auto",

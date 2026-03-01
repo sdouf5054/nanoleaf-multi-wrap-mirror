@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
         self.config = config
         self.mirror_thread = None
         self._force_quit = False
+        self._has_shown_tray_message = False
 
         self.setWindowTitle("Nanoleaf Screen Mirror")
         self.setMinimumSize(700, 780)
@@ -190,12 +191,16 @@ class MainWindow(QMainWindow):
                 and minimize and QSystemTrayIcon.isSystemTrayAvailable()):
             event.ignore()
             self.hide()
-            self.tray.showMessage(
-                "Nanoleaf Mirror",
-                "트레이에서 실행 중입니다. 우클릭으로 제어하세요.",
-                self.tray.icon(),
-                2000
-            )
+            
+            # --- 변수값이 False일 때만 1회 알림을 띄우고 True로 변경 ---
+            if not self._has_shown_tray_message:
+                self.tray.showMessage(
+                    "Nanoleaf Mirror",
+                    "트레이에서 실행 중입니다. 우클릭으로 제어하세요.",
+                    self.tray.icon(),
+                    2000
+                )
+                self._has_shown_tray_message = True
         else:
             self._shutdown()
             event.accept()
