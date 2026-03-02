@@ -74,7 +74,6 @@ class MainWindow(QMainWindow):
         self.tray = SystemTray(self)
         if QSystemTrayIcon.isSystemTrayAvailable() and opts.get("tray_enabled", True):
             self.tray.show()
-        # 핫키 설정 존중
         if not opts.get("hotkey_enabled", True):
             self.tray.cleanup()
 
@@ -89,7 +88,6 @@ class MainWindow(QMainWindow):
             self._on_smoothing_changed
         )
 
-        # ★ LED 설정 탭 / 색상 보정 탭에서 연결 시도 전 미러링 중지 요청
         self.tab_setup.request_mirror_stop.connect(self._stop_mirror_sync)
         self.tab_color.request_mirror_stop.connect(self._stop_mirror_sync)
 
@@ -105,21 +103,18 @@ class MainWindow(QMainWindow):
             pass
 
     def nativeEvent(self, eventType, message):
-        """OS에서 전달된 메시지를 가로채어 처리합니다."""
         try:
             msg = ctypes.wintypes.MSG.from_address(int(message))
-            if msg.message == 0x8001:  # 중복 실행 시 main.py에서 보낸 신호
-                self.showNormal()      # 최소화 해제 및 창 표시
-                self.activateWindow()  # 창 활성화
-                self.raise_()          # 창을 최상단으로 끌어올림
+            if msg.message == 0x8001:
+                self.showNormal()
+                self.activateWindow()
+                self.raise_()
                 return True, 0
         except Exception:
             pass
         return super().nativeEvent(eventType, message)
 
     def _start_mirror(self):
-        """미러링 시작"""
-        # ★ 미러링 시작 전 설정/보정 탭의 LED 연결을 강제 해제하여 USB 충돌 방지
         self.tab_setup.force_disconnect()
         self.tab_color.force_disconnect()
 
@@ -149,15 +144,9 @@ class MainWindow(QMainWindow):
             self.tab_mirror.update_status("중지 중...")
 
     def _stop_mirror_sync(self):
-        """★ 설정/보정 탭에서 LED 연결 전 호출 — 미러링을 완전히 종료하고 대기.
-
-        MirrorThread의 finally 블록에서 device.disconnect()가 실행될 때까지
-        최대 2초 블로킹 대기하여 USB 자원이 확실히 해제된 뒤 다음 연결이
-        진행되도록 합니다.
-        """
         if self.mirror_thread and self.mirror_thread.isRunning():
             self.mirror_thread.stop_mirror()
-            self.mirror_thread.wait(2000)  # 최대 2초 대기
+            self.mirror_thread.wait(2000)
             self.tab_mirror.update_status("설정 모드 진입으로 중지됨")
 
     def _on_mirror_finished(self):
@@ -185,20 +174,26 @@ class MainWindow(QMainWindow):
             self.mirror_thread.smoothing_enabled = bool(state)
 
     def _on_session_event(self, event):
-        """잠금/해제 이벤트 처리"""
+        """잠금/해제 이벤트 처리 — turn_off_on_lock 옵션 반영"""
+        opts = self.config.get("options", {})
+        turn_off_enabled = opts.get("turn_off_on_lock", True)  # ★ 옵션값 확인
+
         if event == "lock":
-            if self.mirror_thread and self.mirror_thread.isRunning():
+            # ★ 옵션이 켜져 있을 때만 미러링 중지
+            if turn_off_enabled and self.mirror_thread and self.mirror_thread.isRunning():
                 self._was_mirroring_before_lock = True
                 self._stop_mirror()
                 self.statusBar().showMessage("잠금 감지 — 미러링 중지")
+            # 옵션 꺼진 경우: 아무 동작 안 함 (미러링 계속 실행)
+
         elif event == "unlock":
+            # ★ 옵션에 의해 중지된 경우에만 재시작
             if self._was_mirroring_before_lock:
                 self._was_mirroring_before_lock = False
                 QTimer.singleShot(3000, self._start_mirror)
                 self.statusBar().showMessage("잠금 해제 — 3초 후 미러링 재시작")
 
     def closeEvent(self, event):
-        """X 버튼: 옵션에 따라 트레이 최소화 또는 종료"""
         if self._force_quit:
             self._shutdown()
             event.accept()
@@ -212,7 +207,6 @@ class MainWindow(QMainWindow):
             event.ignore()
             self.hide()
 
-            # --- 변수값이 False일 때만 1회 알림을 띄우고 True로 변경 ---
             if not self._has_shown_tray_message:
                 self.tray.showMessage(
                     "Nanoleaf Mirror",
@@ -226,7 +220,6 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def _shutdown(self):
-        """정리 후 종료"""
         if self.mirror_thread and self.mirror_thread.isRunning():
             self.mirror_thread.stop_mirror()
             self.mirror_thread.wait(3000)

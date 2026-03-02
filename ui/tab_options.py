@@ -34,13 +34,8 @@ def _register_startup():
     main_py = os.path.abspath("main.py")
     workdir = os.path.abspath(".")
 
-    # 1. 현재 이 코드를 실행 중인 파이썬의 폴더 경로를 추적
     current_python_dir = os.path.dirname(sys.executable)
-    
-    # 2. 해당 폴더 안에 있는 pythonw.exe(콘솔 숨김용)를 목표로 지정
     pythonw = os.path.join(current_python_dir, "pythonw.exe")
-    
-    # 3. 만약 pythonw.exe가 존재하지 않는 특수한 환경이라면 원래의 실행 파일로 대체
     if not os.path.exists(pythonw):
         pythonw = sys.executable
 
@@ -76,7 +71,6 @@ class OptionsTab(QWidget):
         self.config = config
         self.main_window = main_window
 
-        # config에 options 섹션 없으면 생성
         if "options" not in self.config:
             self.config["options"] = {
                 "tray_enabled": True,
@@ -127,6 +121,24 @@ class OptionsTab(QWidget):
 
         layout.addWidget(hotkey_group)
 
+        # === 잠금 화면 동작 ===  ★ 추가된 섹션
+        lock_group = QGroupBox("잠금 화면 동작")
+        lock_layout = QVBoxLayout(lock_group)
+
+        self.chk_lock_stop = QCheckBox("잠금 화면(Win+L) 시 미러링 자동 중지 및 LED 소등")
+        self.chk_lock_stop.setChecked(self.opt.get("turn_off_on_lock", True))
+        lock_layout.addWidget(self.chk_lock_stop)
+
+        lock_note = QLabel(
+            "• 체크 시: 잠금 화면 진입 시 LED가 꺼지고, 잠금 해제 후 자동으로 재시작됩니다.\n"
+            "• 해제 시: 잠금 화면에서도 미러링이 계속 실행됩니다."
+        )
+        lock_note.setStyleSheet("color: #888;")
+        lock_note.setWordWrap(True)
+        lock_layout.addWidget(lock_note)
+
+        layout.addWidget(lock_group)
+
         # === 시작프로그램 ===
         startup_group = QGroupBox("Windows 시작프로그램")
         startup_layout = QVBoxLayout(startup_group)
@@ -165,6 +177,7 @@ class OptionsTab(QWidget):
         self.opt["hotkey_enabled"] = self.chk_hotkey.isChecked()
         self.opt["minimize_to_tray"] = self.chk_minimize.isChecked()
         self.opt["auto_start_mirror"] = self.chk_auto_mirror.isChecked()
+        self.opt["turn_off_on_lock"] = self.chk_lock_stop.isChecked()  # ★ 추가
         save_config(self.config)
 
         # 시작프로그램 등록/해제
