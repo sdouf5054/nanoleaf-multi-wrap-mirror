@@ -26,17 +26,22 @@ def _is_startup_registered():
 
 def _register_startup():
     """Windows 시작프로그램에 바로가기 생성 (pythonw, PowerShell 사용)"""
-    import shutil
+    import os
+    import sys
     import subprocess
 
     shortcut_path = _startup_shortcut_path()
     main_py = os.path.abspath("main.py")
     workdir = os.path.abspath(".")
 
-    # python.exe 사용 (pythonw는 dxcam 호환 문제)
-    # 콘솔은 main.py에서 ctypes로 숨김
-    pythonw = shutil.which("python")
-    if not pythonw:
+    # 1. 현재 이 코드를 실행 중인 파이썬의 폴더 경로를 추적
+    current_python_dir = os.path.dirname(sys.executable)
+    
+    # 2. 해당 폴더 안에 있는 pythonw.exe(콘솔 숨김용)를 목표로 지정
+    pythonw = os.path.join(current_python_dir, "pythonw.exe")
+    
+    # 3. 만약 pythonw.exe가 존재하지 않는 특수한 환경이라면 원래의 실행 파일로 대체
+    if not os.path.exists(pythonw):
         pythonw = sys.executable
 
     ps_script = (
