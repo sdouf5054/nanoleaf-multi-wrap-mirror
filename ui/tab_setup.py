@@ -27,28 +27,44 @@ class LedScanThread(QThread):
         self._current = 0
         self._paused = False
         self._step_request = 0
+        self._jump_request = -1  # ★ 직접 번호 입력 점프용
 
     def run(self):
         self._current = 0
-        while self._running and self._current < self.led_count:
-            self._light_single(self._current)
-            self.led_changed.emit(self._current)
+        # ★ USB 기기 안정화 대기: 이전 스레드의 turn_off() 명령이
+        #   물리적으로 처리될 시간을 확보하여 OSError 방지
+        time.sleep(0.1)
+        try:
+            while self._running and self._current < self.led_count:
+                self._light_single(self._current)
+                self.led_changed.emit(self._current)
 
-            while self._running:
-                if self._step_request != 0:
-                    self._current += self._step_request
-                    self._current = max(0, min(self._current, self.led_count - 1))
-                    self._step_request = 0
-                    break
-                if not self._paused:
-                    time.sleep(self.delay_ms / 1000.0)
-                    self._current += 1
-                    break
-                time.sleep(0.05)
-
-        if self.device and self.device.connected:
-            self.device.turn_off()
-        self.finished_scan.emit()
+                while self._running:
+                    # ★ 점프 요청 우선 처리
+                    if self._jump_request != -1:
+                        self._current = max(0, min(self._jump_request, self.led_count - 1))
+                        self._jump_request = -1
+                        break
+                    if self._step_request != 0:
+                        self._current += self._step_request
+                        self._current = max(0, min(self._current, self.led_count - 1))
+                        self._step_request = 0
+                        break
+                    if not self._paused:
+                        time.sleep(self.delay_ms / 1000.0)
+                        self._current += 1
+                        break
+                    time.sleep(0.05)
+        except Exception:
+            # ★ 예상치 못한 에러가 C++ 런타임까지 전파되는 것을 차단
+            pass
+        finally:
+            if self.device and self.device.connected:
+                try:
+                    self.device.turn_off()
+                except Exception:
+                    pass
+            self.finished_scan.emit()
 
     def _light_single(self, idx):
         if not self.device or not self.device.connected:
@@ -58,6 +74,10 @@ class LedScanThread(QThread):
         data[idx * 3 + 1] = 255
         data[idx * 3 + 2] = 255
         self.device.send_rgb(bytes(data))
+
+    def jump_to(self, idx):
+        """★ 특정 LED 번호로 즉시 이동"""
+        self._jump_request = idx
 
     def step_forward(self):
         self._step_request = 1
@@ -177,9 +197,17 @@ class SetupTab(QWidget):
 
         led_display = QHBoxLayout()
         led_display.addWidget(QLabel("현재 LED:"))
-        self.lbl_current_led = QLabel("—")
-        self.lbl_current_led.setStyleSheet("font-size: 28px; font-weight: bold; color: #2980b9;")
-        led_display.addWidget(self.lbl_current_led)
+
+        # ★ QLabel → QSpinBox: 직접 번호 입력으로 즉시 이동 가능
+        self.spin_current_led = QSpinBox()
+        self.spin_current_led.setRange(0, 999)  # 스캔 시작 시 실제 LED 수로 조정
+        self.spin_current_led.setFixedWidth(90)
+        self.spin_current_led.setStyleSheet(
+            "font-size: 20px; font-weight: bold; color: #2980b9;"
+        )
+        self.spin_current_led.setEnabled(False)  # 스캔 중에만 활성화
+        self.spin_current_led.valueChanged.connect(self._on_spin_value_changed)
+        led_display.addWidget(self.spin_current_led)
 
         self.btn_mark_corner = QPushButton("📌 이 LED를 코너로 기록")
         self.btn_mark_corner.clicked.connect(self._mark_corner)
@@ -330,9 +358,14 @@ class SetupTab(QWidget):
     def _start_scan(self, paused=False):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop_scan()
-            self.scan_thread.wait(1000)
+            # ★ 크래시 방지: 제한 없이 스레드가 완전히 종료될 때까지 대기
+            self.scan_thread.wait()
 
         led_count = self.spin_led_count.value()
+        # ★ SpinBox 범위를 실제 LED 수에 맞게 조정
+        self.spin_current_led.setRange(0, led_count - 1)
+        self.spin_current_led.setValue(0)
+
         self.scan_thread = LedScanThread(self.device, led_count, delay_ms=400)
         self.scan_thread.set_paused(paused)
         self.scan_thread.led_changed.connect(self._on_led_changed)
@@ -344,13 +377,18 @@ class SetupTab(QWidget):
         self.btn_prev.setEnabled(True)
         self.btn_next.setEnabled(True)
         self.btn_mark_corner.setEnabled(True)
+        self.spin_current_led.setEnabled(True)  # ★ 스캔 시작 시 입력 활성화
         self.scan_thread.start()
 
     def _stop_scan(self):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop_scan()
-            self.scan_thread.wait(1000)
-        self._on_scan_finished()
+            # ★ 크래시 방지: 강제로 _on_scan_finished()를 즉시 호출하지 않고
+            #   스레드가 finally 블록에서 finished_scan 시그널을 보낼 때까지 대기.
+            #   (중지 버튼 직후 재시작 버튼 연타 시 C++ 객체 파괴 충돌 방지)
+            self.btn_scan_stop.setEnabled(False)
+        else:
+            self._on_scan_finished()
 
     def _on_scan_finished(self):
         self.btn_scan_start.setEnabled(True)
@@ -359,9 +397,18 @@ class SetupTab(QWidget):
         self.btn_prev.setEnabled(False)
         self.btn_next.setEnabled(False)
         self.btn_mark_corner.setEnabled(False)
+        self.spin_current_led.setEnabled(False)  # ★ 스캔 종료 시 입력 비활성화
+
+    def _on_spin_value_changed(self, value):
+        """★ 사용자가 SpinBox에 직접 숫자를 입력했을 때 해당 LED로 점프"""
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.jump_to(value)
 
     def _on_led_changed(self, idx):
-        self.lbl_current_led.setText(str(idx))
+        # ★ 스레드→UI→스레드 무한루프 방지: 시그널 일시 차단 후 값 설정
+        self.spin_current_led.blockSignals(True)
+        self.spin_current_led.setValue(idx)
+        self.spin_current_led.blockSignals(False)
 
     def _step_forward(self):
         if self.scan_thread and self.scan_thread.isRunning():
@@ -372,9 +419,8 @@ class SetupTab(QWidget):
             self.scan_thread.step_backward()
 
     def _mark_corner(self):
-        led_idx = self.lbl_current_led.text()
-        if led_idx == "—":
-            return
+        # ★ QLabel.text() 대신 QSpinBox.value() 사용
+        led_idx = str(self.spin_current_led.value())
         for row in range(self.N_WRAPS):
             for col in range(5):
                 item = self.corner_table.item(row, col)
@@ -465,7 +511,9 @@ class SetupTab(QWidget):
         QMessageBox.information(self, "저장", "LED 설정이 저장되었습니다.")
 
     def cleanup(self):
-        self._stop_scan()
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.stop_scan()
+            self.scan_thread.wait(2000)
         if self.device and self.device.connected:
             try:
                 self.device.turn_off()

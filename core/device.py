@@ -48,12 +48,18 @@ class NanoleafDevice:
             if len(chunk) < REPORT_DATA_SIZE:
                 chunk += bytes(REPORT_DATA_SIZE - len(chunk))
             chunks.append(chunk)
-        for chunk in chunks:
-            self.device.write(bytes([0x00]) + chunk)
-        self.device.set_nonblocking(0)
-        self.device.read(64, timeout_ms=50)
-        self.device.set_nonblocking(1)
-        self._flush()
+
+        # ★ USB 통신 병목·응답 지연으로 발생하는 OSError를 흡수하여 크래시 방지
+        try:
+            for chunk in chunks:
+                self.device.write(bytes([0x00]) + chunk)
+            self.device.set_nonblocking(0)
+            self.device.read(64, timeout_ms=50)
+            self.device.set_nonblocking(1)
+            self._flush()
+        except OSError:
+            # 일시적인 하드웨어 응답 지연: 해당 전송만 스킵하고 계속 진행
+            pass
 
     def set_all_color(self, r, g, b):
         """모든 LED를 단일 색으로 설정 (GRB 순서)"""
