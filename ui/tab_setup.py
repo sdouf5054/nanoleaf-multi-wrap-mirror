@@ -437,17 +437,29 @@ class SetupTab(QWidget):
         if len(all_corners) < 2:
             return True, ""
 
-        is_desc = all_corners[0] > all_corners[1]
+        # 1. 값이 처음으로 달라지는 구간 기준으로 전체 방향 결정
+        #    (중복값은 방향 판단에서 건너뜀)
+        direction = 0  # 0: 모두 동일, 1: 오름차순, -1: 내림차순
         for i in range(1, len(all_corners)):
-            if is_desc and all_corners[i] >= all_corners[i - 1]:
+            if all_corners[i] > all_corners[i - 1]:
+                direction = 1
+                break
+            elif all_corners[i] < all_corners[i - 1]:
+                direction = -1
+                break
+
+        # 2. 역방향으로 꺾이는 경우만 차단 (중복값은 허용)
+        #    예) 끝점==좌하(29,29), 끝점==우하(0,0) 같은 경계값 중복 허용
+        for i in range(1, len(all_corners)):
+            if direction == 1 and all_corners[i] < all_corners[i - 1]:
                 return False, (
-                    f"내림차순이 예상되나 {all_corners[i-1]} 다음에 "
+                    f"오름차순이 예상되나 {all_corners[i-1]} 다음에 "
                     f"{all_corners[i]}이(가) 있습니다.\n"
                     f"전체: {all_corners}"
                 )
-            if not is_desc and all_corners[i] <= all_corners[i - 1]:
+            if direction == -1 and all_corners[i] > all_corners[i - 1]:
                 return False, (
-                    f"오름차순이 예상되나 {all_corners[i-1]} 다음에 "
+                    f"내림차순이 예상되나 {all_corners[i-1]} 다음에 "
                     f"{all_corners[i]}이(가) 있습니다.\n"
                     f"전체: {all_corners}"
                 )
