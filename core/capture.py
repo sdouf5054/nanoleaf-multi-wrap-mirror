@@ -44,7 +44,8 @@ class ScreenCapture:
         while time.time() < deadline:
             try:
                 if self.camera is None:
-                    self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_index)
+                    # max_buffer_len=2 를 추가하여 메모리 점유율 대폭 축소
+                    self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_index, max_buffer_len=2)
                     attempt += 1
 
                 # 해상도 확인용으로 grab() 1회 사용
@@ -111,7 +112,7 @@ class ScreenCapture:
         """dxcam 재생성"""
         self._destroy_camera()
         try:
-            self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_index)
+            self.camera = dxcam.create(device_idx=0, output_idx=self.monitor_index, max_buffer_len=2)
             # 재생성 후 연속 모드도 재시작
             self._start_continuous(getattr(self, '_target_fps', 60))
         except Exception:
