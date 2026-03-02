@@ -55,11 +55,19 @@ def get_led_positions(screen_w, screen_h, segments, led_count, orientation="auto
 
     for seg in segments:
         start, end, side = seg["start"], seg["end"], seg["side"]
-        n = start - end
-        if n <= 0:
+
+        # ★ 절대값으로 길이 계산 → 오름차순/내림차순 모두 정확히 처리
+        n = abs(start - end)
+
+        # ★ 길이 0인 세그먼트(중복 코너)는 안전하게 스킵
+        if n == 0:
             continue
+
+        # ★ 진행 방향에 따른 step 결정 (내림차순: -1, 오름차순: +1)
+        step = -1 if start > end else 1
+
         for i in range(n):
-            led_idx = start - i
+            led_idx = start + (step * i)
             t = (i + 0.5) / n
             if side == "left":
                 x, y = 0, screen_h * (1 - t)
