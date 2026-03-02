@@ -54,7 +54,7 @@ class NanoleafDevice:
             for chunk in chunks:
                 self.device.write(bytes([0x00]) + chunk)
             self.device.set_nonblocking(0)
-            self.device.read(64, timeout_ms=50)
+            self.device.read(64, timeout_ms=30)
             self.device.set_nonblocking(1)
             self._flush()
         except OSError:

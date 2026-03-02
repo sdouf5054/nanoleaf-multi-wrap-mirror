@@ -5,8 +5,13 @@ import cv2
 
 
 def downsample_frame(frame, grid_rows, grid_cols):
-    """프레임을 grid 크기로 다운샘플 (cv2.resize INTER_AREA)"""
-    small = cv2.resize(frame, (grid_cols, grid_rows), interpolation=cv2.INTER_AREA)
+    """프레임을 grid 크기로 다운샘플
+
+    INTER_AREA → INTER_LINEAR 변경:
+    - INTER_AREA: 전체 픽셀을 평균 내는 정밀 축소 → 연산량 매우 높음
+    - INTER_LINEAR: 선형 보간 축소 → 연산량 대폭 낮고 LED 조명 용도로 시각 차이 없음
+    """
+    small = cv2.resize(frame, (grid_cols, grid_rows), interpolation=cv2.INTER_LINEAR)
     return small.reshape(-1, 3).astype(np.float32)
 
 
@@ -45,7 +50,6 @@ def compute_led_colors(frame, weight_matrix, color_cfg, mirror_cfg,
     rgb_colors = rgb_norm * 255.0
 
     # 4. 비선형 채널 믹싱 (초록-노랑 구간 왜곡 방지)
-    # Green이 Red보다 강할 때만, 차이에 비례하여 Red에 추가
     R = rgb_colors[:, 0]
     G = rgb_colors[:, 1]
     R_add = np.maximum(0, G - R) * color_cfg["green_red_bleed"]

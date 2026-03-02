@@ -44,25 +44,33 @@ class MirrorThread(QThread):
         led_count = dev_cfg["led_count"]
         vendor_id = int(dev_cfg["vendor_id"], 16)
         product_id = int(dev_cfg["product_id"], 16)
+        target_fps = mirror_cfg["target_fps"]
 
         # --- 초기화 ---
         try:
             self.status_changed.emit("화면 캡처 초기화...")
             capture = ScreenCapture(mirror_cfg["monitor_index"])
-            capture.start()
+            # ★ target_fps를 넘겨 dxcam 백그라운드 캡처 주기를 미러링 FPS에 맞춤
+            #   초과 캡처(예: 120Hz 모니터에서 120회/초 캡처)를 막아 CPU 부하 감소
+            capture.start(target_fps=target_fps)
 
-            # 디버그 로그
+            # 디버그 프로파일 로그 — config["options"]["debug_profile"] 로 on/off
             import logging
-            logging.basicConfig(
-                filename=os.path.join(os.path.dirname(os.path.dirname(__file__)), "mirror_debug.log"),
-                level=logging.DEBUG, format="%(asctime)s %(message)s"
-            )
-            logging.debug(f"screen: {capture.screen_w}x{capture.screen_h}")
+            debug_profile = cfg.get("options", {}).get("debug_profile", False)
+            log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mirror_debug.log")
+            logger = logging.getLogger("nanoleaf.mirror")
+            if debug_profile:
+                logger.setLevel(logging.DEBUG)
+                if not logger.handlers:
+                    fh = logging.FileHandler(log_path, encoding="utf-8")
+                    fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+                    logger.addHandler(fh)
+                logger.propagate = False
+                logger.debug(f"screen: {capture.screen_w}x{capture.screen_h}")
+                logger.debug(f"capture target_fps: {target_fps}")
             test_frame = capture.grab()
-            if test_frame is not None:
-                logging.debug(f"frame shape: {test_frame.shape}, mean: {test_frame.mean():.1f}")
-            else:
-                logging.debug("grab() returned None")
+            if debug_profile and test_frame is not None:
+                logger.debug(f"frame shape: {test_frame.shape}, mean: {test_frame.mean():.1f}")
 
             self.status_changed.emit("가중치 행렬 생성...")
             led_positions, led_sides = get_led_positions(
@@ -86,12 +94,12 @@ class MirrorThread(QThread):
                 mirror_cfg["grid_cols"], mirror_cfg["grid_rows"],
                 decay_param, penalty_param
             )
-            logging.debug(f"weight_matrix: {weight_matrix.shape}, sum[0]: {weight_matrix[0].sum():.3f}")
+            if debug_profile: logger.debug(f"weight_matrix: {weight_matrix.shape}, sum[0]: {weight_matrix[0].sum():.3f}")
 
             self.status_changed.emit("Nanoleaf 연결 중...")
             device = NanoleafDevice(vendor_id, product_id, led_count)
             device.connect()
-            logging.debug("device connected")
+            if debug_profile: logger.debug("device connected")
 
         except Exception as e:
             self.error.emit(str(e))
@@ -105,7 +113,14 @@ class MirrorThread(QThread):
         frame_count = 0
         start_time = time.time()
         fps_display_time = start_time
-        frame_interval = 1.0 / mirror_cfg["target_fps"]
+        frame_interval = 1.0 / target_fps
+
+        # --- 구간별 타이밍 측정 (병목 분석용, debug_profile=True 일 때만 활성) ---
+        PROFILE_INTERVAL = 60
+        t_capture_acc = 0.0
+        t_color_acc   = 0.0
+        t_usb_acc     = 0.0
+        t_total_acc   = 0.0
 
         try:
             while self._running:
@@ -115,7 +130,13 @@ class MirrorThread(QThread):
                     time.sleep(0.05)
                     continue
 
+                # 캡처
+                if debug_profile:
+                    t0 = time.perf_counter()
                 frame = capture.grab()
+                if debug_profile:
+                    t_capture_acc += time.perf_counter() - t0
+
                 if frame is None:
                     time.sleep(0.005)
                     continue
@@ -127,19 +148,50 @@ class MirrorThread(QThread):
                     mirror_cfg["smoothing_factor"] if self.smoothing_enabled else 0.0
                 )
 
+                # 색상 연산
+                if debug_profile:
+                    t1 = time.perf_counter()
                 grb_data, rgb_colors = compute_led_colors(
                     frame, weight_matrix, color_cfg, mirror_cfg_live, prev_colors
                 )
                 prev_colors = rgb_colors
+                if debug_profile:
+                    t_color_acc += time.perf_counter() - t1
 
+                # USB 전송
+                if debug_profile:
+                    t2 = time.perf_counter()
                 device.send_rgb(grb_data)
+                if debug_profile:
+                    t_usb_acc += time.perf_counter() - t2
+
                 frame_count += 1
+                if debug_profile:
+                    t_total_acc += time.perf_counter() - loop_start
 
                 now = time.time()
                 if now - fps_display_time >= 1.0:
                     fps = frame_count / (now - start_time)
                     self.fps_updated.emit(fps)
                     fps_display_time = now
+
+                # PROFILE_INTERVAL 프레임마다 평균 ms 로그 출력 (debug_profile=True 시)
+                if debug_profile and frame_count % PROFILE_INTERVAL == 0:
+                    n = PROFILE_INTERVAL
+                    avg_cap   = t_capture_acc / n * 1000
+                    avg_color = t_color_acc   / n * 1000
+                    avg_usb   = t_usb_acc     / n * 1000
+                    avg_total = t_total_acc   / n * 1000
+                    avg_sleep = max(0, frame_interval - avg_total / 1000) * 1000
+                    logger.debug(
+                        f"[PROFILE] capture={avg_cap:.2f}ms  "
+                        f"color={avg_color:.2f}ms  "
+                        f"usb={avg_usb:.2f}ms  "
+                        f"total={avg_total:.2f}ms  "
+                        f"sleep≈{avg_sleep:.2f}ms  "
+                        f"fps={fps:.1f}"
+                    )
+                    t_capture_acc = t_color_acc = t_usb_acc = t_total_acc = 0.0
 
                 elapsed = time.perf_counter() - loop_start
                 sleep_time = frame_interval - elapsed

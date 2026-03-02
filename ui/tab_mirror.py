@@ -1,11 +1,14 @@
-"""미러링 탭 — 시작/중지, 밝기, 스무딩, FPS 표시"""
+"""미러링 탭 — 시작/중지, 밝기, 스무딩, FPS 표시 + 자원 모니터링"""
+
+import os
+import psutil  # ★ 자원 모니터링
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
     QLabel, QGroupBox, QCheckBox, QComboBox, QSpinBox,
     QDoubleSpinBox
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer  # ★ QTimer 추가
 
 
 class MirrorTab(QWidget):
@@ -14,6 +17,13 @@ class MirrorTab(QWidget):
         self.config = config
         self.mirror_cfg = config["mirror"]
         self._build_ui()
+
+        # ★ 자원 모니터링 타이머 (2초 주기)
+        self._process = psutil.Process(os.getpid())
+        self._process.cpu_percent()  # 첫 호출은 0 반환 — 기준값 초기화용
+        self._res_timer = QTimer(self)
+        self._res_timer.timeout.connect(self._update_resource_usage)
+        self._res_timer.start(2000)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -27,6 +37,20 @@ class MirrorTab(QWidget):
         status_layout.addWidget(self.status_label)
 
         status_layout.addStretch()
+
+        # ★ CPU 사용량
+        self.cpu_label = QLabel("CPU: --%")
+        self.cpu_label.setStyleSheet(
+            "font-size: 12px; color: #d35400; margin-right: 6px;"
+        )
+        status_layout.addWidget(self.cpu_label)
+
+        # ★ RAM 사용량
+        self.ram_label = QLabel("RAM: -- MB")
+        self.ram_label.setStyleSheet(
+            "font-size: 12px; color: #27ae60; margin-right: 10px;"
+        )
+        status_layout.addWidget(self.ram_label)
 
         self.fps_label = QLabel("— fps")
         self.fps_label.setStyleSheet("font-size: 14px; color: #888;")
@@ -196,6 +220,27 @@ class MirrorTab(QWidget):
 
     def _on_brightness_changed(self, value):
         self.brightness_label.setText(f"{value}%")
+
+    # ★ 자원 사용량 갱신
+    def _update_resource_usage(self):
+        try:
+            cpu = self._process.cpu_percent() / psutil.cpu_count()
+            ram_mb = self._process.memory_info().rss / (1024 * 1024)
+            self.cpu_label.setText(f"CPU: {cpu:.1f}%")
+            self.ram_label.setText(f"RAM: {ram_mb:.0f} MB")
+
+            # CPU 수치에 따라 색상으로 부하 수준 시각화
+            if cpu >= 20:
+                color = "#c0392b"   # 빨강 — 높음
+            elif cpu >= 10:
+                color = "#e67e22"   # 주황 — 보통
+            else:
+                color = "#d35400"   # 기본
+            self.cpu_label.setStyleSheet(
+                f"font-size: 12px; color: {color}; margin-right: 6px;"
+            )
+        except Exception:
+            pass
 
     def get_brightness(self):
         return self.brightness_slider.value() / 100.0
