@@ -1,10 +1,11 @@
 """미러링 루프 — QThread 기반 (디스플레이 변경·분리 대응 강화)
 
-[변경 사항 v3]
+[변경 사항 v4]
 - run()을 _init_resources(), _run_loop(), _cleanup()으로 분리
-- 초기화/루프/정리 단계가 명확하게 구분되어 유지보수 용이
-- 향후 실시간 파라미터 반영 확장의 기반
-- 기존 동작은 100% 동일하게 유지
+- 스레드 안전성: __init__에서 config를 deep copy하여 메인 스레드와 참조 분리
+  → 색상 탭 저장 등으로 config가 변경되어도 미러링 스레드에 영향 없음
+  → 실시간 반영이 필요한 brightness / smoothing은 별도 인스턴스 변수로 관리
+- USB 연결 끊김 감지 시 상태 알림 + 재연결 대기
 """
 
 import time
@@ -36,11 +37,15 @@ class MirrorThread(QThread):
 
     def __init__(self, config):
         super().__init__()
-        self.config = config
+        # ★ 스레드 안전성: config를 deep copy하여 메인 스레드와 참조 분리
+        #   메인 스레드에서 색상 탭 저장, 옵션 변경 등으로 config dict가
+        #   변경되어도 미러링 스레드에 영향을 주지 않습니다.
+        #   실시간 반영이 필요한 값(brightness, smoothing)은 별도 변수로 관리.
+        self.config = copy.deepcopy(config)
         self._stop_event = threading.Event()
         self._paused = False
 
-        # 외부에서 실시간 변경 가능한 값
+        # 외부에서 실시간 변경 가능한 값 (메인 스레드에서 직접 변경)
         self.brightness = config["mirror"]["brightness"]
         self.smoothing_enabled = True
 
@@ -313,6 +318,14 @@ class MirrorThread(QThread):
                 self._device.send_rgb(grb_data)
             except Exception:
                 pass
+
+            # ★ 재연결 실패 감지 — 장치가 완전히 끊긴 경우 상태 알림
+            if not self._device.connected:
+                self.status_changed.emit("USB 연결 끊김 — 재연결 대기 중...")
+                # 장치가 복구될 때까지 짧은 대기 후 재시도
+                if self._stop_event.wait(timeout=1.0):
+                    break
+                continue
 
             if self._debug_profile:
                 t_usb_acc += time.perf_counter() - t2

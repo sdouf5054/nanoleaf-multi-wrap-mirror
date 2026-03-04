@@ -1,4 +1,10 @@
-"""시스템 트레이 아이콘 + 글로벌 핫키"""
+"""시스템 트레이 아이콘 + 글로벌 핫키
+
+[변경 사항 v2]
+- keyboard.unhook_all() → 개별 remove_hotkey(handle)로 변경
+  → 다른 라이브러리/프로세스가 등록한 핫키에 영향 없음
+- 등록된 핫키 handle을 _hotkey_handles 리스트로 추적
+"""
 
 import os
 import sys
@@ -39,6 +45,9 @@ class SystemTray(QSystemTrayIcon):
         super().__init__(icon, parent)
         self.main_window = main_window
         self.setToolTip("Nanoleaf Screen Mirror")
+
+        # ★ 등록된 핫키 handle 추적 리스트
+        self._hotkey_handles = []
 
         self._build_menu()
         self._setup_hotkey()
@@ -82,17 +91,13 @@ class SystemTray(QSystemTrayIcon):
         if not HAS_KEYBOARD:
             return
 
-        # 기존 핫키 전부 해제
-        try:
-            keyboard.unhook_all()
-        except Exception:
-            pass
+        # ★ 기존에 등록한 핫키만 개별 해제
+        self._clear_hotkeys()
 
         opts = self.main_window.config.get("options", {})
         if not opts.get("hotkey_enabled", True):
             return
 
-        # 핫키 문자열 (config에 없으면 기존 기본값 사용)
         hk_toggle = opts.get("hotkey_toggle", "ctrl+shift+o")
         hk_up     = opts.get("hotkey_bright_up", "ctrl+shift+up")
         hk_down   = opts.get("hotkey_bright_down", "ctrl+shift+down")
@@ -102,16 +107,29 @@ class SystemTray(QSystemTrayIcon):
             if not hotkey_str.strip():
                 return
             try:
-                keyboard.add_hotkey(
+                handle = keyboard.add_hotkey(
                     hotkey_str.strip(),
                     lambda: QTimer.singleShot(0, callback)
                 )
+                self._hotkey_handles.append(handle)
             except Exception as e:
                 print(f"[핫키 등록 실패] '{hotkey_str}': {e}")
 
         _safe_add(hk_toggle, self._toggle_onoff)
         _safe_add(hk_up,     self._brightness_up)
         _safe_add(hk_down,   self._brightness_down)
+
+    def _clear_hotkeys(self):
+        """★ 등록된 핫키만 개별 해제 — 다른 핫키에 영향 없음."""
+        if not HAS_KEYBOARD:
+            return
+        for handle in self._hotkey_handles:
+            try:
+                keyboard.remove_hotkey(handle)
+            except (ValueError, KeyError):
+                # 이미 해제되었거나 유효하지 않은 handle — 무시
+                pass
+        self._hotkey_handles.clear()
 
     # ── 액션 ──────────────────────────────────────────────────────────
 
@@ -164,8 +182,5 @@ class SystemTray(QSystemTrayIcon):
         self.setToolTip(f"Nanoleaf Mirror — {text}")
 
     def cleanup(self):
-        if HAS_KEYBOARD:
-            try:
-                keyboard.unhook_all()
-            except Exception:
-                pass
+        """★ 앱 종료 시 등록된 핫키만 정리."""
+        self._clear_hotkeys()
