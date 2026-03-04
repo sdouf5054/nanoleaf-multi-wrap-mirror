@@ -8,7 +8,6 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
-from core.device import NanoleafDevice
 from core.config import save_config
 
 
@@ -25,6 +24,8 @@ TEST_COLORS = [
     ("주황",     255, 128, 0),
     ("따뜻한 백", 255, 220, 180),
 ]
+
+_OWNER = "color_tab"
 
 
 class ColorSliderRow(QWidget):
@@ -68,12 +69,16 @@ class ColorTab(QWidget):
     # ★ 미러링 중지 요청 시그널 — LED 연결 시도 전 MainWindow로 전송
     request_mirror_stop = pyqtSignal()
 
-    def __init__(self, config, parent=None):
+    def __init__(self, config, device_manager=None, parent=None):
         super().__init__(parent)
         self.config = config
         self.color_cfg = config["color"]
-        self.device = None
+        self.dm = device_manager  # ★ DeviceManager 주입
         self._current_test_rgb = (255, 255, 255)
+
+        # ★ DeviceManager의 강제 해제 시그널 수신 → UI 리셋
+        if self.dm:
+            self.dm.force_released.connect(self._on_force_released)
 
         self._build_ui()
 
@@ -106,7 +111,6 @@ class ColorTab(QWidget):
 
         # === 화이트밸런스 ===
         wb_group = QGroupBox("화이트밸런스")
-
         wb_layout = QVBoxLayout(wb_group)
 
         self.wb_r = ColorSliderRow("Red", 0.5, 1.5, self.color_cfg["wb_r"])
@@ -121,7 +125,6 @@ class ColorTab(QWidget):
 
         # === 감마 ===
         gamma_group = QGroupBox("감마")
-
         gamma_layout = QVBoxLayout(gamma_group)
 
         self.gamma_r = ColorSliderRow("Red", 0.5, 3.0, self.color_cfg["gamma_r"])
@@ -136,7 +139,6 @@ class ColorTab(QWidget):
 
         # === 채널 믹싱 ===
         mix_group = QGroupBox("채널 믹싱 (비선형)")
-
         mix_layout = QVBoxLayout(mix_group)
 
         self.bleed = ColorSliderRow(
@@ -149,7 +151,6 @@ class ColorTab(QWidget):
 
         # === 테스트 색상 ===
         test_group = QGroupBox("테스트 색상 (클릭하여 LED에 전송)")
-
         test_layout = QGridLayout(test_group)
 
         self.color_buttons = []
@@ -203,41 +204,54 @@ class ColorTab(QWidget):
 
         layout.addLayout(btn_layout)
 
+    # ── 연결 상태 UI 헬퍼 ───────────────────────────────────────────
+
+    def _set_connected_ui(self):
+        self.conn_label.setText("연결됨 ✅")
+        self.conn_label.setStyleSheet("color: #2d8c46;")
+        self.btn_connect.setText("🔌 연결 해제")
+
+    def _set_disconnected_ui(self):
+        self.conn_label.setText("연결 안 됨")
+        self.conn_label.setStyleSheet("color: #c0392b;")
+        self.btn_connect.setText("🔌 LED 연결")
+
+    # ── DeviceManager 이벤트 ────────────────────────────────────────
+
+    def _on_force_released(self, prev_owner):
+        """DeviceManager가 강제 해제했을 때 (미러링 시작 등)"""
+        if prev_owner == _OWNER:
+            self._set_disconnected_ui()
+
+    # ── 기존 인터페이스 호환 ────────────────────────────────────────
+
     def force_disconnect(self):
-        """★ 외부(MainWindow 등)에서 강제로 기기 연결을 해제하고 UI를 초기화합니다.
-        미러링 시작 시 MainWindow._start_mirror()에서 호출됩니다.
+        """★ MainWindow 등 외부에서 호출하는 강제 해제.
+        DeviceManager가 있으면 위임, 없으면 기존 동작 유지 (폴백).
         """
-        if self.device and self.device.connected:
-            try:
-                self.device.turn_off()
-            except Exception:
-                pass
-            self.device.disconnect()
-            self.device = None
-            self.conn_label.setText("연결 안 됨")
-            self.conn_label.setStyleSheet("color: #c0392b;")
-            self.btn_connect.setText("🔌 LED 연결")
+        if self.dm:
+            self.dm.release(_OWNER)
+            self._set_disconnected_ui()
 
     def _toggle_connection(self):
-        if self.device and self.device.connected:
-            self.force_disconnect()
+        if not self.dm:
+            return
+
+        if self.dm.is_connected and self.dm.owner == _OWNER:
+            # 현재 이 탭이 소유 중 → 해제
+            self.dm.release(_OWNER)
+            self._set_disconnected_ui()
         else:
-            # ★ 새 연결 전 미러링 강제 종료 요청 (MainWindow._stop_mirror_sync 호출)
+            # 새 연결 전 미러링 강제 종료 요청
             self.request_mirror_stop.emit()
 
             try:
-                dev_cfg = self.config["device"]
-                self.device = NanoleafDevice(
-                    int(dev_cfg["vendor_id"], 16),
-                    int(dev_cfg["product_id"], 16),
-                    dev_cfg["led_count"]
-                )
-                self.device.connect()
-                self.conn_label.setText("연결됨 ✅")
-                self.conn_label.setStyleSheet("color: #2d8c46;")
-                self.btn_connect.setText("🔌 연결 해제")
+                self.dm.acquire(_OWNER)
+                self._set_connected_ui()
             except Exception as e:
                 QMessageBox.warning(self, "연결 실패", str(e))
+
+    # ── 색상 보정 ──────────────────────────────────────────────────
 
     def _apply_correction(self, r, g, b):
         """단일 색상에 보정 파이프라인 적용 → 보정된 (R, G, B)"""
@@ -281,9 +295,9 @@ class ColorTab(QWidget):
         )
         self.preview_label.setText(f"({r},{g},{b}) → ({cr},{cg},{cb})")
 
-        # LED 전송
-        if self.device and self.device.connected:
-            self.device.set_all_color(cr, cg, cb)
+        # ★ DeviceManager를 통해 LED 전송
+        if self.dm and self.dm.is_connected and self.dm.owner == _OWNER:
+            self.dm.device.set_all_color(cr, cg, cb)
 
     def _on_value_changed(self, _=None):
         """슬라이더 변경 시 현재 테스트 색상 재전송"""
@@ -313,14 +327,10 @@ class ColorTab(QWidget):
         self.bleed.setValue(0.60)
 
     def _turn_off_leds(self):
-        if self.device and self.device.connected:
-            self.device.turn_off()
+        if self.dm and self.dm.is_connected and self.dm.owner == _OWNER:
+            self.dm.device.turn_off()
 
     def cleanup(self):
         """탭 닫힐 때 LED 연결 해제"""
-        if self.device and self.device.connected:
-            try:
-                self.device.turn_off()
-                self.device.disconnect()
-            except Exception:
-                pass
+        if self.dm:
+            self.dm.release(_OWNER)

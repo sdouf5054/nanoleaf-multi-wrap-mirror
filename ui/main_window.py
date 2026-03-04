@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QAbstractNativeEventFilter, QTimer
 from PyQt5.QtGui import QIcon
 
+from core.device_manager import DeviceManager
 from ui.tab_setup import SetupTab
 from ui.tab_color import ColorTab
 from ui.tab_mirror import MirrorTab
@@ -52,12 +53,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(700, 780)
         self.resize(740, 840)
 
+        # ★ DeviceManager 생성 — 앱 전체에서 단일 인스턴스
+        self.device_manager = DeviceManager(config, parent=self)
+
         # --- 탭 ---
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.tab_setup = SetupTab(config)
-        self.tab_color = ColorTab(config)
+        # ★ DeviceManager를 각 탭에 주입
+        self.tab_setup = SetupTab(config, device_manager=self.device_manager)
+        self.tab_color = ColorTab(config, device_manager=self.device_manager)
         self.tab_mirror = MirrorTab(config)
         self.tab_options = OptionsTab(config, main_window=self)
 
@@ -115,8 +120,8 @@ class MainWindow(QMainWindow):
         return super().nativeEvent(eventType, message)
 
     def _start_mirror(self):
-        self.tab_setup.force_disconnect()
-        self.tab_color.force_disconnect()
+        # ★ DeviceManager로 강제 해제 — 모든 탭의 연결을 한 번에 정리
+        self.device_manager.force_release()
 
         self.tab_mirror.apply_to_config()
         save_config(self.config)
@@ -176,18 +181,15 @@ class MainWindow(QMainWindow):
     def _on_session_event(self, event):
         """잠금/해제 이벤트 처리 — turn_off_on_lock 옵션 반영"""
         opts = self.config.get("options", {})
-        turn_off_enabled = opts.get("turn_off_on_lock", True)  # ★ 옵션값 확인
+        turn_off_enabled = opts.get("turn_off_on_lock", True)
 
         if event == "lock":
-            # ★ 옵션이 켜져 있을 때만 미러링 중지
             if turn_off_enabled and self.mirror_thread and self.mirror_thread.isRunning():
                 self._was_mirroring_before_lock = True
                 self._stop_mirror()
                 self.statusBar().showMessage("잠금 감지 — 미러링 중지")
-            # 옵션 꺼진 경우: 아무 동작 안 함 (미러링 계속 실행)
 
         elif event == "unlock":
-            # ★ 옵션에 의해 중지된 경우에만 재시작
             if self._was_mirroring_before_lock:
                 self._was_mirroring_before_lock = False
                 QTimer.singleShot(3000, self._start_mirror)
@@ -225,6 +227,8 @@ class MainWindow(QMainWindow):
             self.mirror_thread.wait(3000)
         self.tab_color.cleanup()
         self.tab_setup.cleanup()
+        # ★ DeviceManager 최종 정리
+        self.device_manager.cleanup()
         self.tray.cleanup()
         self.tray.hide()
         try:

@@ -9,8 +9,9 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
-from core.device import NanoleafDevice
 from core.config import save_config
+
+_OWNER = "setup_tab"
 
 
 class LedScanThread(QThread):
@@ -27,12 +28,10 @@ class LedScanThread(QThread):
         self._current = 0
         self._paused = False
         self._step_request = 0
-        self._jump_request = -1  # ★ 직접 번호 입력 점프용
+        self._jump_request = -1
 
     def run(self):
         self._current = 0
-        # ★ USB 기기 안정화 대기: 이전 스레드의 turn_off() 명령이
-        #   물리적으로 처리될 시간을 확보하여 OSError 방지
         time.sleep(0.1)
         try:
             while self._running and self._current < self.led_count:
@@ -40,7 +39,6 @@ class LedScanThread(QThread):
                 self.led_changed.emit(self._current)
 
                 while self._running:
-                    # ★ 점프 요청 우선 처리
                     if self._jump_request != -1:
                         self._current = max(0, min(self._jump_request, self.led_count - 1))
                         self._jump_request = -1
@@ -56,7 +54,6 @@ class LedScanThread(QThread):
                         break
                     time.sleep(0.05)
         except Exception:
-            # ★ 예상치 못한 에러가 C++ 런타임까지 전파되는 것을 차단
             pass
         finally:
             if self.device and self.device.connected:
@@ -76,7 +73,6 @@ class LedScanThread(QThread):
         self.device.send_rgb(bytes(data))
 
     def jump_to(self, idx):
-        """★ 특정 LED 번호로 즉시 이동"""
         self._jump_request = idx
 
     def step_forward(self):
@@ -93,21 +89,25 @@ class LedScanThread(QThread):
 
 
 class SetupTab(QWidget):
-    N_WRAPS = 2  # 바퀴 수 고정
+    N_WRAPS = 2
 
     # ★ 미러링 중지 요청 시그널 — LED 연결 시도 전 MainWindow로 전송
     request_mirror_stop = pyqtSignal()
 
-    def __init__(self, config, parent=None):
+    def __init__(self, config, device_manager=None, parent=None):
         super().__init__(parent)
         self.config = config
         self.layout_cfg = config["layout"]
-        self.device = None
+        self.dm = device_manager  # ★ DeviceManager 주입
         self.scan_thread = None
 
         # 리셋용: 앱 시작 시점의 layout 설정 백업
         self._saved_layout = copy.deepcopy(config["layout"])
         self._saved_led_count = config["device"]["led_count"]
+
+        # ★ DeviceManager의 강제 해제 시그널 수신 → UI 리셋
+        if self.dm:
+            self.dm.force_released.connect(self._on_force_released)
 
         self._build_ui()
         self._load_from_config()
@@ -198,14 +198,13 @@ class SetupTab(QWidget):
         led_display = QHBoxLayout()
         led_display.addWidget(QLabel("현재 LED:"))
 
-        # ★ QLabel → QSpinBox: 직접 번호 입력으로 즉시 이동 가능
         self.spin_current_led = QSpinBox()
-        self.spin_current_led.setRange(0, 999)  # 스캔 시작 시 실제 LED 수로 조정
+        self.spin_current_led.setRange(0, 999)
         self.spin_current_led.setFixedWidth(90)
         self.spin_current_led.setStyleSheet(
             "font-size: 20px; font-weight: bold; color: #2980b9;"
         )
-        self.spin_current_led.setEnabled(False)  # 스캔 중에만 활성화
+        self.spin_current_led.setEnabled(False)
         self.spin_current_led.valueChanged.connect(self._on_spin_value_changed)
         led_display.addWidget(self.spin_current_led)
 
@@ -239,7 +238,6 @@ class SetupTab(QWidget):
         )
         self.corner_table.setVerticalHeaderLabels(["바퀴 1", "바퀴 2"])
         self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        # 테이블 높이: 헤더 + 2행
         self.corner_table.setFixedHeight(90)
         corner_layout.addWidget(self.corner_table)
 
@@ -278,12 +276,10 @@ class SetupTab(QWidget):
         """config에서 코너 데이터를 테이블에 로드"""
         corners = self.layout_cfg.get("corners", {})
 
-        # 바퀴 1
         w1 = [corners.get(k, "") for k in ("w1_bl", "w1_tl", "w1_tr", "w1_br", "w1_end")]
         for col, val in enumerate(w1):
             self.corner_table.setItem(0, col, QTableWidgetItem(str(val) if val != "" else ""))
 
-        # 바퀴 2
         w2_bl = corners.get("w2_bl", corners.get("w1_end", ""))
         w2 = [
             w2_bl,
@@ -304,53 +300,63 @@ class SetupTab(QWidget):
             lines.append(f"LED {seg['start']:>2}→{seg['end']:<2}  {seg['side']}")
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
-    # --- 연결 ---
-    def force_disconnect(self):
-        """★ 외부(MainWindow 등)에서 강제로 기기 연결을 해제하고 UI를 초기화합니다.
-        미러링 시작 시 MainWindow._start_mirror()에서 호출됩니다.
-        """
-        if self.device and self.device.connected:
+    # ── 연결 상태 UI 헬퍼 ───────────────────────────────────────────
+
+    def _set_connected_ui(self):
+        self.conn_label.setText("연결됨 ✅")
+        self.conn_label.setStyleSheet("color: #2d8c46;")
+        self.btn_connect.setText("🔌 연결 해제")
+
+    def _set_disconnected_ui(self):
+        self.conn_label.setText("연결 안 됨")
+        self.conn_label.setStyleSheet("color: #c0392b;")
+        self.btn_connect.setText("🔌 LED 연결")
+
+    # ── DeviceManager 이벤트 ────────────────────────────────────────
+
+    def _on_force_released(self, prev_owner):
+        """DeviceManager가 강제 해제했을 때 (미러링 시작 등)"""
+        if prev_owner == _OWNER:
             self._stop_scan()
-            try:
-                self.device.turn_off()
-            except Exception:
-                pass
-            self.device.disconnect()
-            self.device = None
-            self.conn_label.setText("연결 안 됨")
-            self.conn_label.setStyleSheet("color: #c0392b;")
-            self.btn_connect.setText("🔌 LED 연결")
+            self._set_disconnected_ui()
+
+    # ── 기존 인터페이스 호환 ────────────────────────────────────────
+
+    def force_disconnect(self):
+        """★ MainWindow 등 외부에서 호출하는 강제 해제."""
+        if self.dm:
+            self._stop_scan()
+            self.dm.release(_OWNER)
+            self._set_disconnected_ui()
 
     def _toggle_connection(self):
-        if self.device and self.device.connected:
-            self.force_disconnect()
+        if not self.dm:
+            return
+
+        if self.dm.is_connected and self.dm.owner == _OWNER:
+            self._stop_scan()
+            self.dm.release(_OWNER)
+            self._set_disconnected_ui()
         else:
-            # ★ 새 연결 전 미러링 강제 종료 요청 (MainWindow._stop_mirror_sync 호출)
+            # 새 연결 전 미러링 강제 종료 요청
             self.request_mirror_stop.emit()
 
             try:
-                dev_cfg = self.config["device"]
-                self.device = NanoleafDevice(
-                    int(dev_cfg["vendor_id"], 16),
-                    int(dev_cfg["product_id"], 16),
-                    dev_cfg["led_count"]
-                )
-                self.device.connect()
-                self.conn_label.setText("연결됨 ✅")
-                self.conn_label.setStyleSheet("color: #2d8c46;")
-                self.btn_connect.setText("🔌 연결 해제")
+                self.dm.acquire(_OWNER)
+                self._set_connected_ui()
             except Exception as e:
                 QMessageBox.warning(self, "연결 실패", str(e))
 
-    # --- 스캔 ---
+    # ── 스캔 ───────────────────────────────────────────────────────
+
     def _start_auto_scan(self):
-        if not self.device or not self.device.connected:
+        if not self.dm or not self.dm.is_connected:
             QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요.")
             return
         self._start_scan(paused=False)
 
     def _start_manual_mode(self):
-        if not self.device or not self.device.connected:
+        if not self.dm or not self.dm.is_connected:
             QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요.")
             return
         self._start_scan(paused=True)
@@ -358,15 +364,14 @@ class SetupTab(QWidget):
     def _start_scan(self, paused=False):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop_scan()
-            # ★ 크래시 방지: 제한 없이 스레드가 완전히 종료될 때까지 대기
             self.scan_thread.wait()
 
         led_count = self.spin_led_count.value()
-        # ★ SpinBox 범위를 실제 LED 수에 맞게 조정
         self.spin_current_led.setRange(0, led_count - 1)
         self.spin_current_led.setValue(0)
 
-        self.scan_thread = LedScanThread(self.device, led_count, delay_ms=400)
+        # ★ DeviceManager의 device를 스캔 스레드에 전달
+        self.scan_thread = LedScanThread(self.dm.device, led_count, delay_ms=400)
         self.scan_thread.set_paused(paused)
         self.scan_thread.led_changed.connect(self._on_led_changed)
         self.scan_thread.finished_scan.connect(self._on_scan_finished)
@@ -377,15 +382,12 @@ class SetupTab(QWidget):
         self.btn_prev.setEnabled(True)
         self.btn_next.setEnabled(True)
         self.btn_mark_corner.setEnabled(True)
-        self.spin_current_led.setEnabled(True)  # ★ 스캔 시작 시 입력 활성화
+        self.spin_current_led.setEnabled(True)
         self.scan_thread.start()
 
     def _stop_scan(self):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop_scan()
-            # ★ 크래시 방지: 강제로 _on_scan_finished()를 즉시 호출하지 않고
-            #   스레드가 finally 블록에서 finished_scan 시그널을 보낼 때까지 대기.
-            #   (중지 버튼 직후 재시작 버튼 연타 시 C++ 객체 파괴 충돌 방지)
             self.btn_scan_stop.setEnabled(False)
         else:
             self._on_scan_finished()
@@ -397,15 +399,13 @@ class SetupTab(QWidget):
         self.btn_prev.setEnabled(False)
         self.btn_next.setEnabled(False)
         self.btn_mark_corner.setEnabled(False)
-        self.spin_current_led.setEnabled(False)  # ★ 스캔 종료 시 입력 비활성화
+        self.spin_current_led.setEnabled(False)
 
     def _on_spin_value_changed(self, value):
-        """★ 사용자가 SpinBox에 직접 숫자를 입력했을 때 해당 LED로 점프"""
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.jump_to(value)
 
     def _on_led_changed(self, idx):
-        # ★ 스레드→UI→스레드 무한루프 방지: 시그널 일시 차단 후 값 설정
         self.spin_current_led.blockSignals(True)
         self.spin_current_led.setValue(idx)
         self.spin_current_led.blockSignals(False)
@@ -419,7 +419,6 @@ class SetupTab(QWidget):
             self.scan_thread.step_backward()
 
     def _mark_corner(self):
-        # ★ QLabel.text() 대신 QSpinBox.value() 사용
         led_idx = str(self.spin_current_led.value())
         for row in range(self.N_WRAPS):
             for col in range(5):
@@ -429,7 +428,8 @@ class SetupTab(QWidget):
                     return
         QMessageBox.information(self, "코너", "모든 코너가 채워졌습니다.")
 
-    # --- 검증 ---
+    # ── 검증 ───────────────────────────────────────────────────────
+
     def _validate_corners(self, corners_all):
         all_corners = []
         for wrap in corners_all:
@@ -437,9 +437,7 @@ class SetupTab(QWidget):
         if len(all_corners) < 2:
             return True, ""
 
-        # 1. 값이 처음으로 달라지는 구간 기준으로 전체 방향 결정
-        #    (중복값은 방향 판단에서 건너뜀)
-        direction = 0  # 0: 모두 동일, 1: 오름차순, -1: 내림차순
+        direction = 0
         for i in range(1, len(all_corners)):
             if all_corners[i] > all_corners[i - 1]:
                 direction = 1
@@ -448,8 +446,6 @@ class SetupTab(QWidget):
                 direction = -1
                 break
 
-        # 2. 역방향으로 꺾이는 경우만 차단 (중복값은 허용)
-        #    예) 끝점==좌하(29,29), 끝점==우하(0,0) 같은 경계값 중복 허용
         for i in range(1, len(all_corners)):
             if direction == 1 and all_corners[i] < all_corners[i - 1]:
                 return False, (
@@ -465,7 +461,8 @@ class SetupTab(QWidget):
                 )
         return True, ""
 
-    # --- 세그먼트 ---
+    # ── 세그먼트 ───────────────────────────────────────────────────
+
     def _generate_segments(self):
         sides_order = ["left", "top", "right", "bottom"]
 
@@ -505,7 +502,6 @@ class SetupTab(QWidget):
         QMessageBox.information(self, "세그먼트", f"{len(segments)}개 세그먼트 생성 완료.")
 
     def _reset_to_saved(self):
-        """앱 시작 시점의 저장된 값으로 복원"""
         self.config["layout"] = copy.deepcopy(self._saved_layout)
         self.layout_cfg = self.config["layout"]
         self.spin_led_count.setValue(self._saved_led_count)
@@ -517,7 +513,6 @@ class SetupTab(QWidget):
         if not self.layout_cfg.get("segments"):
             self._generate_segments()
         save_config(self.config)
-        # 저장 후 백업도 갱신
         self._saved_layout = copy.deepcopy(self.config["layout"])
         self._saved_led_count = self.config["device"]["led_count"]
         QMessageBox.information(self, "저장", "LED 설정이 저장되었습니다.")
@@ -526,9 +521,5 @@ class SetupTab(QWidget):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.stop_scan()
             self.scan_thread.wait(2000)
-        if self.device and self.device.connected:
-            try:
-                self.device.turn_off()
-                self.device.disconnect()
-            except Exception:
-                pass
+        if self.dm:
+            self.dm.release(_OWNER)

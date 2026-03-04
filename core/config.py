@@ -64,6 +64,36 @@ DEFAULT_CONFIG = {
 }
 
 
+def _deep_merge(base, override):
+    """base dict에 override를 재귀적으로 병합합니다.
+
+    규칙:
+    - base에만 있는 키 → 유지 (새 버전에서 추가된 기본값 보존)
+    - override에만 있는 키 → 유지 (사용자 커스텀 값 보존)
+    - 양쪽 모두 dict인 키 → 재귀 병합
+    - 그 외 (list, 스칼라 등) → override 값 우선
+
+    Args:
+        base: 기본값 dict (deep copy된 DEFAULT_CONFIG)
+        override: 사용자 파일에서 읽은 dict
+
+    Returns:
+        병합된 dict (base를 직접 수정하여 반환)
+    """
+    for key, override_val in override.items():
+        if (
+            key in base
+            and isinstance(base[key], dict)
+            and isinstance(override_val, dict)
+        ):
+            # 양쪽 모두 dict → 재귀
+            _deep_merge(base[key], override_val)
+        else:
+            # override 값 우선 (list, 스칼라, 타입 불일치 포함)
+            base[key] = override_val
+    return base
+
+
 def _config_path():
     """config.json 경로 — exe 실행 시 exe 폴더, 스크립트 실행 시 루트 폴더"""
     if getattr(sys, 'frozen', False):
@@ -74,19 +104,18 @@ def _config_path():
 
 
 def load_config():
-    """config.json 로드. 없으면 기본값으로 생성."""
+    """config.json 로드. 없으면 기본값으로 생성.
+
+    ★ 재귀 deep merge로 중첩 dict의 새 키도 안전하게 보존합니다.
+    예) DEFAULT_CONFIG["layout"]["corners"]에 새 키가 추가되면,
+        기존 사용자의 corners에 해당 키가 기본값으로 추가됩니다.
+    """
     path = _config_path()
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             user = json.load(f)
-        # 기본값과 병합 (새 키가 추가됐을 때 대비)
         merged = copy.deepcopy(DEFAULT_CONFIG)
-        for section in merged:
-            if section in user:
-                if isinstance(merged[section], dict):
-                    merged[section].update(user[section])
-                else:
-                    merged[section] = user[section]
+        _deep_merge(merged, user)
         return merged
     else:
         save_config(DEFAULT_CONFIG)
