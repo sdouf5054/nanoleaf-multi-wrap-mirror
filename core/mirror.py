@@ -11,6 +11,7 @@
 import time
 import os
 import copy
+import ctypes
 import logging
 import threading
 import numpy as np
@@ -59,6 +60,8 @@ class MirrorThread(QThread):
         self._active_h = 0
         self._logger = None
         self._debug_profile = False
+        self._expected_monitors = 0       # ★ 시작 시 모니터 수
+        self._monitor_disconnected = False # ★ 외부 모니터 분리 상태
 
     @property
     def _running(self):
@@ -84,6 +87,88 @@ class MirrorThread(QThread):
             if penalty_per_side is not None:
                 mirror_cfg["parallel_penalty_per_side"] = penalty_per_side
             self._layout_dirty = True
+
+    # ── 모니터 연결 감지 ─────────────────────────────────────────────
+
+    @staticmethod
+    def _get_monitor_count():
+        """현재 연결된 모니터 수 반환 (Windows API SM_CMONITORS)"""
+        try:
+            return ctypes.windll.user32.GetSystemMetrics(80)
+        except Exception:
+            return -1
+
+    def _start_monitor_watcher(self):
+        """모니터 감지 타이머 시작 — 1초마다 독립적으로 체크."""
+        self._monitor_watcher_tick()
+
+    def _monitor_watcher_tick(self):
+        """1초 주기로 모니터 수를 체크하여 분리/재연결 처리.
+
+        별도 타이머 스레드에서 실행되므로 메인 루프가
+        capture/USB에서 블로킹되어도 즉시 감지합니다.
+        """
+        if self._stop_event.is_set():
+            return
+
+        current_monitors = self._get_monitor_count()
+
+        if (not self._monitor_disconnected
+                and current_monitors < self._expected_monitors):
+            # ── 모니터 분리 감지 ──
+            self._monitor_disconnected = True
+            self.status_changed.emit("외부 모니터 분리 감지 — LED 대기 중...")
+
+            # LED 즉시 끄기
+            try:
+                self._device.turn_off()
+            except (OSError, IOError, ValueError):
+                pass
+
+            # 캡처 정리
+            if self._capture:
+                try:
+                    self._capture.stop()
+                except Exception:
+                    pass
+
+            if self._debug_profile:
+                self._logger.debug(
+                    f"monitor disconnected: {self._expected_monitors}"
+                    f" → {current_monitors}"
+                )
+
+        elif (self._monitor_disconnected
+              and current_monitors >= self._expected_monitors):
+            # ── 모니터 재연결 감지 ──
+            self.status_changed.emit("외부 모니터 재연결 — 캡처 재초기화...")
+
+            if self._debug_profile:
+                self._logger.debug(
+                    f"monitor reconnected: {current_monitors}"
+                )
+
+            try:
+                mirror_cfg = self.config["mirror"]
+                self._capture = ScreenCapture(mirror_cfg["monitor_index"])
+                self._capture.start(target_fps=mirror_cfg["target_fps"])
+                self._active_w = self._capture.screen_w
+                self._active_h = self._capture.screen_h
+                self._weight_matrix = self._build_layout(
+                    self._active_w, self._active_h
+                )
+                self._monitor_disconnected = False
+                self.status_changed.emit("미러링 실행 중")
+            except Exception as e:
+                if self._debug_profile:
+                    self._logger.debug(f"reconnect init error: {e}")
+                # 아직 준비 안 됨 — 다음 tick에서 재시도
+
+        # 다음 체크 예약
+        if not self._stop_event.is_set():
+            timer = threading.Timer(1.0, self._monitor_watcher_tick)
+            timer.daemon = True
+            timer.start()
 
     # ── 레이아웃 계산 ────────────────────────────────────────────────
 
@@ -193,6 +278,11 @@ class MirrorThread(QThread):
             if self._debug_profile:
                 self._logger.debug("device connected")
 
+            # ★ 시작 시 모니터 수 기록 — 외부 모니터 분리 감지용
+            self._expected_monitors = self._get_monitor_count()
+            if self._debug_profile:
+                self._logger.debug(f"monitors at start: {self._expected_monitors}")
+
             return True
 
         except (OSError, IOError, ValueError, ConnectionError) as e:
@@ -229,12 +319,21 @@ class MirrorThread(QThread):
 
         self.status_changed.emit("미러링 실행 중")
 
+        # ★ 모니터 감지 타이머 시작 (별도 스레드 — 루프 블로킹과 무관하게 동작)
+        self._start_monitor_watcher()
+
         while not self._stop_event.is_set():
             loop_start = time.perf_counter()
 
             # ── 일시정지 ────────────────────────────────────────
             if self._paused:
                 if self._stop_event.wait(timeout=0.05):
+                    break
+                continue
+
+            # ── ★ 외부 모니터 분리 상태 — 대기 ──────────────────
+            if self._monitor_disconnected:
+                if self._stop_event.wait(timeout=0.5):
                     break
                 continue
 

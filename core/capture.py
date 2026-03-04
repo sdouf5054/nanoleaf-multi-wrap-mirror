@@ -169,19 +169,31 @@ class ScreenCapture:
             self._started = False
 
     def _destroy_camera(self):
-        """카메라 안전하게 파괴 — stop() 실패도 흡수"""
+        """카메라 안전하게 파괴 — dxcam 싱글턴 캐시까지 정리
+
+        ★ dxcam은 DXFactory._camera_instances (WeakValueDictionary)에
+        (device_idx, output_idx) 키로 인스턴스를 캐싱합니다.
+        del camera만으로는 내부 스레드가 참조를 잡고 있어 GC가 안 되므로,
+        stop() 후 캐시에서 직접 삭제해야 dxcam.create()가 새 인스턴스를 생성합니다.
+        """
         if self.camera is not None:
-            # 연속 캡처 중지
+            # 1. 연속 캡처 중지
             if self._started:
                 try:
-                    # dxcam stop()이 내부에서 thread.join()을 호출하는데,
-                    # 스레드가 이미 죽었으면 문제없고, 살아있으면 정상 중지.
-                    # RuntimeError("cannot join current thread")는 dxcam 버그 —
-                    # 캡처 스레드 안에서 stop()이 불리는 경우인데, 우리는 외부에서
-                    # 호출하므로 정상적으로는 발생하지 않음. 혹시 모를 경우 흡수.
                     self.camera.stop()
                 except (RuntimeError, OSError, Exception):
                     pass
+
+            # 2. ★ dxcam 팩토리 캐시에서 제거
+            try:
+                key = (0, self.monitor_index)
+                cache = dxcam.DXFactory._camera_instances
+                if key in cache:
+                    del cache[key]
+            except Exception:
+                pass
+
+            # 3. 로컬 참조 해제
             try:
                 del self.camera
             except Exception:
