@@ -32,7 +32,7 @@ class MirrorThread(QThread):
     """
 
     fps_updated = pyqtSignal(float)
-    error = pyqtSignal(str, str)  # ★ (메시지, 심각도: "critical" | "warning")
+    error = pyqtSignal(str, str)
     status_changed = pyqtSignal(str)
 
     def __init__(self, config):
@@ -48,8 +48,6 @@ class MirrorThread(QThread):
         self.smoothing_factor = config["mirror"]["smoothing_factor"]
 
         # ★ 레이아웃 재계산 플래그 + 락
-        #   메인 스레드에서 update_layout_params()가 config를 변경한 뒤
-        #   _layout_dirty를 True로 설정하면, 루프에서 감지하여 재계산.
         self._layout_dirty = False
         self._layout_lock = threading.Lock()
 
@@ -74,12 +72,6 @@ class MirrorThread(QThread):
 
         메인 스레드에서 호출하면, 내부 config를 업데이트하고
         _layout_dirty 플래그를 세워 루프에서 가중치 행렬을 재계산합니다.
-
-        Args:
-            decay_radius: 감쇠 반경 (float 또는 None=변경 없음)
-            parallel_penalty: 타원 페널티 (float 또는 None)
-            decay_per_side: 변별 감쇠 dict 또는 None
-            penalty_per_side: 변별 페널티 dict 또는 None
         """
         with self._layout_lock:
             mirror_cfg = self.config["mirror"]
@@ -203,7 +195,7 @@ class MirrorThread(QThread):
 
             return True
 
-        except Exception as e:
+        except (OSError, IOError, ValueError, ConnectionError) as e:
             self.error.emit(str(e), "critical")
             if self._capture:
                 self._capture.stop()
@@ -262,7 +254,7 @@ class MirrorThread(QThread):
                             f"wmat={self._weight_matrix.shape}"
                         )
                     self.status_changed.emit("미러링 실행 중")
-                except Exception as layout_err:
+                except (ValueError, IndexError, np.linalg.LinAlgError) as layout_err:
                     if self._debug_profile:
                         self._logger.debug(
                             f"live layout rebuild error: {layout_err}"
@@ -295,7 +287,7 @@ class MirrorThread(QThread):
                                     self._active_w, self._active_h
                                 )
                                 prev_colors = None
-                            except Exception:
+                            except (ValueError, IndexError):
                                 pass
                     self.status_changed.emit("미러링 실행 중")
 
@@ -308,7 +300,7 @@ class MirrorThread(QThread):
             # ── 해상도/회전 변경 감지 ───────────────────────────
             try:
                 current_h, current_w = frame.shape[:2]
-            except Exception:
+            except (AttributeError, ValueError):
                 continue
 
             if current_h != self._active_h or current_w != self._active_w:
@@ -330,7 +322,7 @@ class MirrorThread(QThread):
                             f"layout rebuilt: {current_w}x{current_h}, "
                             f"wmat={self._weight_matrix.shape}"
                         )
-                except Exception as layout_err:
+                except (ValueError, IndexError, np.linalg.LinAlgError) as layout_err:
                     if self._debug_profile:
                         self._logger.debug(
                             f"layout rebuild error: {layout_err}"
@@ -356,7 +348,7 @@ class MirrorThread(QThread):
                     mirror_cfg_live, prev_colors,
                 )
                 prev_colors = rgb_colors
-            except Exception:
+            except (ValueError, IndexError, FloatingPointError):
                 prev_colors = None
                 continue
 
@@ -369,7 +361,7 @@ class MirrorThread(QThread):
 
             try:
                 self._device.send_rgb(grb_data)
-            except Exception:
+            except (OSError, IOError, ValueError):
                 pass
 
             # ★ 재연결 실패 감지 — 장치가 완전히 끊긴 경우 상태 알림
@@ -428,7 +420,7 @@ class MirrorThread(QThread):
             if self._device:
                 self._device.turn_off()
                 self._device.disconnect()
-        except Exception:
+        except (OSError, IOError, ValueError):
             pass
         if self._capture:
             self._capture.stop()
