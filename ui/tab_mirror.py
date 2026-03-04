@@ -1,22 +1,43 @@
-"""미러링 탭 — 시작/중지, 밝기, 스무딩, FPS 표시 + 자원 모니터링"""
+"""미러링 탭 — 시작/중지, 밝기, 스무딩, FPS 표시 + 자원 모니터링
+
+[변경 사항 v2]
+- 미러링 중 감쇠 반경, 타원 페널티, 변별 값, 스무딩 계수 실시간 변경 가능
+- layout_params_changed 시그널: MainWindow가 MirrorThread에 전달
+- smoothing_factor_changed 시그널: 스무딩 계수 실시간 반영
+- 디바운스 타이머: 슬라이더/스핀박스 조작 중 재계산 폭주 방지 (300ms)
+"""
 
 import os
-import psutil  # ★ 자원 모니터링
+import psutil
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QSlider,
     QLabel, QGroupBox, QCheckBox, QComboBox, QSpinBox,
     QDoubleSpinBox
 )
-from PyQt5.QtCore import Qt, QTimer  # ★ QTimer 추가
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 
 
 class MirrorTab(QWidget):
+
+    # ★ 레이아웃 파라미터 변경 시그널 — MainWindow가 MirrorThread에 전달
+    layout_params_changed = pyqtSignal(dict)
+    # ★ 스무딩 계수 변경 시그널
+    smoothing_factor_changed = pyqtSignal(float)
+
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
         self.mirror_cfg = config["mirror"]
+        self._is_running = False  # ★ 미러링 상태 추적
+
         self._build_ui()
+
+        # ★ 디바운스 타이머 — 레이아웃 파라미터 변경 시 300ms 대기 후 시그널 발생
+        self._layout_debounce = QTimer(self)
+        self._layout_debounce.setSingleShot(True)
+        self._layout_debounce.setInterval(300)
+        self._layout_debounce.timeout.connect(self._emit_layout_params)
 
         # ★ 자원 모니터링 타이머 (2초 주기)
         self._process = psutil.Process(os.getpid())
@@ -38,14 +59,14 @@ class MirrorTab(QWidget):
 
         status_layout.addStretch()
 
-        # ★ CPU 사용량
+        # CPU 사용량
         self.cpu_label = QLabel("CPU: --%")
         self.cpu_label.setStyleSheet(
             "font-size: 12px; color: #d35400; margin-right: 6px;"
         )
         status_layout.addWidget(self.cpu_label)
 
-        # ★ RAM 사용량
+        # RAM 사용량
         self.ram_label = QLabel("RAM: -- MB")
         self.ram_label.setStyleSheet(
             "font-size: 12px; color: #27ae60; margin-right: 10px;"
@@ -122,6 +143,8 @@ class MirrorTab(QWidget):
         self.spin_smoothing.setRange(0.0, 0.95)
         self.spin_smoothing.setSingleStep(0.05)
         self.spin_smoothing.setValue(self.mirror_cfg["smoothing_factor"])
+        # ★ 스무딩 계수 변경 시 실시간 반영
+        self.spin_smoothing.valueChanged.connect(self._on_smoothing_factor_changed)
         smooth_row.addWidget(self.spin_smoothing)
         smooth_row.addStretch()
         opt_layout.addLayout(smooth_row)
@@ -143,6 +166,8 @@ class MirrorTab(QWidget):
         self.spin_decay.setRange(0.05, 1.0)
         self.spin_decay.setSingleStep(0.05)
         self.spin_decay.setValue(self.mirror_cfg["decay_radius"])
+        # ★ 실시간 반영 연결
+        self.spin_decay.valueChanged.connect(self._on_layout_param_changed)
         decay_row.addWidget(self.spin_decay)
 
         decay_row.addWidget(QLabel("타원 페널티:"))
@@ -150,6 +175,8 @@ class MirrorTab(QWidget):
         self.spin_penalty.setRange(1.0, 10.0)
         self.spin_penalty.setSingleStep(0.5)
         self.spin_penalty.setValue(self.mirror_cfg["parallel_penalty"])
+        # ★ 실시간 반영 연결
+        self.spin_penalty.valueChanged.connect(self._on_layout_param_changed)
         decay_row.addWidget(self.spin_penalty)
         decay_row.addStretch()
         opt_layout.addLayout(decay_row)
@@ -160,6 +187,8 @@ class MirrorTab(QWidget):
         per_penalty = self.mirror_cfg.get("parallel_penalty_per_side", {})
         has_per_side = bool(per_decay or per_penalty)
         self.chk_per_side.setChecked(has_per_side)
+        # ★ 체크박스 변경 시에도 디바운스
+        self.chk_per_side.stateChanged.connect(self._on_layout_param_changed)
         opt_layout.addWidget(self.chk_per_side)
 
         from PyQt5.QtWidgets import QGridLayout
@@ -180,6 +209,8 @@ class MirrorTab(QWidget):
             sp_d.setRange(0.05, 1.0)
             sp_d.setSingleStep(0.05)
             sp_d.setValue(per_decay.get(side, self.mirror_cfg["decay_radius"]))
+            # ★ 실시간 반영 연결
+            sp_d.valueChanged.connect(self._on_layout_param_changed)
             self.spin_decay_per[side] = sp_d
             self.per_side_grid.addWidget(sp_d, row_i, 1)
 
@@ -187,13 +218,17 @@ class MirrorTab(QWidget):
             sp_p.setRange(1.0, 10.0)
             sp_p.setSingleStep(0.5)
             sp_p.setValue(per_penalty.get(side, self.mirror_cfg["parallel_penalty"]))
+            # ★ 실시간 반영 연결
+            sp_p.valueChanged.connect(self._on_layout_param_changed)
             self.spin_penalty_per[side] = sp_p
             self.per_side_grid.addWidget(sp_p, row_i, 2)
 
         self.per_side_widget = QWidget()
         self.per_side_widget.setLayout(self.per_side_grid)
         self.per_side_widget.setVisible(has_per_side)
-        self.chk_per_side.stateChanged.connect(lambda s: self.per_side_widget.setVisible(bool(s)))
+        self.chk_per_side.stateChanged.connect(
+            lambda s: self.per_side_widget.setVisible(bool(s))
+        )
         opt_layout.addWidget(self.per_side_widget)
 
         # 화면 방향
@@ -218,10 +253,44 @@ class MirrorTab(QWidget):
         layout.addWidget(opt_group)
         layout.addStretch()
 
+    # ── 실시간 반영 슬롯 ──────────────────────────────────────────────
+
     def _on_brightness_changed(self, value):
         self.brightness_label.setText(f"{value}%")
 
-    # ★ 자원 사용량 갱신
+    def _on_smoothing_factor_changed(self, value):
+        """★ 스무딩 계수 변경 → 실시간 반영"""
+        if self._is_running:
+            self.smoothing_factor_changed.emit(value)
+
+    def _on_layout_param_changed(self, _=None):
+        """★ 감쇠/페널티/변별 값 변경 → 디바운스 후 시그널 발생"""
+        if self._is_running:
+            self._layout_debounce.start()  # 300ms 리셋
+
+    def _emit_layout_params(self):
+        """★ 디바운스 만료 — 현재 UI 값을 dict로 모아서 시그널 발생"""
+        params = {
+            "decay_radius": self.spin_decay.value(),
+            "parallel_penalty": self.spin_penalty.value(),
+        }
+        if self.chk_per_side.isChecked():
+            params["decay_per_side"] = {
+                side: self.spin_decay_per[side].value()
+                for side in self.spin_decay_per
+            }
+            params["penalty_per_side"] = {
+                side: self.spin_penalty_per[side].value()
+                for side in self.spin_penalty_per
+            }
+        else:
+            params["decay_per_side"] = {}
+            params["penalty_per_side"] = {}
+
+        self.layout_params_changed.emit(params)
+
+    # ── 자원 사용량 갱신 ──────────────────────────────────────────────
+
     def _update_resource_usage(self):
         try:
             cpu = self._process.cpu_percent() / psutil.cpu_count()
@@ -229,18 +298,19 @@ class MirrorTab(QWidget):
             self.cpu_label.setText(f"CPU: {cpu:.1f}%")
             self.ram_label.setText(f"RAM: {ram_mb:.0f} MB")
 
-            # CPU 수치에 따라 색상으로 부하 수준 시각화
             if cpu >= 20:
-                color = "#c0392b"   # 빨강 — 높음
+                color = "#c0392b"
             elif cpu >= 10:
-                color = "#e67e22"   # 주황 — 보통
+                color = "#e67e22"
             else:
-                color = "#d35400"   # 기본
+                color = "#d35400"
             self.cpu_label.setStyleSheet(
                 f"font-size: 12px; color: {color}; margin-right: 6px;"
             )
         except Exception:
             pass
+
+    # ── 공개 메서드 ──────────────────────────────────────────────────
 
     def get_brightness(self):
         return self.brightness_slider.value() / 100.0
@@ -280,17 +350,24 @@ class MirrorTab(QWidget):
         )
 
     def set_running_state(self, running):
-        """미러링 시작/중지 시 UI 상태 전환"""
+        """미러링 시작/중지 시 UI 상태 전환
+
+        ★ 감쇠/페널티/변별/스무딩 위젯은 미러링 중에도 활성 상태 유지
+           Target FPS와 화면 방향만 미러링 중 비활성화 (재시작 필요)
+        """
+        self._is_running = running
         self.btn_start.setEnabled(not running)
         self.btn_pause.setEnabled(running)
         self.btn_stop.setEnabled(running)
+
+        # 재시작이 필요한 옵션만 비활성화
         self.spin_fps.setEnabled(not running)
-        self.spin_decay.setEnabled(not running)
-        self.spin_penalty.setEnabled(not running)
-        self.chk_per_side.setEnabled(not running)
-        self.per_side_widget.setEnabled(not running)
         self.combo_orientation.setEnabled(not running)
         self.combo_rotation.setEnabled(not running)
+
+        # ★ 실시간 반영 가능한 옵션은 항상 활성화
+        # spin_decay, spin_penalty, chk_per_side, per_side_widget,
+        # spin_smoothing 은 setEnabled() 호출하지 않음 → 항상 활성
 
     def update_fps(self, fps):
         self.fps_label.setText(f"{fps:.1f} fps")

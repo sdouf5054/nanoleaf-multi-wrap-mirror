@@ -1,4 +1,9 @@
-"""색상 처리 — 다운샘플, 감마, 비선형 채널 믹싱, WB, 밝기"""
+"""색상 처리 — 다운샘플, 감마, 비선형 채널 믹싱, WB, 밝기
+
+[변경 사항 v2]
+- 감마 fast path: 감마값이 모두 1.0이면 np.power 연산 스킵
+- 밝기 fast path: 밝기가 1.0이면 곱셈 스킵 (기존과 동일)
+"""
 
 import numpy as np
 import cv2
@@ -43,11 +48,20 @@ def compute_led_colors(frame, weight_matrix, color_cfg, mirror_cfg,
     rgb_colors = weight_matrix @ grid_colors
 
     # 3. 감마 보정
-    rgb_norm = rgb_colors / 255.0
-    rgb_norm[:, 0] = np.power(rgb_norm[:, 0], color_cfg["gamma_r"])
-    rgb_norm[:, 1] = np.power(rgb_norm[:, 1], color_cfg["gamma_g"])
-    rgb_norm[:, 2] = np.power(rgb_norm[:, 2], color_cfg["gamma_b"])
-    rgb_colors = rgb_norm * 255.0
+    # ★ fast path: 감마값이 모두 1.0이면 np.power 연산 자체를 스킵
+    gamma_r = color_cfg["gamma_r"]
+    gamma_g = color_cfg["gamma_g"]
+    gamma_b = color_cfg["gamma_b"]
+
+    if gamma_r != 1.0 or gamma_g != 1.0 or gamma_b != 1.0:
+        rgb_norm = rgb_colors / 255.0
+        if gamma_r != 1.0:
+            rgb_norm[:, 0] = np.power(rgb_norm[:, 0], gamma_r)
+        if gamma_g != 1.0:
+            rgb_norm[:, 1] = np.power(rgb_norm[:, 1], gamma_g)
+        if gamma_b != 1.0:
+            rgb_norm[:, 2] = np.power(rgb_norm[:, 2], gamma_b)
+        rgb_colors = rgb_norm * 255.0
 
     # 4. 비선형 채널 믹싱 (초록-노랑 구간 왜곡 방지)
     R = rgb_colors[:, 0]

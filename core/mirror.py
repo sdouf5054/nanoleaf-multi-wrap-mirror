@@ -1,11 +1,11 @@
 """미러링 루프 — QThread 기반 (디스플레이 변경·분리 대응 강화)
 
-[변경 사항 v4]
-- run()을 _init_resources(), _run_loop(), _cleanup()으로 분리
-- 스레드 안전성: __init__에서 config를 deep copy하여 메인 스레드와 참조 분리
-  → 색상 탭 저장 등으로 config가 변경되어도 미러링 스레드에 영향 없음
-  → 실시간 반영이 필요한 brightness / smoothing은 별도 인스턴스 변수로 관리
-- USB 연결 끊김 감지 시 상태 알림 + 재연결 대기
+[변경 사항 v5]
+- 실시간 파라미터 반영: decay_radius, parallel_penalty, per_side 값,
+  smoothing_factor를 미러링 중 변경 가능
+- _layout_dirty 플래그: 레이아웃 파라미터 변경 시 True로 설정,
+  루프 내에서 감지하여 가중치 행렬 재계산
+- update_layout_params(): 메인 스레드에서 호출하는 파라미터 업데이트 메서드
 """
 
 import time
@@ -27,20 +27,17 @@ class MirrorThread(QThread):
 
     Signals:
         fps_updated(float): 1초마다 현재 fps 전달
-        error(str): 에러 발생 시 메시지 전달
+        error(str, str): (메시지, 심각도) — "critical"=팝업, "warning"=상태바
         status_changed(str): 상태 변경 알림
     """
 
     fps_updated = pyqtSignal(float)
-    error = pyqtSignal(str)
+    error = pyqtSignal(str, str)  # ★ (메시지, 심각도: "critical" | "warning")
     status_changed = pyqtSignal(str)
 
     def __init__(self, config):
         super().__init__()
         # ★ 스레드 안전성: config를 deep copy하여 메인 스레드와 참조 분리
-        #   메인 스레드에서 색상 탭 저장, 옵션 변경 등으로 config dict가
-        #   변경되어도 미러링 스레드에 영향을 주지 않습니다.
-        #   실시간 반영이 필요한 값(brightness, smoothing)은 별도 변수로 관리.
         self.config = copy.deepcopy(config)
         self._stop_event = threading.Event()
         self._paused = False
@@ -48,6 +45,13 @@ class MirrorThread(QThread):
         # 외부에서 실시간 변경 가능한 값 (메인 스레드에서 직접 변경)
         self.brightness = config["mirror"]["brightness"]
         self.smoothing_enabled = True
+        self.smoothing_factor = config["mirror"]["smoothing_factor"]
+
+        # ★ 레이아웃 재계산 플래그 + 락
+        #   메인 스레드에서 update_layout_params()가 config를 변경한 뒤
+        #   _layout_dirty를 True로 설정하면, 루프에서 감지하여 재계산.
+        self._layout_dirty = False
+        self._layout_lock = threading.Lock()
 
         # _init_resources()에서 초기화되는 멤버
         self._capture = None
@@ -61,6 +65,33 @@ class MirrorThread(QThread):
     @property
     def _running(self):
         return not self._stop_event.is_set()
+
+    # ── 실시간 파라미터 업데이트 (메인 스레드에서 호출) ────────────────
+
+    def update_layout_params(self, decay_radius=None, parallel_penalty=None,
+                             decay_per_side=None, penalty_per_side=None):
+        """레이아웃 파라미터를 실시간으로 변경합니다.
+
+        메인 스레드에서 호출하면, 내부 config를 업데이트하고
+        _layout_dirty 플래그를 세워 루프에서 가중치 행렬을 재계산합니다.
+
+        Args:
+            decay_radius: 감쇠 반경 (float 또는 None=변경 없음)
+            parallel_penalty: 타원 페널티 (float 또는 None)
+            decay_per_side: 변별 감쇠 dict 또는 None
+            penalty_per_side: 변별 페널티 dict 또는 None
+        """
+        with self._layout_lock:
+            mirror_cfg = self.config["mirror"]
+            if decay_radius is not None:
+                mirror_cfg["decay_radius"] = decay_radius
+            if parallel_penalty is not None:
+                mirror_cfg["parallel_penalty"] = parallel_penalty
+            if decay_per_side is not None:
+                mirror_cfg["decay_radius_per_side"] = decay_per_side
+            if penalty_per_side is not None:
+                mirror_cfg["parallel_penalty_per_side"] = penalty_per_side
+            self._layout_dirty = True
 
     # ── 레이아웃 계산 ────────────────────────────────────────────────
 
@@ -173,7 +204,7 @@ class MirrorThread(QThread):
             return True
 
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(str(e), "critical")
             if self._capture:
                 self._capture.stop()
             return False
@@ -214,6 +245,28 @@ class MirrorThread(QThread):
                 if self._stop_event.wait(timeout=0.05):
                     break
                 continue
+
+            # ── ★ 레이아웃 파라미터 실시간 반영 ─────────────────
+            if self._layout_dirty:
+                with self._layout_lock:
+                    self._layout_dirty = False
+                try:
+                    self.status_changed.emit("파라미터 변경 — 레이아웃 재계산 중...")
+                    self._weight_matrix = self._build_layout(
+                        self._active_w, self._active_h
+                    )
+                    prev_colors = None  # 스무딩 리셋
+                    if self._debug_profile:
+                        self._logger.debug(
+                            f"layout rebuilt (live): "
+                            f"wmat={self._weight_matrix.shape}"
+                        )
+                    self.status_changed.emit("미러링 실행 중")
+                except Exception as layout_err:
+                    if self._debug_profile:
+                        self._logger.debug(
+                            f"live layout rebuild error: {layout_err}"
+                        )
 
             # ── 캡처 ────────────────────────────────────────────
             if self._debug_profile:
@@ -289,7 +342,7 @@ class MirrorThread(QThread):
             mirror_cfg_live = dict(mirror_cfg)
             mirror_cfg_live["brightness"] = self.brightness
             mirror_cfg_live["smoothing_factor"] = (
-                mirror_cfg["smoothing_factor"]
+                self.smoothing_factor
                 if self.smoothing_enabled else 0.0
             )
 
@@ -322,7 +375,6 @@ class MirrorThread(QThread):
             # ★ 재연결 실패 감지 — 장치가 완전히 끊긴 경우 상태 알림
             if not self._device.connected:
                 self.status_changed.emit("USB 연결 끊김 — 재연결 대기 중...")
-                # 장치가 복구될 때까지 짧은 대기 후 재시도
                 if self._stop_event.wait(timeout=1.0):
                     break
                 continue
@@ -391,7 +443,7 @@ class MirrorThread(QThread):
         try:
             self._run_loop()
         except Exception as e:
-            self.error.emit(f"미러링 오류: {e}")
+            self.error.emit(f"미러링 오류: {e}", "warning")
         finally:
             self._cleanup()
 

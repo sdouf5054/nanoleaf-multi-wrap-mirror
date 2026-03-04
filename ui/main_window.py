@@ -92,6 +92,14 @@ class MainWindow(QMainWindow):
         self.tab_mirror.chk_smoothing.stateChanged.connect(
             self._on_smoothing_changed
         )
+        # ★ 실시간 레이아웃 파라미터 변경
+        self.tab_mirror.layout_params_changed.connect(
+            self._on_layout_params_changed
+        )
+        # ★ 실시간 스무딩 계수 변경
+        self.tab_mirror.smoothing_factor_changed.connect(
+            self._on_smoothing_factor_changed
+        )
 
         self.tab_setup.request_mirror_stop.connect(self._stop_mirror_sync)
         self.tab_color.request_mirror_stop.connect(self._stop_mirror_sync)
@@ -167,8 +175,36 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(text)
         self.tray.update_status(text)
 
-    def _on_error(self, msg):
-        QMessageBox.warning(self, "오류", msg)
+    def _on_error(self, msg, severity="critical"):
+        """★ 심각도별 에러 표시 분리
+
+        - critical: 팝업(QMessageBox) — 미러링 시작 실패 등 사용자 개입 필요
+        - warning: 상태바 + 탭 라벨에 표시 → 5초 후 자동 소멸
+        """
+        if severity == "critical":
+            QMessageBox.warning(self, "오류", msg)
+        else:
+            # 상태바 + 탭에 경고 표시
+            warning_text = f"⚠ {msg}"
+            self.statusBar().showMessage(warning_text)
+            self.tab_mirror.update_status(warning_text)
+            self.tray.update_status(warning_text)
+
+            # 5초 후 상태 메시지를 기본값으로 복원
+            QTimer.singleShot(5000, self._restore_status_after_warning)
+
+    def _restore_status_after_warning(self):
+        """경고 메시지 자동 소멸 후 현재 상태에 맞는 메시지로 복원"""
+        if self.mirror_thread and self.mirror_thread.isRunning():
+            if self.mirror_thread._paused:
+                text = "일시정지"
+            else:
+                text = "미러링 실행 중"
+        else:
+            text = "준비"
+        self.statusBar().showMessage(text)
+        self.tab_mirror.update_status(text)
+        self.tray.update_status(text)
 
     def _on_brightness_changed(self, value):
         if self.mirror_thread and self.mirror_thread.isRunning():
@@ -177,6 +213,21 @@ class MainWindow(QMainWindow):
     def _on_smoothing_changed(self, state):
         if self.mirror_thread and self.mirror_thread.isRunning():
             self.mirror_thread.smoothing_enabled = bool(state)
+
+    def _on_layout_params_changed(self, params):
+        """★ 미러링 중 감쇠/페널티 변경 → MirrorThread에 전달"""
+        if self.mirror_thread and self.mirror_thread.isRunning():
+            self.mirror_thread.update_layout_params(
+                decay_radius=params.get("decay_radius"),
+                parallel_penalty=params.get("parallel_penalty"),
+                decay_per_side=params.get("decay_per_side"),
+                penalty_per_side=params.get("penalty_per_side"),
+            )
+
+    def _on_smoothing_factor_changed(self, value):
+        """★ 미러링 중 스무딩 계수 변경 → MirrorThread에 직접 반영"""
+        if self.mirror_thread and self.mirror_thread.isRunning():
+            self.mirror_thread.smoothing_factor = value
 
     def _on_session_event(self, event):
         """잠금/해제 이벤트 처리 — turn_off_on_lock 옵션 반영"""
