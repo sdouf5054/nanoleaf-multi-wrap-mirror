@@ -2,13 +2,12 @@
 
 import os
 import sys
-from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction, QWidgetAction, QSlider, QLabel, QHBoxLayout, QWidget
+from PyQt5.QtWidgets import QSystemTrayIcon, QMenu, QAction
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QTimer
 
-# 글로벌 핫키용
 try:
-    import keyboard  # pip install keyboard
+    import keyboard
     HAS_KEYBOARD = True
 except ImportError:
     HAS_KEYBOARD = False
@@ -22,24 +21,20 @@ class SystemTray(QSystemTrayIcon):
         - 일시정지/재개
         - 설정 열기
         - 종료
-    글로벌 핫키:
-        - Ctrl+Shift+P: 일시정지 토글
+    글로벌 핫키 (config["options"]에서 읽음):
+        - hotkey_toggle      : 미러링 On/Off  (기본: ctrl+shift+o)
+        - hotkey_bright_up   : 밝기 +10%      (기본: ctrl+shift+up)
+        - hotkey_bright_down : 밝기 -10%      (기본: ctrl+shift+down)
     """
 
     def __init__(self, main_window, parent=None):
-        # PyInstaller 실행 환경 분기 처리
-        # exe 실행 시: 리소스는 _MEIPASS 임시 폴더에서 찾음
-        # 스크립트 실행 시: 프로젝트 루트 assets 폴더에서 찾음
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
         else:
             base_path = os.path.dirname(os.path.dirname(__file__))
 
         icon_path = os.path.join(base_path, "assets", "icon.ico")
-        if os.path.exists(icon_path):
-            icon = QIcon(icon_path)
-        else:
-            icon = QIcon()
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
 
         super().__init__(icon, parent)
         self.main_window = main_window
@@ -48,25 +43,21 @@ class SystemTray(QSystemTrayIcon):
         self._build_menu()
         self._setup_hotkey()
 
-        # 트레이 아이콘 더블클릭 → 창 열기
         self.activated.connect(self._on_activated)
 
     def _build_menu(self):
         menu = QMenu()
 
-        # 상태 표시
         self.status_action = QAction("대기 중", menu)
         self.status_action.setEnabled(False)
         menu.addAction(self.status_action)
         menu.addSeparator()
 
-        # 미러링 on/off
         self.onoff_action = QAction("▶ 미러링 시작", menu)
         self.onoff_action.triggered.connect(self._toggle_onoff)
         menu.addAction(self.onoff_action)
         menu.addSeparator()
 
-        # 밝기
         bright_menu = QMenu("💡 밝기", menu)
         for pct in (25, 50, 75, 100):
             action = QAction(f"{pct}%", bright_menu)
@@ -75,14 +66,11 @@ class SystemTray(QSystemTrayIcon):
         menu.addMenu(bright_menu)
         menu.addSeparator()
 
-        # 설정 열기
         show_action = QAction("⚙ 설정 열기", menu)
         show_action.triggered.connect(self._show_window)
         menu.addAction(show_action)
-
         menu.addSeparator()
 
-        # 종료
         quit_action = QAction("❌ 종료", menu)
         quit_action.triggered.connect(self._quit)
         menu.addAction(quit_action)
@@ -90,18 +78,44 @@ class SystemTray(QSystemTrayIcon):
         self.setContextMenu(menu)
 
     def _setup_hotkey(self):
-        """글로벌 핫키 등록: on/off, 밝기 조절"""
-        if HAS_KEYBOARD:
+        """config에서 핫키 문자열을 읽어 글로벌 핫키 등록."""
+        if not HAS_KEYBOARD:
+            return
+
+        # 기존 핫키 전부 해제
+        try:
+            keyboard.unhook_all()
+        except Exception:
+            pass
+
+        opts = self.main_window.config.get("options", {})
+        if not opts.get("hotkey_enabled", True):
+            return
+
+        # 핫키 문자열 (config에 없으면 기존 기본값 사용)
+        hk_toggle = opts.get("hotkey_toggle", "ctrl+shift+o")
+        hk_up     = opts.get("hotkey_bright_up", "ctrl+shift+up")
+        hk_down   = opts.get("hotkey_bright_down", "ctrl+shift+down")
+
+        def _safe_add(hotkey_str, callback):
+            """잘못된 키 문자열로 인한 ValueError를 흡수."""
+            if not hotkey_str.strip():
+                return
             try:
-                keyboard.unhook_all()
-                keyboard.add_hotkey("ctrl+shift+o", lambda: QTimer.singleShot(0, self._toggle_onoff))
-                keyboard.add_hotkey("ctrl+shift+up", lambda: QTimer.singleShot(0, self._brightness_up))
-                keyboard.add_hotkey("ctrl+shift+down", lambda: QTimer.singleShot(0, self._brightness_down))
-            except Exception:
-                pass
+                keyboard.add_hotkey(
+                    hotkey_str.strip(),
+                    lambda: QTimer.singleShot(0, callback)
+                )
+            except Exception as e:
+                print(f"[핫키 등록 실패] '{hotkey_str}': {e}")
+
+        _safe_add(hk_toggle, self._toggle_onoff)
+        _safe_add(hk_up,     self._brightness_up)
+        _safe_add(hk_down,   self._brightness_down)
+
+    # ── 액션 ──────────────────────────────────────────────────────────
 
     def _toggle_onoff(self):
-        """미러링 시작/중지 토글"""
         mw = self.main_window
         if mw.mirror_thread and mw.mirror_thread.isRunning():
             mw._stop_mirror()
@@ -150,7 +164,6 @@ class SystemTray(QSystemTrayIcon):
         self.setToolTip(f"Nanoleaf Mirror — {text}")
 
     def cleanup(self):
-        """핫키 해제"""
         if HAS_KEYBOARD:
             try:
                 keyboard.unhook_all()

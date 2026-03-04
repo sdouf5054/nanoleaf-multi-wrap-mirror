@@ -54,6 +54,12 @@ DEFAULT_CONFIG = {
         "tray_enabled": True,
         "hotkey_enabled": True,
         "minimize_to_tray": True,
+        # 글로벌 핫키 문자열 — keyboard 라이브러리 형식
+        # 단일 키: "f13", "f14", "f15"
+        # 조합 키: "ctrl+shift+o", "ctrl+shift+up"
+        "hotkey_toggle": "ctrl+shift+o",
+        "hotkey_bright_up": "ctrl+shift+up",
+        "hotkey_bright_down": "ctrl+shift+down",
     },
 }
 
@@ -61,7 +67,6 @@ DEFAULT_CONFIG = {
 def _config_path():
     """config.json 경로 — exe 실행 시 exe 폴더, 스크립트 실행 시 루트 폴더"""
     if getattr(sys, 'frozen', False):
-        # PyInstaller로 빌드된 exe: 임시 _MEIPASS가 아닌 실제 exe 위치에 저장
         base_dir = os.path.dirname(sys.executable)
     else:
         base_dir = os.path.dirname(os.path.dirname(__file__))

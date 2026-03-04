@@ -4,15 +4,161 @@ import os
 import sys
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QCheckBox, QLabel,
-    QPushButton, QMessageBox, QHBoxLayout
+    QPushButton, QMessageBox, QHBoxLayout, QLineEdit,
+    QFormLayout, QFrame
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QKeySequence
 
 from core.config import save_config
 
 
+# ── F13~F24 가상 키 Qt→keyboard 문자열 매핑 ────────────────────────────────
+# Qt는 F13~F24를 Qt.Key_F13(0x01000030)~Qt.Key_F24로 인식하지만
+# keyboard 라이브러리는 소문자 "f13"~"f24" 문자열로 등록합니다.
+_FKEY_MAP = {getattr(Qt, f"Key_F{n}", None): f"f{n}" for n in range(13, 25)}
+
+# 수식어 키 Qt→keyboard 문자열
+_MOD_MAP = {
+    Qt.Key_Control: "ctrl",
+    Qt.Key_Shift:   "shift",
+    Qt.Key_Alt:     "alt",
+    Qt.Key_Meta:    "windows",
+}
+
+# keyboard 라이브러리가 인식하는 일반 키 이름 (Qt Key → 문자열)
+_NAMED_KEYS = {
+    Qt.Key_Up:     "up",
+    Qt.Key_Down:   "down",
+    Qt.Key_Left:   "left",
+    Qt.Key_Right:  "right",
+    Qt.Key_Space:  "space",
+    Qt.Key_Return: "enter",
+    Qt.Key_Escape: "esc",
+    Qt.Key_Tab:    "tab",
+    Qt.Key_Delete: "delete",
+    Qt.Key_Home:   "home",
+    Qt.Key_End:    "end",
+    Qt.Key_PageUp: "page up",
+    Qt.Key_PageDown: "page down",
+}
+
+
+def _qt_key_to_str(event):
+    """QKeyEvent → keyboard 라이브러리 핫키 문자열 변환.
+
+    예시:
+        Ctrl+Shift+O  →  "ctrl+shift+o"
+        F13           →  "f13"
+        F15           →  "f15"
+    """
+    key = event.key()
+    mods = event.modifiers()
+
+    # 수식어 단독 입력은 무시
+    if key in (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta):
+        return None
+
+    # 수식어 조합 문자열 구성
+    parts = []
+    if mods & Qt.ControlModifier:
+        parts.append("ctrl")
+    if mods & Qt.ShiftModifier:
+        parts.append("shift")
+    if mods & Qt.AltModifier:
+        parts.append("alt")
+    if mods & Qt.MetaModifier:
+        parts.append("windows")
+
+    # 키 본체 결정: F13~F24 우선, 이름 있는 키, 일반 문자
+    if key in _FKEY_MAP:
+        parts.append(_FKEY_MAP[key])
+    elif key in _NAMED_KEYS:
+        parts.append(_NAMED_KEYS[key])
+    else:
+        ch = chr(key).lower() if 32 <= key < 127 else None
+        if ch is None:
+            return None
+        parts.append(ch)
+
+    return "+".join(parts)
+
+
+class HotkeyEdit(QLineEdit):
+    """클릭 후 키 입력을 받아 핫키 문자열을 자동 설정하는 위젯.
+
+    - 클릭하면 "키를 누르세요…" 안내 표시 + 입력 대기
+    - F13~F24 단독 입력 및 Ctrl/Shift/Alt 조합 모두 지원
+    - Escape 입력 시 취소
+    """
+
+    def __init__(self, placeholder="예: ctrl+shift+o  또는  f13", parent=None):
+        super().__init__(parent)
+        self._listening = False
+        self._original_text = ""
+        self.setPlaceholderText(placeholder)
+        self.setReadOnly(True)           # 직접 타이핑 방지 — 키 감지 전용
+        self.setCursor(Qt.PointingHandCursor)
+        self._set_idle_style()
+
+    # ── 스타일 ──────────────────────────────────────────────────────
+
+    def _set_idle_style(self):
+        self.setStyleSheet(
+            "QLineEdit { background: #2b2b2b; color: #ddd; border: 1px solid #555;"
+            " border-radius: 4px; padding: 3px 6px; }"
+            "QLineEdit:hover { border-color: #888; }"
+        )
+
+    def _set_listening_style(self):
+        self.setStyleSheet(
+            "QLineEdit { background: #1a3a5c; color: #7ec8e3; border: 2px solid #3a8fc7;"
+            " border-radius: 4px; padding: 3px 6px; font-style: italic; }"
+        )
+
+    # ── 이벤트 ──────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._start_listening()
+        super().mousePressEvent(event)
+
+    def _start_listening(self):
+        self._original_text = self.text()
+        self._listening = True
+        self.setText("🎹 키를 누르세요…")
+        self._set_listening_style()
+        self.setFocus()
+
+    def keyPressEvent(self, event):
+        if not self._listening:
+            return
+
+        if event.key() == Qt.Key_Escape:
+            # 취소: 원래 값으로 복원
+            self.setText(self._original_text)
+            self._listening = False
+            self._set_idle_style()
+            return
+
+        hotkey = _qt_key_to_str(event)
+        if hotkey:
+            self.setText(hotkey)
+            self._listening = False
+            self._set_idle_style()
+
+    def focusOutEvent(self, event):
+        # 포커스를 잃으면 리스닝 취소
+        if self._listening:
+            self.setText(self._original_text)
+            self._listening = False
+            self._set_idle_style()
+        super().focusOutEvent(event)
+
+
+# ── 시작프로그램 헬퍼 ────────────────────────────────────────────────────────
+
 def _startup_shortcut_path():
-    """Windows 시작프로그램 폴더의 바로가기 경로"""
     startup = os.path.join(
         os.environ.get("APPDATA", ""), "Microsoft", "Windows",
         "Start Menu", "Programs", "Startup"
@@ -25,17 +171,11 @@ def _is_startup_registered():
 
 
 def _register_startup():
-    """Windows 시작프로그램에 바로가기 생성 (pythonw, PowerShell 사용)"""
-    import os
-    import sys
     import subprocess
-
     shortcut_path = _startup_shortcut_path()
     main_py = os.path.abspath("main.py")
     workdir = os.path.abspath(".")
-
-    current_python_dir = os.path.dirname(sys.executable)
-    pythonw = os.path.join(current_python_dir, "pythonw.exe")
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pythonw):
         pythonw = sys.executable
 
@@ -48,12 +188,9 @@ def _register_startup():
         f'$sc.Description = "Nanoleaf Screen Mirror"; '
         f'$sc.Save()'
     )
-
     try:
-        subprocess.run(
-            ["powershell", "-Command", ps_script],
-            capture_output=True, timeout=10
-        )
+        subprocess.run(["powershell", "-Command", ps_script],
+                       capture_output=True, timeout=10)
         return os.path.exists(shortcut_path)
     except Exception:
         return False
@@ -65,6 +202,8 @@ def _unregister_startup():
         os.remove(path)
 
 
+# ── 옵션 탭 ─────────────────────────────────────────────────────────────────
+
 class OptionsTab(QWidget):
     def __init__(self, config, main_window=None, parent=None):
         super().__init__(parent)
@@ -72,11 +211,7 @@ class OptionsTab(QWidget):
         self.main_window = main_window
 
         if "options" not in self.config:
-            self.config["options"] = {
-                "tray_enabled": True,
-                "hotkey_enabled": True,
-                "minimize_to_tray": True,
-            }
+            self.config["options"] = {}
         self.opt = self.config["options"]
 
         self._build_ui()
@@ -85,7 +220,7 @@ class OptionsTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
 
-        # === 시스템 트레이 ===
+        # ── 시스템 트레이 ───────────────────────────────────────────
         tray_group = QGroupBox("시스템 트레이")
         tray_layout = QVBoxLayout(tray_group)
 
@@ -100,28 +235,58 @@ class OptionsTab(QWidget):
 
         layout.addWidget(tray_group)
 
-        # === 글로벌 핫키 ===
+        # ── 글로벌 핫키 ─────────────────────────────────────────────
         hotkey_group = QGroupBox("글로벌 핫키")
         hotkey_layout = QVBoxLayout(hotkey_group)
 
         self.chk_hotkey = QCheckBox("글로벌 핫키 사용")
         self.chk_hotkey.setChecked(self.opt.get("hotkey_enabled", True))
+        self.chk_hotkey.stateChanged.connect(self._on_hotkey_enabled_changed)
         hotkey_layout.addWidget(self.chk_hotkey)
 
-        hotkey_desc = QLabel(
-            "• Ctrl+Shift+O — 미러링 On/Off\n"
-            "• Ctrl+Shift+↑ — 밝기 +10%\n"
-            "• Ctrl+Shift+↓ — 밝기 -10%"
+        # 안내
+        hint = QLabel(
+            "버튼을 클릭한 뒤 원하는 키를 누르면 자동으로 입력됩니다.\n"
+            "단일 키(F13~F24) 또는 조합 키(Ctrl+Shift+O 등) 모두 지원합니다."
         )
-        hotkey_layout.addWidget(hotkey_desc)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        hint.setWordWrap(True)
+        hotkey_layout.addWidget(hint)
 
-        hotkey_note = QLabel("※ keyboard 패키지 필요 (pip install keyboard)")
-        hotkey_note.setStyleSheet("color: #888;")
-        hotkey_layout.addWidget(hotkey_note)
+        # 구분선
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        hotkey_layout.addWidget(line)
+
+        # 키 입력 폼
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignRight)
+        form.setSpacing(8)
+
+        self.edit_toggle = HotkeyEdit()
+        self.edit_toggle.setText(self.opt.get("hotkey_toggle", "ctrl+shift+o"))
+        form.addRow("미러링 On/Off :", self.edit_toggle)
+
+        self.edit_bright_up = HotkeyEdit()
+        self.edit_bright_up.setText(self.opt.get("hotkey_bright_up", "ctrl+shift+up"))
+        form.addRow("밝기 +10% :", self.edit_bright_up)
+
+        self.edit_bright_down = HotkeyEdit()
+        self.edit_bright_down.setText(self.opt.get("hotkey_bright_down", "ctrl+shift+down"))
+        form.addRow("밝기 -10% :", self.edit_bright_down)
+
+        hotkey_layout.addLayout(form)
+
+        # 기본값 복원 버튼
+        btn_reset_hk = QPushButton("↩ 핫키 기본값 복원")
+        btn_reset_hk.setFixedWidth(160)
+        btn_reset_hk.clicked.connect(self._reset_hotkeys)
+        hotkey_layout.addWidget(btn_reset_hk)
 
         layout.addWidget(hotkey_group)
 
-        # === 잠금 화면 동작 ===  ★ 추가된 섹션
+        # ── 잠금 화면 동작 ───────────────────────────────────────────
         lock_group = QGroupBox("잠금 화면 동작")
         lock_layout = QVBoxLayout(lock_group)
 
@@ -139,7 +304,7 @@ class OptionsTab(QWidget):
 
         layout.addWidget(lock_group)
 
-        # === 시작프로그램 ===
+        # ── 시작프로그램 ─────────────────────────────────────────────
         startup_group = QGroupBox("Windows 시작프로그램")
         startup_layout = QVBoxLayout(startup_group)
 
@@ -157,7 +322,7 @@ class OptionsTab(QWidget):
 
         layout.addWidget(startup_group)
 
-        # === 저장 ===
+        # ── 저장 ────────────────────────────────────────────────────
         btn_layout = QHBoxLayout()
         btn_save = QPushButton("💾 옵션 저장")
         btn_save.clicked.connect(self._save)
@@ -167,17 +332,38 @@ class OptionsTab(QWidget):
 
         layout.addStretch()
 
+        # 초기 활성화 상태 동기화
+        self._on_hotkey_enabled_changed(self.chk_hotkey.checkState())
+
+    # ── 내부 슬롯 ───────────────────────────────────────────────────
+
     def _on_tray_changed(self, state):
-        """트레이 비활성화 시 최소화 옵션도 비활성화"""
         self.chk_minimize.setEnabled(bool(state))
+
+    def _on_hotkey_enabled_changed(self, state):
+        enabled = bool(state)
+        self.edit_toggle.setEnabled(enabled)
+        self.edit_bright_up.setEnabled(enabled)
+        self.edit_bright_down.setEnabled(enabled)
+
+    def _reset_hotkeys(self):
+        self.edit_toggle.setText("ctrl+shift+o")
+        self.edit_bright_up.setText("ctrl+shift+up")
+        self.edit_bright_down.setText("ctrl+shift+down")
 
     def _save(self):
         # config 반영
-        self.opt["tray_enabled"] = self.chk_tray.isChecked()
-        self.opt["hotkey_enabled"] = self.chk_hotkey.isChecked()
-        self.opt["minimize_to_tray"] = self.chk_minimize.isChecked()
+        self.opt["tray_enabled"]      = self.chk_tray.isChecked()
+        self.opt["hotkey_enabled"]    = self.chk_hotkey.isChecked()
+        self.opt["minimize_to_tray"]  = self.chk_minimize.isChecked()
         self.opt["auto_start_mirror"] = self.chk_auto_mirror.isChecked()
-        self.opt["turn_off_on_lock"] = self.chk_lock_stop.isChecked()  # ★ 추가
+        self.opt["turn_off_on_lock"]  = self.chk_lock_stop.isChecked()
+
+        # 핫키 문자열 저장
+        self.opt["hotkey_toggle"]      = self.edit_toggle.text().strip()
+        self.opt["hotkey_bright_up"]   = self.edit_bright_up.text().strip()
+        self.opt["hotkey_bright_down"] = self.edit_bright_down.text().strip()
+
         save_config(self.config)
 
         # 시작프로그램 등록/해제
@@ -197,7 +383,7 @@ class OptionsTab(QWidget):
             else:
                 self.main_window.tray.hide()
 
-        # 핫키 활성/비활성
+        # 핫키 재등록 (새 문자열 반영)
         if self.main_window and hasattr(self.main_window, "tray"):
             tray = self.main_window.tray
             if self.opt["hotkey_enabled"]:

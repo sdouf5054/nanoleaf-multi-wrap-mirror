@@ -50,11 +50,8 @@ class MirrorThread(QThread):
         try:
             self.status_changed.emit("화면 캡처 초기화...")
             capture = ScreenCapture(mirror_cfg["monitor_index"])
-            # ★ target_fps를 넘겨 dxcam 백그라운드 캡처 주기를 미러링 FPS에 맞춤
-            #   초과 캡처(예: 120Hz 모니터에서 120회/초 캡처)를 막아 CPU 부하 감소
             capture.start(target_fps=target_fps)
 
-            # 디버그 프로파일 로그 — config["options"]["debug_profile"] 로 on/off
             import logging
             debug_profile = cfg.get("options", {}).get("debug_profile", False)
             log_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "mirror_debug.log")
@@ -68,38 +65,83 @@ class MirrorThread(QThread):
                 logger.propagate = False
                 logger.debug(f"screen: {capture.screen_w}x{capture.screen_h}")
                 logger.debug(f"capture target_fps: {target_fps}")
+
             test_frame = capture.grab()
             if debug_profile and test_frame is not None:
                 logger.debug(f"frame shape: {test_frame.shape}, mean: {test_frame.mean():.1f}")
 
             self.status_changed.emit("가중치 행렬 생성...")
+
+            # ── 레이아웃 계산 헬퍼 ────────────────────────────────────────
+            def _build_layout(w, h):
+                """LED 위치 + 가중치 행렬을 (w, h) 해상도 기준으로 재계산."""
+                base_decay = mirror_cfg["decay_radius"]
+                per_decay = mirror_cfg.get("decay_radius_per_side", {})
+                decay_param = (
+                    {s: per_decay.get(s, base_decay)
+                     for s in ("top", "bottom", "left", "right")}
+                    if per_decay else base_decay
+                )
+
+                base_penalty = mirror_cfg["parallel_penalty"]
+                per_penalty = mirror_cfg.get("parallel_penalty_per_side", {})
+                penalty_param = (
+                    {s: per_penalty.get(s, base_penalty)
+                     for s in ("top", "bottom", "left", "right")}
+                    if per_penalty else base_penalty
+                )
+
+                positions, sides = get_led_positions(
+                    w, h,
+                    layout_cfg["segments"], led_count,
+                    orientation=mirror_cfg.get("orientation", "auto"),
+                    portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
+                )
+                wmat = build_weight_matrix(
+                    w, h, positions, sides,
+                    mirror_cfg["grid_cols"], mirror_cfg["grid_rows"],
+                    decay_param, penalty_param
+                )
+                return wmat
+            # ─────────────────────────────────────────────────────────────
+
             led_positions, led_sides = get_led_positions(
                 capture.screen_w, capture.screen_h,
                 layout_cfg["segments"], led_count,
                 orientation=mirror_cfg.get("orientation", "auto"),
                 portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
             )
-            # 변별 파라미터: per_side가 있으면 기본값과 병합
             base_decay = mirror_cfg["decay_radius"]
             per_decay = mirror_cfg.get("decay_radius_per_side", {})
-            decay_param = {s: per_decay.get(s, base_decay) for s in ("top", "bottom", "left", "right")} if per_decay else base_decay
-
+            decay_param = (
+                {s: per_decay.get(s, base_decay)
+                 for s in ("top", "bottom", "left", "right")}
+                if per_decay else base_decay
+            )
             base_penalty = mirror_cfg["parallel_penalty"]
             per_penalty = mirror_cfg.get("parallel_penalty_per_side", {})
-            penalty_param = {s: per_penalty.get(s, base_penalty) for s in ("top", "bottom", "left", "right")} if per_penalty else base_penalty
-
+            penalty_param = (
+                {s: per_penalty.get(s, base_penalty)
+                 for s in ("top", "bottom", "left", "right")}
+                if per_penalty else base_penalty
+            )
             weight_matrix = build_weight_matrix(
                 capture.screen_w, capture.screen_h,
                 led_positions, led_sides,
                 mirror_cfg["grid_cols"], mirror_cfg["grid_rows"],
                 decay_param, penalty_param
             )
-            if debug_profile: logger.debug(f"weight_matrix: {weight_matrix.shape}, sum[0]: {weight_matrix[0].sum():.3f}")
+            if debug_profile:
+                logger.debug(
+                    f"weight_matrix: {weight_matrix.shape}, "
+                    f"sum[0]: {weight_matrix[0].sum():.3f}"
+                )
 
             self.status_changed.emit("Nanoleaf 연결 중...")
             device = NanoleafDevice(vendor_id, product_id, led_count)
             device.connect()
-            if debug_profile: logger.debug("device connected")
+            if debug_profile:
+                logger.debug("device connected")
 
         except Exception as e:
             self.error.emit(str(e))
@@ -115,12 +157,13 @@ class MirrorThread(QThread):
         fps_display_time = start_time
         frame_interval = 1.0 / target_fps
 
-        # --- 구간별 타이밍 측정 (병목 분석용, debug_profile=True 일 때만 활성) ---
         PROFILE_INTERVAL = 60
         t_capture_acc = 0.0
         t_color_acc   = 0.0
         t_usb_acc     = 0.0
         t_total_acc   = 0.0
+
+        fps = 0.0  # fps_display_time 블록 밖에서도 참조 가능하도록 초기화
 
         try:
             while self._running:
@@ -130,7 +173,7 @@ class MirrorThread(QThread):
                     time.sleep(0.05)
                     continue
 
-                # 캡처
+                # ── 캡처 ────────────────────────────────────────────────
                 if debug_profile:
                     t0 = time.perf_counter()
                 frame = capture.grab()
@@ -141,14 +184,41 @@ class MirrorThread(QThread):
                     time.sleep(0.005)
                     continue
 
-                # 실시간 값 반영
+                # ── 실시간 해상도/회전 변경 감지 ────────────────────────
+                current_h, current_w = frame.shape[:2]
+                if current_h != capture.screen_h or current_w != capture.screen_w:
+                    self.status_changed.emit(
+                        f"해상도 변경 감지 ({current_w}×{current_h}) — 레이아웃 재계산 중..."
+                    )
+                    # 캡처 객체의 기준 해상도 업데이트
+                    capture.screen_w = current_w
+                    capture.screen_h = current_h
+
+                    # 가중치 행렬 재계산 (피벗/해상도 변경 즉각 반영)
+                    try:
+                        weight_matrix = _build_layout(current_w, current_h)
+                        prev_colors = None  # 스무딩 버퍼 초기화 (크기 불일치 방지)
+                        if debug_profile:
+                            logger.debug(
+                                f"layout rebuilt: {current_w}x{current_h}, "
+                                f"wmat={weight_matrix.shape}"
+                            )
+                    except Exception as layout_err:
+                        if debug_profile:
+                            logger.debug(f"layout rebuild error: {layout_err}")
+                        # 재계산 실패 시 기존 weight_matrix 유지하고 계속 진행
+                        pass
+                    else:
+                        self.status_changed.emit("미러링 실행 중")
+
+                # ── 실시간 값 반영 ───────────────────────────────────────
                 mirror_cfg_live = dict(mirror_cfg)
                 mirror_cfg_live["brightness"] = self.brightness
                 mirror_cfg_live["smoothing_factor"] = (
                     mirror_cfg["smoothing_factor"] if self.smoothing_enabled else 0.0
                 )
 
-                # 색상 연산
+                # ── 색상 연산 ────────────────────────────────────────────
                 if debug_profile:
                     t1 = time.perf_counter()
                 grb_data, rgb_colors = compute_led_colors(
@@ -158,7 +228,7 @@ class MirrorThread(QThread):
                 if debug_profile:
                     t_color_acc += time.perf_counter() - t1
 
-                # USB 전송
+                # ── USB 전송 ─────────────────────────────────────────────
                 if debug_profile:
                     t2 = time.perf_counter()
                 device.send_rgb(grb_data)
@@ -175,7 +245,6 @@ class MirrorThread(QThread):
                     self.fps_updated.emit(fps)
                     fps_display_time = now
 
-                # PROFILE_INTERVAL 프레임마다 평균 ms 로그 출력 (debug_profile=True 시)
                 if debug_profile and frame_count % PROFILE_INTERVAL == 0:
                     n = PROFILE_INTERVAL
                     avg_cap   = t_capture_acc / n * 1000
