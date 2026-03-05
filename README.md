@@ -15,3 +15,9 @@ Nanoleaf 4D LED 스트립을 모니터 뒷면에 여러 겹 감아 화면 색상
 pip install -r requirements.txt
 python main.py
 ```
+## 네이티브 캡처 (선택)
+CPU 사용률을 ~1%로 줄이려면:
+1. Visual Studio (2026 권장) (C++ 데스크톱 개발 워크로드) 설치
+2. native/build.bat 실행 → fast_capture.dll 생성
+3. DLL을 프로젝트 루트에 복사
+DLL 없이도 dxcam 폴백으로 정상 동작합니다.
