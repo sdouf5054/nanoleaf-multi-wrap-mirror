@@ -10,12 +10,12 @@
       "w1_tl": 66,
       "w1_tr": 52,
       "w1_br": 44,
-      "w1_end": 30,
-      "w2_bl": 29,
+      "w1_end": 29,
       "w2_tl": 21,
       "w2_tr": 8,
-      "w2_br": 1,
-      "w2_end": 0
+      "w2_br": 0,
+      "w2_end": 0,
+      "w2_bl": 29
     },
     "segments": [
       {
@@ -35,7 +35,7 @@
       },
       {
         "start": 44,
-        "end": 30,
+        "end": 29,
         "side": "bottom"
       },
       {
@@ -50,11 +50,11 @@
       },
       {
         "start": 8,
-        "end": 1,
+        "end": 0,
         "side": "right"
       },
       {
-        "start": 1,
+        "start": 0,
         "end": 0,
         "side": "bottom"
       }
@@ -76,6 +76,18 @@
     "grid_rows": 32,
     "decay_radius": 0.3,
     "parallel_penalty": 5.0,
+    "decay_radius_per_side": {
+      "top": 0.3,
+      "bottom": 0.2,
+      "left": 0.3,
+      "right": 0.3
+    },
+    "parallel_penalty_per_side": {
+      "top": 5.0,
+      "bottom": 1.0,
+      "left": 5.0,
+      "right": 5.0
+    },
     "smoothing_factor": 0.5,
     "brightness": 1.0,
     "orientation": "auto",
@@ -85,6 +97,10 @@
     "tray_enabled": true,
     "hotkey_enabled": true,
     "minimize_to_tray": true,
-    "auto_start_mirror": true
+    "hotkey_toggle": "f21",
+    "hotkey_bright_up": "f23",
+    "hotkey_bright_down": "f22",
+    "auto_start_mirror": true,
+    "turn_off_on_lock": true
   }
 }

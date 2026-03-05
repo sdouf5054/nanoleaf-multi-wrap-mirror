@@ -17,12 +17,7 @@ import threading
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 
-try:
-    from native_capture import NativeScreenCapture as ScreenCapture
-    _NATIVE_CAPTURE = True
-except ImportError:
-    from core.capture import ScreenCapture
-    _NATIVE_CAPTURE = False
+from core.capture import ScreenCapture
 from core.device import NanoleafDevice
 from core.layout import get_led_positions, build_weight_matrix
 from core.color import ColorPipeline
@@ -133,14 +128,7 @@ class MirrorThread(QThread):
 
             try:
                 mirror_cfg = self.config["mirror"]
-                if _NATIVE_CAPTURE:
-                    self._capture = ScreenCapture(
-                        monitor_index=mirror_cfg["monitor_index"],
-                        grid_cols=mirror_cfg["grid_cols"],
-                        grid_rows=mirror_cfg["grid_rows"],
-                    )
-                else:
-                    self._capture = ScreenCapture(mirror_cfg["monitor_index"])
+                self._capture = ScreenCapture(mirror_cfg["monitor_index"])
                 self._capture.start(target_fps=mirror_cfg["target_fps"])
                 self._active_w = self._capture.screen_w
                 self._active_h = self._capture.screen_h
@@ -234,16 +222,9 @@ class MirrorThread(QThread):
             self._logger.propagate = False
 
         try:
-            # screen capture
+            # 화면 캡처
             self.status_changed.emit("화면 캡처 초기화...")
-            if _NATIVE_CAPTURE:
-                self._capture = ScreenCapture(
-                    monitor_index=mirror_cfg["monitor_index"],
-                    grid_cols=mirror_cfg["grid_cols"],
-                    grid_rows=mirror_cfg["grid_rows"],
-                )
-            else:
-                self._capture = ScreenCapture(mirror_cfg["monitor_index"])
+            self._capture = ScreenCapture(mirror_cfg["monitor_index"])
             self._capture.start(target_fps=target_fps)
 
             if self._debug_profile:
