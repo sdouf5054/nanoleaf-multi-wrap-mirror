@@ -1,4 +1,12 @@
-"""메인 윈도우 — 탭 구조 + 미러링 스레드 + 트레이 + 잠금 감지"""
+"""메인 윈도우 — 탭 구조 + 미러링 스레드 + 트레이 + 잠금 감지
+
+[변경 사항 — 오디오 비주얼라이저 통합]
+★ AudioTab import 추가
+★ tab_audio 인스턴스 생성 + 탭 추가
+★ tab_audio 시그널 연결
+★ _start_mirror()에서 비주얼라이저 중지 추가
+★ _shutdown()에서 tab_audio.cleanup() 추가
+"""
 
 import ctypes
 import ctypes.wintypes
@@ -13,6 +21,7 @@ from ui.tab_setup import SetupTab
 from ui.tab_color import ColorTab
 from ui.tab_mirror import MirrorTab
 from ui.tab_options import OptionsTab
+from ui.tab_audio import AudioTab       # ★ 추가
 from ui.tray import SystemTray
 from core.mirror import MirrorThread
 from core.config import save_config
@@ -65,8 +74,10 @@ class MainWindow(QMainWindow):
         self.tab_color = ColorTab(config, device_manager=self.device_manager)
         self.tab_mirror = MirrorTab(config)
         self.tab_options = OptionsTab(config, main_window=self)
+        self.tab_audio = AudioTab(config)   # ★ 오디오 비주얼라이저 탭
 
         self.tabs.addTab(self.tab_mirror, "🖥 미러링")
+        self.tabs.addTab(self.tab_audio, "🎵 오디오")  # ★ 미러링 탭 바로 다음
         self.tabs.addTab(self.tab_color, "🎨 색상 보정")
         self.tabs.addTab(self.tab_setup, "⚙ LED 설정")
         self.tabs.addTab(self.tab_options, "🔧 옵션")
@@ -103,6 +114,7 @@ class MainWindow(QMainWindow):
 
         self.tab_setup.request_mirror_stop.connect(self._stop_mirror_sync)
         self.tab_color.request_mirror_stop.connect(self._stop_mirror_sync)
+        self.tab_audio.request_mirror_stop.connect(self._stop_mirror_sync)  # ★ 추가
 
         # --- 잠금 감지 ---
         self._was_mirroring_before_lock = False
@@ -130,6 +142,9 @@ class MainWindow(QMainWindow):
     def _start_mirror(self):
         # ★ DeviceManager로 강제 해제 — 모든 탭의 연결을 한 번에 정리
         self.device_manager.force_release()
+
+        # ★ 오디오 비주얼라이저가 실행 중이면 먼저 중지
+        self.tab_audio.stop_visualizer_sync()
 
         self.tab_mirror.apply_to_config()
         save_config(self.config)
@@ -276,6 +291,7 @@ class MainWindow(QMainWindow):
         if self.mirror_thread and self.mirror_thread.isRunning():
             self.mirror_thread.stop_mirror()
             self.mirror_thread.wait(3000)
+        self.tab_audio.cleanup()    # ★ 오디오 비주얼라이저 정리
         self.tab_color.cleanup()
         self.tab_setup.cleanup()
         # ★ DeviceManager 최종 정리
