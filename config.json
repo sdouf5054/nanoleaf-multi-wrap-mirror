@@ -93,6 +93,28 @@
     "orientation": "auto",
     "portrait_rotation": "cw"
   },
+  "audio_pulse": {
+    "bass_sens": 120,
+    "mid_sens": 100,
+    "high_sens": 100,
+    "brightness": 100,
+    "attack": 100,
+    "release": 80,
+    "zone_bass": 60,
+    "zone_mid": 25,
+    "zone_high": 15
+  },
+  "audio_spectrum": {
+    "bass_sens": 100,
+    "mid_sens": 116,
+    "high_sens": 180,
+    "brightness": 100,
+    "attack": 70,
+    "release": 50,
+    "zone_bass": 64,
+    "zone_mid": 15,
+    "zone_high": 21
+  },
   "options": {
     "tray_enabled": true,
     "hotkey_enabled": true,

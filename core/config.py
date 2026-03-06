@@ -50,13 +50,32 @@ DEFAULT_CONFIG = {
         "orientation": "auto",
         "portrait_rotation": "cw",
     },
+    "audio_pulse": {
+        "bass_sens": 100,
+        "mid_sens": 100,
+        "high_sens": 100,
+        "brightness": 100,
+        "attack": 50,
+        "release": 50,
+        "zone_bass": 33,
+        "zone_mid": 33,
+        "zone_high": 34,
+    },
+    "audio_spectrum": {
+        "bass_sens": 100,
+        "mid_sens": 100,
+        "high_sens": 100,
+        "brightness": 100,
+        "attack": 50,
+        "release": 50,
+        "zone_bass": 33,
+        "zone_mid": 33,
+        "zone_high": 34,
+    },
     "options": {
         "tray_enabled": True,
         "hotkey_enabled": True,
         "minimize_to_tray": True,
-        # 글로벌 핫키 문자열 — keyboard 라이브러리 형식
-        # 단일 키: "f13", "f14", "f15"
-        # 조합 키: "ctrl+shift+o", "ctrl+shift+up"
         "hotkey_toggle": "ctrl+shift+o",
         "hotkey_bright_up": "ctrl+shift+up",
         "hotkey_bright_down": "ctrl+shift+down",
@@ -72,13 +91,6 @@ def _deep_merge(base, override):
     - override에만 있는 키 → 유지 (사용자 커스텀 값 보존)
     - 양쪽 모두 dict인 키 → 재귀 병합
     - 그 외 (list, 스칼라 등) → override 값 우선
-
-    Args:
-        base: 기본값 dict (deep copy된 DEFAULT_CONFIG)
-        override: 사용자 파일에서 읽은 dict
-
-    Returns:
-        병합된 dict (base를 직접 수정하여 반환)
     """
     for key, override_val in override.items():
         if (
@@ -86,10 +98,8 @@ def _deep_merge(base, override):
             and isinstance(base[key], dict)
             and isinstance(override_val, dict)
         ):
-            # 양쪽 모두 dict → 재귀
             _deep_merge(base[key], override_val)
         else:
-            # override 값 우선 (list, 스칼라, 타입 불일치 포함)
             base[key] = override_val
     return base
 
@@ -107,8 +117,6 @@ def load_config():
     """config.json 로드. 없으면 기본값으로 생성.
 
     ★ 재귀 deep merge로 중첩 dict의 새 키도 안전하게 보존합니다.
-    예) DEFAULT_CONFIG["layout"]["corners"]에 새 키가 추가되면,
-        기존 사용자의 corners에 해당 키가 기본값으로 추가됩니다.
     """
     path = _config_path()
     if os.path.exists(path):

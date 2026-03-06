@@ -8,3 +8,4 @@ dist/
 *.spec
 Nanoleaf Mirror.lnk
 fast_capture.dll
+personal_config.json
