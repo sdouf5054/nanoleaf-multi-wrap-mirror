@@ -3,6 +3,7 @@ Nanoleaf Screen Mirror — GUI 앱 진입점
 
 사용법:
     python main.py
+    python main.py --startup   ← 트레이로 바로 시작 (창 숨김)
 """
 
 import sys
@@ -16,10 +17,6 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
 # === 2) Windows DPI Awareness 설정 (QApplication 생성 전, 최우선) ===
-# System DPI Aware(1)로 고정:
-#   - 주 모니터(125%) 기준 물리 해상도를 dxcam이 정확히 읽도록 OS 가상화 차단
-#   - 보조 모니터(175%)로 창 이동 시 Windows가 비트맵 확대(~1.4배)로 처리
-#     → 레이아웃 붕괴/멈춤 원천 차단 (다소 흐릿하게 보일 수 있음)
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)  # System DPI Aware
 except Exception:
@@ -29,7 +26,6 @@ except Exception:
         pass
 
 # === 3) 작업 디렉토리를 main.py 위치로 강제 설정 ===
-# PyInstaller exe 실행 시 sys.executable 기준, 스크립트 실행 시 __file__ 기준
 if getattr(sys, 'frozen', False):
     os.chdir(os.path.dirname(sys.executable))
 else:
@@ -42,9 +38,6 @@ except Exception:
     pass
 
 # === 5) Qt High DPI 설정 (QApplication 생성 전) ===
-# PyQt5 자동 스케일링 비활성화:
-#   - System DPI(1) 고정 상태에서 PyQt5까지 배율 적용 시 이중 계산 충돌 발생
-#   - Windows가 비트맵 확대로 처리하므로 PyQt5는 개입하지 않도록 False 설정
 from PyQt5.QtCore import Qt, QCoreApplication
 QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, False)
 QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
@@ -60,15 +53,16 @@ def main():
     mutex_name = "nanoleaf_mirror_singleton_mutex"
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
 
-    # GetLastError() == 183(ERROR_ALREADY_EXISTS): 이미 실행 중인 인스턴스 존재
     if ctypes.windll.kernel32.GetLastError() == 183:
         hwnd = ctypes.windll.user32.FindWindowW(None, "Nanoleaf Screen Mirror")
         if hwnd:
-            # 사용자 정의 메시지(0x8001)로 기존 창에 복원 신호 전송
             ctypes.windll.user32.PostMessageW(hwnd, 0x8001, 0, 0)
-        sys.exit(0)  # 새로 실행된 프로세스는 즉시 종료
+        sys.exit(0)
 
-    # === 6) Windows에 독립된 앱으로 인식시키기 (알림창 이름 & 아이콘 캐시 우회) ===
+    # ★ --startup 인자 감지: 시작프로그램에서 실행 시 트레이로 바로 시작
+    start_to_tray = "--startup" in sys.argv
+
+    # === 6) Windows에 독립된 앱으로 인식시키기 ===
     try:
         myappid = 'NanoleafMirror'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
@@ -82,7 +76,7 @@ def main():
 
     app.setStyle("Fusion")
 
-    # === 7) 프로그램 전체 아이콘 설정 (작업 표시줄, 알림창 등) ===
+    # === 7) 프로그램 전체 아이콘 설정 ===
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
     else:
@@ -93,7 +87,6 @@ def main():
         app.setWindowIcon(QIcon(icon_path))
 
     # === 8) 폰트 기본 크기 설정 ===
-    # 수동 DPI 계산 제거 — PyQt5가 배율에 맞게 자동 조정
     font = app.font()
     font.setPointSize(10)
     app.setFont(font)
@@ -101,9 +94,7 @@ def main():
     config = load_config()
     window = MainWindow(config)
 
-    # === 9) 윈도우 크기 — 논리 픽셀 기준으로만 지정 ===
-    # PyQt5가 현재 모니터 배율(125%, 175% 등)에 따라 물리 픽셀로 자동 변환
-    # (예: 740x840 @ 125% → 실제 925x1050, @ 175% → 실제 1295x1470)
+    # === 9) 윈도우 크기 ===
     window.resize(740, 840)
     window.setMinimumSize(600, 700)
 
@@ -114,7 +105,13 @@ def main():
     y = (screen_geo.height() - window.height()) // 2
     window.move(max(0, x), max(0, y))
 
-    window.show()
+    # ★ --startup 모드: 창을 표시하지 않고 트레이에서만 실행
+    if start_to_tray:
+        # 창을 숨긴 채로 시작 — 트레이 아이콘만 표시됨
+        # (window.show()를 호출하지 않음)
+        pass
+    else:
+        window.show()
 
     # 실행 시 미러링 자동 시작
     if config.get("options", {}).get("auto_start_mirror", False):
