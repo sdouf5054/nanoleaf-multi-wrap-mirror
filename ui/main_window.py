@@ -270,19 +270,10 @@ class MainWindow(QMainWindow):
         opts = self.config.get("options", {})
         minimize = opts.get("minimize_to_tray", True) and opts.get("tray_enabled", True)
 
-        if (self.mirror_thread and self.mirror_thread.isRunning()
-                and minimize and QSystemTrayIcon.isSystemTrayAvailable()):
+        # 미러링 여부와 상관없이 트레이 옵션이 켜져 있다면 메시지 없이 최소화
+        if minimize and QSystemTrayIcon.isSystemTrayAvailable():
             event.ignore()
             self.hide()
-
-            if not self._has_shown_tray_message:
-                self.tray.showMessage(
-                    "Nanoleaf Mirror",
-                    "트레이에서 실행 중입니다. 우클릭으로 제어하세요.",
-                    self.tray.icon(),
-                    2000
-                )
-                self._has_shown_tray_message = True
         else:
             self._shutdown()
             event.accept()
