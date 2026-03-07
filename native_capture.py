@@ -3,6 +3,14 @@
 dxcam을 대체하는 네이티브 DXGI 캡처 모듈.
 기존 ScreenCapture와 호환되는 인터페이스를 제공합니다.
 
+[변경 사항 v2 — 캡처 세션 사망 감지]
+- ★ FastCapture: access lost (-2) 시 연속 실패 카운터 추적
+  단순 reset으로 복구 안 되면 _access_lost_count 증가
+  임계값 초과 시 full cleanup + reinit 시도
+- ★ NativeScreenCapture: capture.py와 동일한 consecutive-None 감지
+  _STALE_NONE_THRESHOLD 초과 시 None 반환 (last_frame 대신)
+  → mirror.py의 stale detection이 정상 작동
+
 [사용법]
     from native_capture import FastCapture
 
@@ -21,6 +29,13 @@ import sys
 import ctypes
 import numpy as np
 import threading
+import time
+
+
+# ── 캡처 세션 사망 감지 임계값 ────────────────────────────────────
+_STALE_NONE_THRESHOLD = 60   # 연속 None 허용 횟수
+_RECREATE_COOLDOWN = 2.0     # recreate 재시도 최소 간격 (초)
+_ACCESS_LOST_REINIT_THRESHOLD = 5  # access lost 연속 실패 시 full reinit
 
 
 def _find_dll():
@@ -60,10 +75,9 @@ def _find_dll():
 class FastCapture:
     """네이티브 DXGI 캡처 — GPU→CPU 풀 복사 후 DLL 내부에서 서브샘플링.
 
-    dxcam 대비 개선:
-    - 14MB 풀 프레임이 Python까지 올라오지 않음
-    - DLL 내부 C 루프에서 서브샘플링하여 8KB만 전달
-    - Python 측 cv2.resize + numpy astype 오버헤드 제거
+    [변경 v2]
+    - ★ access lost (-2) 연속 실패 추적
+      단순 reset으로 복구 안 되면 full cleanup + reinit 시도
     """
 
     def __init__(self, monitor_index=0, out_width=64, out_height=32):
@@ -72,9 +86,13 @@ class FastCapture:
         self.out_height = out_height
         self._closed = False
 
+        # ★ access lost 추적
+        self._access_lost_count = 0
+
         # DLL 로드
         dll_path = _find_dll()
         self._dll = ctypes.CDLL(dll_path)
+        self._dll_path = dll_path
 
         # 함수 시그니처 선언
         self._dll.capture_init.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
@@ -122,23 +140,48 @@ class FastCapture:
         self.screen_h = self._dll.capture_get_height()
 
     def grab(self):
-        """BGRA 프레임 캡처. 새 프레임이면 numpy 배열, 없으면 None."""
+        """BGRA 프레임 캡처. 새 프레임이면 numpy 배열, 없으면 None.
+
+        ★ v2: access lost 연속 실패 시 full reinit 시도
+        """
         if self._closed:
             return None
 
         result = self._dll.capture_grab(self._buffer, self._buf_size)
 
         if result == 1:
-            # 새 프레임 — 버퍼를 numpy 배열로 변환 (복사 없이 view)
+            # 새 프레임 — 성공
+            self._access_lost_count = 0  # ★ 리셋
             arr = np.frombuffer(self._buffer, dtype=np.uint8)
             return arr.reshape(self.out_height, self.out_width, 4)
         elif result == 0:
-            return None  # 화면 변경 없음
+            # 화면 변경 없음 — 정상
+            self._access_lost_count = 0  # ★ grab 자체는 성공
+            return None
         elif result == -2:
-            # access lost — 재초기화 시도
-            self._dll.capture_reset()
-            self.screen_w = self._dll.capture_get_width()
-            self.screen_h = self._dll.capture_get_height()
+            # ★ access lost — 재초기화 시도
+            self._access_lost_count += 1
+
+            if self._access_lost_count <= _ACCESS_LOST_REINIT_THRESHOLD:
+                # 단순 reset 시도
+                self._dll.capture_reset()
+                self.screen_w = self._dll.capture_get_width()
+                self.screen_h = self._dll.capture_get_height()
+            else:
+                # ★ 단순 reset으로 복구 안 됨 → full cleanup + reinit
+                try:
+                    self._dll.capture_cleanup()
+                    time.sleep(0.5)
+                    init_result = self._dll.capture_init(
+                        self.monitor_index, self.out_width, self.out_height
+                    )
+                    if init_result == 0:
+                        self.screen_w = self._dll.capture_get_width()
+                        self.screen_h = self._dll.capture_get_height()
+                        self._access_lost_count = 0
+                except Exception:
+                    pass
+
             return None
         else:
             return None
@@ -160,6 +203,26 @@ class FastCapture:
             self._dll.capture_reset()
             self.screen_w = self._dll.capture_get_width()
             self.screen_h = self._dll.capture_get_height()
+            self._access_lost_count = 0
+
+    def full_reinit(self):
+        """★ 완전 재초기화 — cleanup 후 다시 init."""
+        if self._closed:
+            return False
+        try:
+            self._dll.capture_cleanup()
+            time.sleep(0.3)
+            result = self._dll.capture_init(
+                self.monitor_index, self.out_width, self.out_height
+            )
+            if result == 0:
+                self.screen_w = self._dll.capture_get_width()
+                self.screen_h = self._dll.capture_get_height()
+                self._access_lost_count = 0
+                return True
+            return False
+        except Exception:
+            return False
 
     def close(self):
         """리소스 해제."""
@@ -174,20 +237,17 @@ class FastCapture:
 class NativeScreenCapture:
     """기존 core/capture.py의 ScreenCapture와 호환되는 래퍼.
 
+    [변경 v2]
+    - ★ consecutive-None 감지: capture.py와 동일한 패턴
+      _STALE_NONE_THRESHOLD 초과 시 None 반환 (last_frame 대신)
+      → mirror.py의 stale detection이 정상 작동
+    - ★ recreate 강화: full_reinit 사용
+
     drop-in 교체 가능:
         # 기존
         from core.capture import ScreenCapture
         # 변경
         from native_capture import NativeScreenCapture as ScreenCapture
-
-    주요 차이:
-    - dxcam 대신 fast_capture.dll 사용
-    - grab()이 이미 다운샘플된 프레임을 반환
-    - 하지만 mirror.py에서 cv2.resize를 다시 하므로,
-      여기서는 풀 해상도인 것처럼 screen_w/screen_h를 보고하고
-      grab()은 다운샘플된 프레임을 반환합니다.
-    - ★ mirror.py의 downsample_frame()이 다시 리사이즈하는 건
-      이미 작은 이미지라 사실상 no-op (64×32 → 64×32)
     """
 
     def __init__(self, monitor_index=0, grid_cols=64, grid_rows=32):
@@ -199,6 +259,10 @@ class NativeScreenCapture:
         self.screen_h = 0
         self.last_frame = None
         self._lock = threading.Lock()
+
+        # ★ 캡처 세션 사망 감지
+        self._consecutive_nones = 0
+        self._last_recreate_time = 0.0
 
     def start(self, max_wait=30, target_fps=60):
         """캡처 초기화.
@@ -216,12 +280,12 @@ class NativeScreenCapture:
             self.screen_h = self._cap.screen_h
 
             # 첫 프레임 대기
-            import time
             deadline = time.time() + max_wait
             while time.time() < deadline:
                 frame = self._cap.grab_rgb()
                 if frame is not None:
                     self.last_frame = frame
+                    self._consecutive_nones = 0
                     return True
                 time.sleep(0.1)
 
@@ -244,12 +308,12 @@ class NativeScreenCapture:
     def grab(self):
         """프레임 반환.
 
-        ★ 반환값은 (grid_rows, grid_cols, 3) RGB numpy 배열.
-        이미 다운샘플된 크기이므로, mirror.py의 downsample_frame()에서
-        cv2.resize가 호출되어도 동일 크기→동일 크기라 사실상 no-op.
+        ★ v2: consecutive-None 감지
+        - 정상 범위 내: last_frame 반환 (기존 동작)
+        - 임계값 초과: None 반환 → mirror.py stale detection 발동
         """
         with self._lock:
-            # dxcam 폴백 모드
+            # dxcam 폴백 모드 — 폴백 capture.py가 자체 감지 로직을 가짐
             if hasattr(self, '_dxcam_fallback'):
                 return self._dxcam_fallback.grab()
 
@@ -258,12 +322,51 @@ class NativeScreenCapture:
 
             try:
                 frame = self._cap.grab_rgb()
+
                 if frame is not None:
                     self.last_frame = frame
+                    self._consecutive_nones = 0  # ★ 리셋
                     return frame
-                return self.last_frame
+
+                # ── frame is None ──────────────────────────────
+                self._consecutive_nones += 1
+
+                if self._consecutive_nones <= _STALE_NONE_THRESHOLD:
+                    # 정상 범위: 화면 정지 또는 일시적 지연
+                    return self.last_frame
+                else:
+                    # ★ 임계값 초과: 캡처 세션 사망 추정
+                    now = time.monotonic()
+                    if now - self._last_recreate_time >= _RECREATE_COOLDOWN:
+                        self._last_recreate_time = now
+                        self._try_full_reinit()
+                        self._consecutive_nones = 0
+
+                    # None 반환 → mirror.py stale detection
+                    return None
+
             except Exception:
-                return self.last_frame
+                self._consecutive_nones += 1
+
+                if self._consecutive_nones <= _STALE_NONE_THRESHOLD:
+                    return self.last_frame
+                else:
+                    now = time.monotonic()
+                    if now - self._last_recreate_time >= _RECREATE_COOLDOWN:
+                        self._last_recreate_time = now
+                        self._try_full_reinit()
+                        self._consecutive_nones = 0
+                    return None
+
+    def _try_full_reinit(self):
+        """★ FastCapture의 full reinit을 시도."""
+        if self._cap is not None:
+            try:
+                if self._cap.full_reinit():
+                    self.screen_w = self._cap.screen_w
+                    self.screen_h = self._cap.screen_h
+            except Exception:
+                pass
 
     def _recreate(self):
         """모니터 변경 시 재초기화."""
@@ -272,9 +375,16 @@ class NativeScreenCapture:
             return
 
         if self._cap:
-            self._cap.reset()
-            self.screen_w = self._cap.screen_w
-            self.screen_h = self._cap.screen_h
+            # ★ 단순 reset 대신 full reinit 시도
+            if self._cap.full_reinit():
+                self.screen_w = self._cap.screen_w
+                self.screen_h = self._cap.screen_h
+                self._consecutive_nones = 0
+            else:
+                # full reinit 실패 시 기존 reset 폴백
+                self._cap.reset()
+                self.screen_w = self._cap.screen_w
+                self.screen_h = self._cap.screen_h
 
     def stop(self):
         """캡처 종료."""

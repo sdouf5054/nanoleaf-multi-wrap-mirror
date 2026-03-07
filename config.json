@@ -94,12 +94,12 @@
     "portrait_rotation": "cw"
   },
   "audio_pulse": {
-    "bass_sens": 120,
+    "bass_sens": 100,
     "mid_sens": 100,
     "high_sens": 100,
     "brightness": 100,
-    "attack": 85,
-    "release": 60,
+    "attack": 50,
+    "release": 80,
     "input_smooth": 30,
     "zone_bass": 60,
     "zone_mid": 25,

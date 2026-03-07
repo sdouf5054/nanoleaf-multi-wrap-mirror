@@ -1,9 +1,16 @@
 """미러링 루프 — QThread 기반 (디스플레이 변경·분리 대응 강화)
 
+[변경 사항 v7 — 캡처 세션 사망 복구 강화]
+- ★ capture.py/native_capture.py의 v4/v2 변경과 연동:
+  캡처 모듈이 세션 사망 시 None을 반환하므로 기존 stale detection이 정상 작동
+- ★ stale 복구 시 recreate 실패에 대한 재시도 간격 추가
+  연속 recreate가 너무 빈번하면 쿨다운 적용
+- ★ stale 복구 후에도 프레임을 못 받으면 LED를 끄고 대기
+  (이전: 마지막 프레임이 무한 유지)
+
 [변경 사항 v6 — CPU 최적화]
 - ColorPipeline 캐싱: 매 프레임 dict 참조·LUT 생성 오버헤드 제거
 - 디버그 프로파일링: _debug_profile 분기를 루프 밖으로 이동
-  → 비디버그 시 perf_counter() 호출 0회
 - sleep: Event.wait() 단일 호출로 통합
 - 밝기 변경: LUT 스칼라 비율 조정 (전체 재빌드 불필요)
 """
@@ -26,6 +33,10 @@ except ImportError:
 from core.device import NanoleafDevice
 from core.layout import get_led_positions, build_weight_matrix
 from core.color import ColorPipeline
+
+# ★ stale 복구 관련 상수
+_STALE_RECREATE_COOLDOWN = 3.0  # recreate 재시도 최소 간격 (초)
+_STALE_LED_OFF_THRESHOLD = 10.0  # 이 시간 동안 프레임 없으면 LED 끄기 (초)
 
 
 class MirrorThread(QThread):
@@ -312,9 +323,18 @@ class MirrorThread(QThread):
                        fps_start_time, fps_display_time,
                        last_good_frame_time, frame_interval,
                        STALE_THRESHOLD, mirror_cfg):
-        """★ 비디버그 고속 루프 — perf_counter/프로파일링 코드 완전 제거."""
+        """★ 비디버그 고속 루프.
+
+        v7 변경:
+        - capture 모듈이 세션 사망 시 None을 반환하므로
+          기존 stale detection (frame is None + 3초 타이머)이 정상 작동
+        - stale 복구 시 recreate 쿨다운 적용
+        - 장기간 프레임 없으면 LED를 끄고 상태 표시
+        """
 
         stop_wait = self._stop_event.wait  # ★ 메서드 룩업 캐싱
+        last_recreate_time = 0.0  # ★ recreate 쿨다운 추적
+        led_turned_off = False    # ★ LED 끄기 상태 추적
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
@@ -359,32 +379,53 @@ class MirrorThread(QThread):
             frame = self._capture.grab()
 
             if frame is None:
+                # ★ v7: capture 모듈이 세션 사망 감지 시 None을 반환하므로
+                # 이 분기가 실제로 작동합니다 (이전에는 last_frame 때문에 도달 불가)
                 now = time.monotonic()
-                if now - last_good_frame_time > STALE_THRESHOLD:
-                    self._capture._recreate()
-                    last_good_frame_time = now
+                stale_duration = now - last_good_frame_time
 
-                    if (self._capture.screen_w > 0
-                            and self._capture.screen_h > 0
-                            and (self._capture.screen_w != self._active_w
-                                 or self._capture.screen_h != self._active_h)):
-                        self._active_w = self._capture.screen_w
-                        self._active_h = self._capture.screen_h
-                        try:
-                            self._weight_matrix = self._build_layout(
-                                self._active_w, self._active_h
-                            )
-                            self._rebuild_pipeline()
-                            pipeline = self._pipeline
-                            prev_colors = None
-                        except (ValueError, IndexError):
-                            pass
+                if stale_duration > STALE_THRESHOLD:
+                    # ★ recreate 쿨다운: 너무 빈번한 재생성 방지
+                    if now - last_recreate_time >= _STALE_RECREATE_COOLDOWN:
+                        last_recreate_time = now
+                        self.status_changed.emit("캡처 복구 중...")
+
+                        self._capture._recreate()
+
+                        if (self._capture.screen_w > 0
+                                and self._capture.screen_h > 0
+                                and (self._capture.screen_w != self._active_w
+                                     or self._capture.screen_h != self._active_h)):
+                            self._active_w = self._capture.screen_w
+                            self._active_h = self._capture.screen_h
+                            try:
+                                self._weight_matrix = self._build_layout(
+                                    self._active_w, self._active_h
+                                )
+                                self._rebuild_pipeline()
+                                pipeline = self._pipeline
+                                prev_colors = None
+                            except (ValueError, IndexError):
+                                pass
+
+                # ★ 장기간 프레임 없으면 LED 끄기 (마지막 프레임이 무한 유지되는 것 방지)
+                if stale_duration > _STALE_LED_OFF_THRESHOLD and not led_turned_off:
+                    try:
+                        self._device.turn_off()
+                        led_turned_off = True
+                        self.status_changed.emit("캡처 없음 — LED 대기 중")
+                    except (OSError, IOError, ValueError):
+                        pass
 
                 if stop_wait(timeout=0.01):
                     break
                 continue
 
+            # ★ 프레임 수신 성공 — 상태 복원
             last_good_frame_time = time.monotonic()
+            if led_turned_off:
+                led_turned_off = False
+                self.status_changed.emit("미러링 실행 중")
 
             # ── 해상도/회전 변경 감지 ──
             try:
@@ -444,7 +485,7 @@ class MirrorThread(QThread):
                         fps_start_time, fps_display_time,
                         last_good_frame_time, frame_interval,
                         STALE_THRESHOLD, mirror_cfg):
-        """디버그 프로파일링 루프 — 기존 로직 유지."""
+        """디버그 프로파일링 루프 — 기존 로직 유지 + v7 stale 복구 강화."""
         PROFILE_INTERVAL = 60
         t_capture_acc = 0.0
         t_color_acc = 0.0
@@ -453,6 +494,8 @@ class MirrorThread(QThread):
         fps = 0.0
 
         stop_wait = self._stop_event.wait
+        last_recreate_time = 0.0
+        led_turned_off = False
 
         while not self._stop_event.is_set():
             loop_start = time.perf_counter()
@@ -498,29 +541,46 @@ class MirrorThread(QThread):
 
             if frame is None:
                 now_mono = time.monotonic()
-                if now_mono - last_good_frame_time > STALE_THRESHOLD:
-                    self._capture._recreate()
-                    last_good_frame_time = now_mono
-                    if (self._capture.screen_w > 0
-                            and self._capture.screen_h > 0
-                            and (self._capture.screen_w != self._active_w
-                                 or self._capture.screen_h != self._active_h)):
-                        self._active_w = self._capture.screen_w
-                        self._active_h = self._capture.screen_h
-                        try:
-                            self._weight_matrix = self._build_layout(
-                                self._active_w, self._active_h
-                            )
-                            self._rebuild_pipeline()
-                            pipeline = self._pipeline
-                            prev_colors = None
-                        except (ValueError, IndexError):
-                            pass
+                stale_duration = now_mono - last_good_frame_time
+
+                if stale_duration > STALE_THRESHOLD:
+                    if now_mono - last_recreate_time >= _STALE_RECREATE_COOLDOWN:
+                        last_recreate_time = now_mono
+                        self._logger.debug("stale detected, recreating capture...")
+
+                        self._capture._recreate()
+                        if (self._capture.screen_w > 0
+                                and self._capture.screen_h > 0
+                                and (self._capture.screen_w != self._active_w
+                                     or self._capture.screen_h != self._active_h)):
+                            self._active_w = self._capture.screen_w
+                            self._active_h = self._capture.screen_h
+                            try:
+                                self._weight_matrix = self._build_layout(
+                                    self._active_w, self._active_h
+                                )
+                                self._rebuild_pipeline()
+                                pipeline = self._pipeline
+                                prev_colors = None
+                            except (ValueError, IndexError):
+                                pass
+
+                if stale_duration > _STALE_LED_OFF_THRESHOLD and not led_turned_off:
+                    try:
+                        self._device.turn_off()
+                        led_turned_off = True
+                        self._logger.debug("LED turned off due to stale capture")
+                    except (OSError, IOError, ValueError):
+                        pass
+
                 if stop_wait(timeout=0.01):
                     break
                 continue
 
             last_good_frame_time = time.monotonic()
+            if led_turned_off:
+                led_turned_off = False
+                self._logger.debug("capture restored, LED resuming")
 
             try:
                 current_h, current_w = frame.shape[:2]

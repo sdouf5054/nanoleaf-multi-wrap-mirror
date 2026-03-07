@@ -257,6 +257,7 @@ class HybridVisualizer(QThread):
         # ── 색상 소스 파라미터 ──
         self.color_source = COLOR_SOURCE_SOLID
         self.n_zones = 4
+        self.min_brightness = MIN_BRIGHTNESS  # ★ 외부에서 설정 가능한 최소밝기
 
         # ── ★ 색상 보정 파라미터 (config["color"]에서 로드) ──
         self._color_correction_enabled = True
@@ -751,7 +752,7 @@ class HybridVisualizer(QThread):
     def _render_pulse(self, bass, mid, high):
         n_leds = self._led_count
         n_bands = len(self._smooth_spectrum) if self._smooth_spectrum is not None else 16
-        intensity = max(MIN_BRIGHTNESS, bass) * self.brightness
+        intensity = max(self.min_brightness, bass) * self.brightness
 
         leds = np.zeros((n_leds, 3), dtype=np.float32)
         for led_idx in range(n_leds):
@@ -783,7 +784,7 @@ class HybridVisualizer(QThread):
             energy = spec[band_lo] * (1 - frac) + spec[band_hi] * frac
 
             color = self._get_base_color(led_idx, n_bands)
-            intensity = max(MIN_BRIGHTNESS, energy) * self.brightness
+            intensity = max(self.min_brightness, energy) * self.brightness
             leds[led_idx] = color * intensity
 
         # ★ 색상 보정 적용 후 GRB 변환

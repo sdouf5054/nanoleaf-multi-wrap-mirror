@@ -1,22 +1,40 @@
 """화면 캡처 — dxcam 래퍼 (디스플레이 변경·회전·분리 대응 강화)
 
+[변경 사항 v4 — 캡처 세션 사망 감지]
+- ★ 연속 grab() None 카운터 (`_consecutive_nones`) 추가
+  정상 정지 화면: 가끔 None (1~수 회) → last_frame 반환 (기존 동작)
+  캡처 세션 사망: 연속 수십~수백 회 None → 임계값 초과 시 자동 recreate
+  + None 반환 → mirror.py의 stale detection이 정상 발동
+- ★ _STALE_NONE_THRESHOLD: 연속 None 허용 횟수 (기본 60회)
+  60fps 기준 ~1초, 30fps 기준 ~2초 동안 새 프레임이 없으면 캡처 사망으로 판단
+- ★ _grab_inner()에서 연속 None 초과 시:
+  1) _recreate() 시도
+  2) None 반환 (last_frame 대신)
+  → mirror.py의 STALE_THRESHOLD (3초) 타이머가 정상 작동
+
 [변경 사항 v3 — CPU 최적화]
 - ★ 연속 캡처 모드(start) 제거 → on-demand grab() 전용
-  - dxcam.start()는 내부에서 별도 스레드를 생성하여 target_fps로
-    화면을 캡처하고 링 버퍼에 저장합니다.
-  - 이 내부 스레드가 CPU의 주요 소비원 (30fps 설정 시 ~1-2% CPU)
-  - grab()은 호출 시점에 한 번만 캡처하므로 idle 시 CPU 0%
-  - 미러링 루프에서 frame_interval 대기 후 grab()을 호출하면
-    연속 캡처와 동일한 fps를 달성하면서 CPU를 절약합니다.
-
 - 재생성 시 dxcam 싱글턴 캐시 정리 유지 (v2와 동일)
-- _started 플래그 및 연속 캡처 관련 코드 완전 제거
 """
 
 import dxcam
 import time
 import threading
 import numpy as np
+
+# ── 캡처 세션 사망 감지 임계값 ────────────────────────────────────
+# grab()이 연속으로 None을 반환한 횟수가 이 값을 초과하면
+# 캡처 세션이 사망한 것으로 판단하고 recreate를 시도합니다.
+#
+# 정상 정지 화면에서는 dxcam이 가끔 None을 반환하지만 연속으로
+# 수십 회 이상 None을 반환하지는 않습니다.
+# 반면 캡처 세션 사망 시에는 영구적으로 None만 반환됩니다.
+#
+# 60fps 루프에서 60회 = ~1초, 30fps 루프에서 60회 = ~2초
+_STALE_NONE_THRESHOLD = 60
+
+# recreate 후 연속 실패 시 재시도 간격을 늘리기 위한 쿨다운
+_RECREATE_COOLDOWN = 2.0  # 초
 
 
 class ScreenCapture:
@@ -27,6 +45,10 @@ class ScreenCapture:
         self.screen_h = 0
         self.last_frame = None
         self._lock = threading.Lock()
+
+        # ★ 캡처 세션 사망 감지
+        self._consecutive_nones = 0
+        self._last_recreate_time = 0.0
 
     # ── 초기화 ───────────────────────────────────────────────────────
 
@@ -52,6 +74,7 @@ class ScreenCapture:
                 if f is not None and f.mean() > 0:
                     self.screen_h, self.screen_w = f.shape[:2]
                     self.last_frame = f
+                    self._consecutive_nones = 0
                     return True
 
                 time.sleep(0.5)
@@ -66,6 +89,7 @@ class ScreenCapture:
                 if f is not None:
                     self.screen_h, self.screen_w = f.shape[:2]
                     self.last_frame = f
+                    self._consecutive_nones = 0
                     return True
                 time.sleep(0.2)
 
@@ -77,10 +101,10 @@ class ScreenCapture:
     def grab(self):
         """최신 프레임 반환 — on-demand 캡처.
 
-        ★ 연속 캡처 모드 대신 매 호출 시 grab()으로 한 장 캡처.
-        dxcam.grab()은 내부적으로 DXGI Desktop Duplication API를 사용하며,
-        화면이 변경되지 않았으면 None을 반환합니다 (CPU 거의 0).
-        화면이 변경되었으면 GPU→CPU 복사 1회만 수행합니다.
+        ★ v4: 연속 None 카운터로 캡처 세션 사망 감지
+        - 정상 정지 화면: None 수 회 → last_frame 반환 (기존 동작)
+        - 캡처 세션 사망: 연속 None 임계값 초과 → recreate 시도 + None 반환
+          → mirror.py의 stale detection이 정상 작동하여 복구 가능
         """
         with self._lock:
             return self._grab_inner()
@@ -89,18 +113,50 @@ class ScreenCapture:
         try:
             if self.camera is None:
                 self._recreate()
+                # recreate 직후에는 last_frame 반환 (한 번은 허용)
                 return self.last_frame
 
             frame = self.camera.grab()
 
             if frame is not None:
                 self.last_frame = frame
+                self._consecutive_nones = 0  # ★ 리셋
                 return frame
-            return self.last_frame
+
+            # ── frame is None ──────────────────────────────────
+            self._consecutive_nones += 1
+
+            if self._consecutive_nones <= _STALE_NONE_THRESHOLD:
+                # 정상 범위: 화면이 안 변했거나 일시적 지연
+                # → 기존 동작 유지 (last_frame 반환)
+                return self.last_frame
+            else:
+                # ★ 임계값 초과: 캡처 세션 사망으로 판단
+                # recreate 쿨다운 체크 (너무 빈번한 재생성 방지)
+                now = time.monotonic()
+                if now - self._last_recreate_time >= _RECREATE_COOLDOWN:
+                    self._last_recreate_time = now
+                    self._recreate()
+                    self._consecutive_nones = 0
+
+                # ★ None 반환 → mirror.py의 stale detection 발동
+                return None
 
         except Exception:
-            self._recreate()
-            return self.last_frame
+            # 예외 발생 시에도 동일한 로직 적용
+            self._consecutive_nones += 1
+
+            if self._consecutive_nones <= _STALE_NONE_THRESHOLD:
+                # 일시적 예외: last_frame으로 버팀
+                return self.last_frame
+            else:
+                # 반복 예외: recreate 시도 + None 반환
+                now = time.monotonic()
+                if now - self._last_recreate_time >= _RECREATE_COOLDOWN:
+                    self._last_recreate_time = now
+                    self._recreate()
+                    self._consecutive_nones = 0
+                return None
 
     # ── 재생성 ───────────────────────────────────────────────────────
 
@@ -120,6 +176,7 @@ class ScreenCapture:
                 if f is not None:
                     self.screen_h, self.screen_w = f.shape[:2]
                     self.last_frame = f
+                    self._consecutive_nones = 0  # ★ 성공하면 리셋
                     break
                 time.sleep(0.2)
         except Exception:
