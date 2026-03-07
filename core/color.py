@@ -1,5 +1,11 @@
 """색상 처리 — 다운샘플, 감마, 비선형 채널 믹싱, WB, 밝기
 
+[변경 사항 v4 — ColorCorrection 통합]
+- ★ core.color_correction.ColorCorrection을 내부에서 활용
+  감마 LUT 빌드 + 보정 파라미터를 ColorCorrection에 위임
+  ColorPipeline 고유의 밝기·스무딩·GRB 변환은 그대로 유지
+- 기존 인터페이스 100% 호환 (rebuild_lut, update_brightness, process 등)
+
 [변경 사항 v3 — CPU 최적화]
 - ColorPipeline 클래스: 매 프레임 반복되는 설정값 참조를 __init__에서 캐싱
 - downsample: INTER_LINEAR + 직접 float32 reshape (중간 복사 제거)
@@ -12,6 +18,8 @@
 import numpy as np
 import cv2
 
+from core.color_correction import ColorCorrection
+
 
 def downsample_frame(frame, grid_rows, grid_cols):
     """프레임을 grid 크기로 다운샘플 → (cells, 3) float32"""
@@ -22,8 +30,8 @@ def downsample_frame(frame, grid_rows, grid_cols):
 class ColorPipeline:
     """프레임별 색상 연산 파이프라인 — 설정값 캐싱 + LUT 기반.
 
-    매 프레임 config dict를 참조하는 오버헤드를 제거하고,
-    감마·WB·밝기를 하나의 채널별 LUT로 통합합니다.
+    ★ v4: 감마·WB·채널 믹싱 파라미터는 ColorCorrection에 위임.
+    ColorPipeline은 그 위에 밝기·스무딩·다운샘플·행렬곱·GRB 변환을 추가.
 
     Usage:
         pipeline = ColorPipeline(weight_matrix, color_cfg, mirror_cfg)
@@ -45,7 +53,7 @@ class ColorPipeline:
         self.smoothing = mirror_cfg["smoothing_factor"]
         self.smoothing_enabled = True
 
-        # 채널 믹싱 계수
+        # 채널 믹싱 계수 (ColorCorrection에도 저장되지만, 호환성 위해 유지)
         self.green_red_bleed = color_cfg["green_red_bleed"]
 
         # 밝기
@@ -54,93 +62,37 @@ class ColorPipeline:
         # GRB 출력 버퍼 (매 프레임 재할당 방지)
         self._grb_buf = np.empty((self.n_leds, 3), dtype=np.uint8)
 
-        # LUT 빌드: 0~255 입력 → 감마·WB·밝기 적용된 0~255 출력
+        # ★ ColorCorrection 인스턴스 — 감마 LUT + WB + 채널 믹싱
+        self._cc = ColorCorrection(color_cfg)
+
+        # LUT 빌드: ColorCorrection의 감마 LUT를 기반으로
+        # 밝기·WB가 통합된 미러링 전용 LUT도 생성
         self._build_lut(color_cfg, self.brightness)
 
     def _build_lut(self, color_cfg, brightness):
-        """채널별 256-entry LUT 생성.
+        """채널별 LUT 생성 — ColorCorrection의 감마 LUT를 기반으로
+        밝기·WB를 추가 적용한 미러링 전용 LUT.
 
-        LUT[ch][v] = clamp(((v/255)^gamma * wb * brightness) * 255, 0, 255)
-
-        이렇게 하면 매 프레임의 감마·WB·밝기 연산이
-        단순 테이블 룩업(np.take)으로 대체됩니다.
-
-        ★ 채널 믹싱(green_red_bleed)은 R/G 상호의존이라 LUT 불가
-           → process()에서 별도 처리 (하지만 np.maximum + 곱셈 1회로 경량)
+        B 채널: 감마+WB+밝기 완전 통합 (채널 믹싱에 무관)
+        R, G 채널: 감마만 (채널 믹싱 후 WB·밝기 별도 적용)
         """
-        x = np.arange(256, dtype=np.float32) / 255.0
+        # ColorCorrection 재빌드 (감마 LUT + WB + bleed 파라미터)
+        self._cc.rebuild(color_cfg)
 
-        gamma_r = color_cfg["gamma_r"]
-        gamma_g = color_cfg["gamma_g"]
-        gamma_b = color_cfg["gamma_b"]
+        # R, G: 감마 LUT 참조 (채널 믹싱에서 상호 의존하므로 WB·밝기는 후처리)
+        self._lut_r_gamma = self._cc.lut_r  # float32 (256,)
+        self._lut_g_gamma = self._cc.lut_g  # float32 (256,)
 
-        # 감마 적용
-        r_curve = np.power(x, gamma_r) if gamma_r != 1.0 else x.copy()
-        g_curve = np.power(x, gamma_g) if gamma_g != 1.0 else x.copy()
-        b_curve = np.power(x, gamma_b) if gamma_b != 1.0 else x.copy()
-
-        # WB + 밝기를 한번에 곱
-        wb_bright_r = color_cfg["wb_r"] * brightness
-        wb_bright_g = color_cfg["wb_g"] * brightness
-        wb_bright_b = color_cfg["wb_b"] * brightness
-
-        r_curve *= wb_bright_r * 255.0
-        g_curve *= wb_bright_g * 255.0
-        b_curve *= wb_bright_b * 255.0
-
-        # clamp + uint8
-        self._lut_r = np.clip(r_curve, 0, 255).astype(np.uint8)
-        self._lut_g = np.clip(g_curve, 0, 255).astype(np.uint8)
-        self._lut_b = np.clip(b_curve, 0, 255).astype(np.uint8)
-
-        # ★ 채널 믹싱용: R 채널에 bleed 추가분을 적용하기 위해
-        # LUT만으로는 G값에 의존하는 R 보정이 불가능하므로,
-        # bleed 적용 후 WB·밝기·감마가 적용된 R값이 필요함.
-        # → bleed는 감마 적용 '후'의 값에서 계산하므로,
-        #   R채널 LUT는 WB·밝기만 적용하고, 감마+bleed는 process()에서 처리?
-        #
-        # 아니, 더 나은 접근: 원본 코드 순서를 보면
-        #   1) 행렬곱 (float) → 2) 감마 → 3) 채널 믹싱 → 4) WB → 5) 밝기
-        # 채널 믹싱이 감마와 WB 사이에 있으므로, R채널은 LUT로 완전히 통합 불가.
-        #
-        # 전략 변경: 채널 믹싱이 있을 때는 R채널만 2단계 LUT 사용
-        #   - lut_r_pre: 감마만 적용 (float LUT)
-        #   - lut_r_post: WB·밝기만 적용 (채널 믹싱 후)
-        #   - G, B: 감마+WB+밝기 완전 통합 LUT
-        #
-        # 하지만 이러면 R채널에 float 연산이 남아서 이점이 줄어듦.
-        # 실측해보면 green_red_bleed가 있는 경우가 대부분이므로...
-        #
-        # ★ 최종 전략: LUT를 감마 후 단계까지만 적용 (uint8),
-        #   채널 믹싱은 uint8 상태에서 정수 연산,
-        #   WB·밝기는 고정소수점 정수 연산으로 처리.
-        #   → 실제로 float 연산 0회 달성 (행렬곱 제외)
-        #
-        # ... 하지만 이렇게까지 하면 코드 복잡도가 너무 올라감.
-        # 현실적 타협: 전체를 하나의 효율적인 float 파이프라인으로 유지하되,
-        # 불필요한 배열 생성/복사를 최소화하는 방향.
-
-        # === 현실적 최적화: 3채널 통합 LUT (float32) ===
-        # 채널 믹싱이 있으므로 중간에 float가 필요 → float LUT로 통합
-        # np.power를 매 프레임 75개 LED에 대해 호출하는 것 vs
-        # 256-entry LUT에서 take하는 것 → LUT가 확실히 빠름
-
-        # R채널: 감마만 (채널 믹싱 후 WB·밝기 별도)
-        self._lut_r_gamma = (np.power(x, gamma_r) * 255.0).astype(np.float32) \
-            if gamma_r != 1.0 else (x * 255.0).astype(np.float32)
-
-        # G채널: 감마만 (채널 믹싱에서 G값 참조 필요)
-        self._lut_g_gamma = (np.power(x, gamma_g) * 255.0).astype(np.float32) \
-            if gamma_g != 1.0 else (x * 255.0).astype(np.float32)
-
-        # B채널: 감마+WB+밝기 완전 통합 (채널 믹싱에 무관)
-        b_full = np.power(x, gamma_b) * wb_bright_b * 255.0 if gamma_b != 1.0 \
-            else x * wb_bright_b * 255.0
+        # B: 감마+WB+밝기 완전 통합 LUT (채널 믹싱에 무관하므로 한 번에 처리 가능)
+        wb_bright_b = color_cfg.get("wb_b", 1.0) * brightness
+        b_full = self._cc.lut_b * wb_bright_b
         self._lut_b_full = np.clip(b_full, 0, 255).astype(np.float32)
 
         # WB·밝기 스칼라 (R, G 채널용 — 채널 믹싱 후 적용)
-        self._wb_bright_r = np.float32(wb_bright_r)
-        self._wb_bright_g = np.float32(wb_bright_g)
+        self._wb_bright_r = np.float32(color_cfg.get("wb_r", 1.0) * brightness)
+        self._wb_bright_g = np.float32(color_cfg.get("wb_g", 1.0) * brightness)
+
+        self.green_red_bleed = color_cfg.get("green_red_bleed", 0.0)
 
     def rebuild_lut(self, color_cfg=None, brightness=None):
         """색상 파라미터 또는 밝기 변경 시 LUT 재빌드.
@@ -194,7 +146,6 @@ class ColorPipeline:
         rgb = self.weight_matrix @ grid_flat  # (n_leds, 3)
 
         # 2. 감마 (LUT take — np.power 대체)
-        #    rgb 값을 0~255 범위의 uint8 인덱스로 변환하여 LUT 참조
         idx = np.clip(rgb, 0, 255).astype(np.uint8)
         R = np.take(self._lut_r_gamma, idx[:, 0])  # float32 (n_leds,)
         G = np.take(self._lut_g_gamma, idx[:, 1])  # float32
