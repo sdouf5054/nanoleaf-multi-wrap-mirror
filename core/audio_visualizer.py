@@ -1,4 +1,11 @@
-"""오디오 비주얼라이저 v8 — 대칭 둘레 거리 + 대역 비율 + 저역 세밀 모드
+"""오디오 비주얼라이저 v9 — 대칭 둘레 거리 + 대역 비율 + 저역 세밀 모드 + 색상 보정
+
+[주요 변경 v9]
+- ★ config["color"]의 색상 보정 파이프라인 적용:
+  감마 → 채널 믹싱 (green→red bleed) → 화이트밸런스
+  미러링 탭과 동일한 보정이 오디오 비주얼라이저에도 적용됩니다.
+- _build_color_luts(): 감마 LUT를 초기화 시 사전 계산
+- _apply_color_correction(): 렌더링 후 GRB 변환 전에 보정 적용
 
 [주요 변경 v8]
 - ★ MODE_BASS_DETAIL: 20Hz~500Hz를 16밴드 로그 분할하여 저역만 세밀 표현
@@ -137,7 +144,10 @@ def _build_led_order_from_segments(segments, led_count):
 
 
 class AudioVisualizer(QThread):
-    """오디오 반응 LED 비주얼라이저 v8."""
+    """오디오 반응 LED 비주얼라이저 v9.
+
+    ★ v9: config["color"]의 색상 보정 (감마, 채널 믹싱, 화이트밸런스) 적용
+    """
 
     fps_updated = pyqtSignal(float)
     energy_updated = pyqtSignal(float, float, float)
@@ -184,6 +194,85 @@ class AudioVisualizer(QThread):
         self._bd_agc = None             # 밴드별 AGC
         self._bd_smooth = None          # 밴드별 스무딩 값
 
+        # ★ 색상 보정 파라미터 (config["color"]에서 로드)
+        self._color_correction_enabled = True
+        self._color_cfg = copy.deepcopy(config.get("color", {}))
+        self._lut_r_gamma = None
+        self._lut_g_gamma = None
+        self._lut_b_gamma = None
+
+    # ── ★ 색상 보정 LUT 빌드 ──────────────────────────────────────
+
+    def _build_color_luts(self):
+        """config["color"]에서 감마·WB·채널 믹싱 파라미터를 읽어 LUT 생성.
+
+        보정 순서 (ColorPipeline과 동일):
+        1. 감마 (채널별 LUT)
+        2. 채널 믹싱 (green→red bleed)
+        3. 화이트밸런스 (채널별 스칼라 곱)
+        """
+        cc = self._color_cfg
+        x = np.arange(256, dtype=np.float32) / 255.0
+
+        gamma_r = cc.get("gamma_r", 1.0)
+        gamma_g = cc.get("gamma_g", 1.0)
+        gamma_b = cc.get("gamma_b", 1.0)
+
+        self._lut_r_gamma = (np.power(x, gamma_r) * 255.0).astype(np.float32) \
+            if gamma_r != 1.0 else (x * 255.0).astype(np.float32)
+        self._lut_g_gamma = (np.power(x, gamma_g) * 255.0).astype(np.float32) \
+            if gamma_g != 1.0 else (x * 255.0).astype(np.float32)
+        self._lut_b_gamma = (np.power(x, gamma_b) * 255.0).astype(np.float32) \
+            if gamma_b != 1.0 else (x * 255.0).astype(np.float32)
+
+        self._wb_r = np.float32(cc.get("wb_r", 1.0))
+        self._wb_g = np.float32(cc.get("wb_g", 1.0))
+        self._wb_b = np.float32(cc.get("wb_b", 1.0))
+        self._green_red_bleed = np.float32(cc.get("green_red_bleed", 0.0))
+
+    def _apply_color_correction(self, leds):
+        """★ LED RGB 배열에 색상 보정 적용 (in-place).
+
+        Args:
+            leds: (n_leds, 3) float32, 0~255 범위
+
+        보정 순서 (ColorPipeline과 동일):
+        1. 감마 — 채널별 256-entry LUT
+        2. 채널 믹싱 — G→R bleed
+        3. 화이트밸런스 — 채널별 스칼라 곱
+
+        Returns:
+            leds: 보정된 (n_leds, 3) float32 (in-place 수정)
+        """
+        if not self._color_correction_enabled:
+            return leds
+        if self._lut_r_gamma is None:
+            return leds
+
+        # 1. 감마 (LUT take)
+        idx = np.clip(leds, 0, 255).astype(np.uint8)
+        R = np.take(self._lut_r_gamma, idx[:, 0])
+        G = np.take(self._lut_g_gamma, idx[:, 1])
+        B = np.take(self._lut_b_gamma, idx[:, 2])
+
+        # 2. 채널 믹싱 (G→R bleed)
+        if self._green_red_bleed > 0:
+            bleed = np.maximum(0, G - R)
+            bleed *= self._green_red_bleed
+            R += bleed
+
+        # 3. 화이트밸런스
+        R *= self._wb_r
+        G *= self._wb_g
+        B *= self._wb_b
+
+        # 재조립
+        leds[:, 0] = R
+        leds[:, 1] = G
+        leds[:, 2] = B
+
+        return leds
+
     def set_zone_weights(self, bass, mid, high):
         self._zone_weights = [bass, mid, high]
         self._zone_dirty = True
@@ -208,6 +297,9 @@ class AudioVisualizer(QThread):
     def _init_resources(self):
         dev_cfg = self.config["device"]
         self._led_count = dev_cfg["led_count"]
+
+        # ★ 색상 보정 LUT 빌드
+        self._build_color_luts()
 
         self.status_changed.emit("Nanoleaf 연결 중...")
         try:
@@ -347,11 +439,7 @@ class AudioVisualizer(QThread):
     # ── Bass Detail 처리 ──────────────────────────────────────────
 
     def _process_bass_detail(self, eng, atk_rate, rel_rate):
-        """raw FFT에서 저역(20~500Hz)만 16밴드로 분할 + AGC + 스무딩.
-
-        AudioEngine의 기존 16밴드(20~16kHz)와 독립적으로 동작.
-        추가 FFT 없음 — 같은 FFT 결과에서 빈 범위만 다르게 참조.
-        """
+        """raw FFT에서 저역(20~500Hz)만 16밴드로 분할 + AGC + 스무딩."""
         raw_fft = eng.get_raw_fft()
         spec_len = len(raw_fft)
         n = BASS_DETAIL_N_BANDS
@@ -372,10 +460,8 @@ class AudioVisualizer(QThread):
                 self._bd_agc[i] = max(self._bd_agc[i], agc_floor)
 
         normalized = raw_vals / self._bd_agc
-        # 감도 적용 — bass_detail은 bass_sensitivity만 사용
         val = np.minimum(1.0, (normalized * self.bass_sensitivity) ** 1.5)
 
-        # Attack/Release 스무딩
         for i in range(n):
             self._bd_smooth[i] = self._ar(self._bd_smooth[i], val[i], atk_rate, rel_rate)
 
@@ -405,6 +491,8 @@ class AudioVisualizer(QThread):
             c = c * (1 - white_mix) + 255.0 * white_mix
             leds[led_idx] = c * intensity
 
+        # ★ 색상 보정 적용 후 GRB 변환
+        self._apply_color_correction(leds)
         return self._leds_to_grb(leds)
 
     # ── Spectrum (spectrum + bass_detail 공용) ────────────────────
@@ -425,6 +513,8 @@ class AudioVisualizer(QThread):
             intensity = max(MIN_BRIGHTNESS, energy) * self.brightness
             leds[led_idx] = color * intensity
 
+        # ★ 색상 보정 적용 후 GRB 변환
+        self._apply_color_correction(leds)
         return self._leds_to_grb(leds)
 
     # ── 색상 헬퍼 ────────────────────────────────────────────────

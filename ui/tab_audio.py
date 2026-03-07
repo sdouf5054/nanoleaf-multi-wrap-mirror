@@ -1,4 +1,10 @@
-"""오디오 비주얼라이저 탭 v7
+"""오디오 비주얼라이저 탭 v8
+
+[변경 v8 — bass_detail 모드 복원]
+- ★ 콤보박스 3개 모드: Pulse / Spectrum / Bass Detail
+- ★ MODE_BASS_DETAIL import 추가
+- ★ MODE_DEFAULTS에 bass_detail 섹션 추가
+- ★ _on_mode_changed / _get_current_mode / _update_mode_ui 3모드 대응
 
 [변경 v7 — HybridVisualizer 통합 + 색상 소스 UI]
 - ★ AudioVisualizer → HybridVisualizer 전환
@@ -21,7 +27,7 @@ import os
 import psutil
 
 from core.audio_engine import list_loopback_devices, HAS_PYAUDIO
-from core.audio_visualizer import MODE_PULSE, MODE_SPECTRUM, _remap_t
+from core.audio_visualizer import MODE_PULSE, MODE_SPECTRUM, MODE_BASS_DETAIL, _remap_t
 from core.hybrid_visualizer import (
     HybridVisualizer,
     COLOR_SOURCE_SOLID, COLOR_SOURCE_SCREEN,
@@ -57,6 +63,12 @@ MODE_DEFAULTS = {
         "brightness": 100,
         "attack": 50, "release": 50,
         "zone_bass": 33, "zone_mid": 33, "zone_high": 34,
+    },
+    "bass_detail": {
+        "bass_sens": 100, "mid_sens": 100, "high_sens": 100,
+        "brightness": 100,
+        "attack": 10, "release": 70,
+        "zone_bass": 48, "zone_mid": 26, "zone_high": 26,
     },
 }
 
@@ -99,11 +111,11 @@ def rainbow_color_at(t):
 
 
 def _ensure_audio_config(config):
-    """config에 audio_pulse/audio_spectrum 섹션이 없으면 기본값으로 생성."""
-    for mode_key in ("audio_pulse", "audio_spectrum"):
+    """config에 audio_pulse/audio_spectrum/audio_bass_detail 섹션이 없으면 기본값으로 생성."""
+    for mode_key in ("audio_pulse", "audio_spectrum", "audio_bass_detail"):
         if mode_key not in config:
             mode_name = mode_key.replace("audio_", "")
-            config[mode_key] = dict(MODE_DEFAULTS[mode_name])
+            config[mode_key] = dict(MODE_DEFAULTS.get(mode_name, MODE_DEFAULTS["pulse"]))
 
 
 class NoScrollSlider(QSlider):
@@ -299,20 +311,15 @@ class SpectrumWidget(QWidget):
 
 # ★ 모니터 형태 LED 프리뷰 위젯
 class MonitorPreview(QWidget):
-    """모니터 둘레에 LED 색상을 표시하는 프리뷰 위젯.
-
-    config의 세그먼트 정보로 LED 위치를 계산하고,
-    모니터 사각형 둘레에 색상 블록으로 표시합니다.
-    멀티랩은 바깥/안쪽으로 오프셋하여 구분합니다.
-    """
+    """모니터 둘레에 LED 색상을 표시하는 프리뷰 위젯."""
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self._config = config
-        self._led_colors = None   # (n, 3) float32 — zone 색상 또는 per-LED 색상
-        self._zone_map = None     # (led_count,) int — LED→zone 매핑
+        self._led_colors = None
+        self._zone_map = None
         self._led_count = config["device"]["led_count"]
-        self._positions = None    # (led_count, 2) float32 — 정규화된 LED 좌표
+        self._positions = None
         self._sides = None
         self._n_zones = 4
 
@@ -323,11 +330,9 @@ class MonitorPreview(QWidget):
         self._compute_positions()
 
     def _compute_positions(self):
-        """config 기준으로 LED 위치를 정규화 좌표(0~1)로 계산."""
         layout_cfg = self._config["layout"]
         mirror_cfg = self._config.get("mirror", {})
 
-        # 임의의 화면 크기로 위치 계산 (비율만 사용)
         screen_w = mirror_cfg.get("grid_cols", 64) * 40
         screen_h = mirror_cfg.get("grid_rows", 32) * 40
 
@@ -338,7 +343,6 @@ class MonitorPreview(QWidget):
             portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
         )
 
-        # 0~1로 정규화
         self._positions = np.zeros_like(positions)
         if screen_w > 0:
             self._positions[:, 0] = positions[:, 0] / screen_w
@@ -346,7 +350,6 @@ class MonitorPreview(QWidget):
             self._positions[:, 1] = positions[:, 1] / screen_h
         self._sides = sides
 
-        # 멀티랩 감지: 같은 side에 2개 이상 세그먼트가 있으면 바퀴 번호 부여
         self._wrap_index = np.zeros(self._led_count, dtype=np.int32)
         side_count = {}
         for seg in layout_cfg["segments"]:
@@ -363,41 +366,31 @@ class MonitorPreview(QWidget):
                     self._wrap_index[idx] = wrap
 
     def set_zone_map(self, zone_map):
-        """LED→zone 매핑 설정 (zone 모드에서 사용)."""
         self._zone_map = zone_map
 
     def set_n_zones(self, n_zones):
         self._n_zones = n_zones
 
     def set_colors(self, colors):
-        """색상 데이터 설정.
-
-        zone 모드: (n_zones, 3) — zone_map으로 LED에 매핑
-        per-LED: (led_count, 3) — LED별 직접 매핑
-        """
         if colors is not None and len(colors) > 0:
             self._led_colors = np.clip(colors, 0, 255).astype(np.float32)
             self.update()
 
     def _get_led_color(self, led_idx):
-        """LED 인덱스의 표시 색상을 결정."""
         if self._led_colors is None:
             return (60, 60, 60)
 
         n_colors = len(self._led_colors)
 
         if n_colors >= self._led_count:
-            # per-LED 모드: 직접 매핑
             c = self._led_colors[led_idx]
         elif self._zone_map is not None:
-            # zone 모드: zone_map으로 매핑
             zone_idx = self._zone_map[led_idx]
             if zone_idx < n_colors:
                 c = self._led_colors[zone_idx]
             else:
                 c = self._led_colors[zone_idx % n_colors]
         elif n_colors == 1:
-            # 1구역: 전체 동일색
             c = self._led_colors[0]
         else:
             return (60, 60, 60)
@@ -412,17 +405,15 @@ class MonitorPreview(QWidget):
         h = self.height()
 
         led_size = 11
-        wrap_gap = led_size + 8  # 멀티랩 간 간격
-        led_margin = wrap_gap * 2 + 20 # LED 2줄분 + 여유
+        wrap_gap = led_size + 8
+        led_margin = wrap_gap * 2 + 20
 
-        # 모니터를 16:9 비율로 중앙 배치
         avail_w = w - 2 * led_margin
         avail_h = h - 2 * led_margin
         if avail_w < 40 or avail_h < 20:
             painter.end()
             return
 
-        # 16:9 비율 유지하면서 가용 공간에 맞춤
         aspect = 16.0 / 9.0
         if avail_w / avail_h > aspect:
             mon_h = avail_h
@@ -434,12 +425,10 @@ class MonitorPreview(QWidget):
         mon_x = (w - mon_w) // 2
         mon_y = (h - mon_h) // 2
 
-        # 모니터 본체 — 어두운 사각형
         painter.setPen(QColor(80, 80, 80))
         painter.setBrush(QBrush(QColor(45, 45, 48)))
         painter.drawRoundedRect(mon_x, mon_y, mon_w, mon_h, 3, 3)
 
-        # LED 블록 배치
         if self._positions is None:
             painter.end()
             return
@@ -447,18 +436,14 @@ class MonitorPreview(QWidget):
         half_led = led_size // 2
 
         for i in range(self._led_count):
-            nx, ny = self._positions[i]  # 0~1 정규화 좌표
+            nx, ny = self._positions[i]
             side = self._sides[i]
             wrap = self._wrap_index[i]
 
-            # 정규화 좌표 → 모니터 가장자리 좌표
             px = mon_x + nx * mon_w
             py = mon_y + ny * mon_h
 
-            # side에 따라 모니터 바깥쪽으로 배치
-            # wrap 0 = 바깥 바퀴 (더 먼 쪽), wrap 1 = 안쪽 바퀴 (가까운 쪽)
-            dist = wrap_gap + wrap * wrap_gap  # wrap 0: 1칸, wrap 1: 2칸 (안쪽이 더 가까이)
-            dist = wrap_gap * (2 - wrap)       # wrap 0: 2칸(멀리), wrap 1: 1칸(가까이)
+            dist = wrap_gap * (2 - wrap)
 
             if side == "top":
                 py = mon_y - dist
@@ -481,7 +466,7 @@ class MonitorPreview(QWidget):
 
 
 class AudioTab(QWidget):
-    """오디오 비주얼라이저 탭 v7 — HybridVisualizer + 색상 소스 UI."""
+    """오디오 비주얼라이저 탭 v8 — HybridVisualizer + 색상 소스 UI + 3모드."""
 
     request_mirror_stop = pyqtSignal()
 
@@ -493,7 +478,7 @@ class AudioTab(QWidget):
         self._is_running = False
         self._current_color = (255, 0, 80)
         self._edit_mode = False
-        self._current_mode_key = "pulse"  # "pulse" or "spectrum"
+        self._current_mode_key = "pulse"  # "pulse" / "spectrum" / "bass_detail"
         self._switching_mode = False
 
         self._all_sliders = []
@@ -511,7 +496,7 @@ class AudioTab(QWidget):
         self._res_timer.timeout.connect(self._update_resource_usage)
         self._res_timer.start(2000)
 
-    # ── 모드별 파라미터 저장/로드 (v6 호환) ────────────────────────
+    # ── 모드별 파라미터 저장/로드 ────────────────────────────────
 
     def _config_key_for_mode(self, mode_name):
         return f"audio_{mode_name}"
@@ -652,19 +637,21 @@ class AudioTab(QWidget):
         btn_layout.addWidget(self.btn_stop)
         layout.addLayout(btn_layout)
 
-        # === 모드 ===
+        # === 모드 (★ 3개 옵션) ===
         mode_group = QGroupBox("비주얼라이저 모드")
         ml = QVBoxLayout(mode_group)
         self.combo_mode = QComboBox()
         self.combo_mode.addItems([
             "🔴 Bass 반응 — 저음 기반 전체 밝기",
             "🌈 Spectrum — 16밴드 주파수 매핑",
+            "🔊 Bass Detail — 저역 세밀 16밴드",
         ])
         self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
         ml.addWidget(self.combo_mode)
         ml.addWidget(QLabel(
             "Bass 반응: bass 에너지로 전체 밝기 제어 + mid/high 색상 변조\n"
-            "Spectrum: 16개 주파수 밴드별 밝기 (하단=저음, 상단=고음)\n"
+            "Spectrum: 16개 주파수 밴드별 밝기 (20Hz~16kHz)\n"
+            "Bass Detail: 20~500Hz 저역만 16밴드 세밀 분할\n"
             "※ 모드 전환 시 파라미터가 각 모드의 저장값으로 전환됩니다"
         ))
         layout.addWidget(mode_group)
@@ -695,7 +682,7 @@ class AudioTab(QWidget):
         src_layout.addWidget(self.zone_count_row)
         self.zone_count_row.setVisible(False)
 
-        # 화면 색상 프리뷰 — 토글 버튼 + 모니터 형태 위젯
+        # 화면 색상 프리뷰
         preview_row = QHBoxLayout()
         self.btn_preview = QPushButton("👁 프리뷰 보기")
         self.btn_preview.setCheckable(True)
@@ -768,7 +755,7 @@ class AudioTab(QWidget):
         cl.addLayout(cr)
         layout.addWidget(self.color_group)
 
-        # === 파라미터 (대역 비율 포함) ===
+        # === 파라미터 ===
         param_group = QGroupBox("파라미터")
         pl = QVBoxLayout(param_group)
 
@@ -864,7 +851,7 @@ class AudioTab(QWidget):
         hint.setWordWrap(True)
         pl.addWidget(hint)
 
-        # 대역 비율 — spectrum 전용
+        # 대역 비율 — spectrum/bass_detail 전용
         self.zone_line = QFrame()
         self.zone_line.setFrameShape(QFrame.HLine)
         self.zone_line.setFrameShadow(QFrame.Sunken)
@@ -983,7 +970,8 @@ class AudioTab(QWidget):
     def _save_params(self):
         self._save_current_params_to_mode(self._current_mode_key)
         save_config(self.config)
-        mode_label = "Bass 반응" if self._current_mode_key == "pulse" else "Spectrum"
+        mode_labels = {"pulse": "Bass 반응", "spectrum": "Spectrum", "bass_detail": "Bass Detail"}
+        mode_label = mode_labels.get(self._current_mode_key, self._current_mode_key)
         QMessageBox.information(self, "저장", f"{mode_label} 모드 설정이 저장되었습니다.")
 
     # ── 디바이스 ──────────────────────────────────────────────────
@@ -997,42 +985,31 @@ class AudioTab(QWidget):
     # ── ★ 색상 소스 UI 콜백 ──────────────────────────────────────
 
     def _get_color_source(self):
-        """콤보박스 인덱스 → 색상 소스 상수."""
         idx = self.combo_color_source.currentIndex()
         return [COLOR_SOURCE_SOLID, COLOR_SOURCE_SCREEN][idx]
 
     def _get_zone_count(self):
-        """구역 수 콤보박스에서 현재 선택된 값."""
         return self.combo_zone_count.currentData() or 4
 
     def _on_color_source_changed(self, idx):
-        """색상 소스 변경 — UI 표시 전환 + 실행 중 비주얼라이저에 반영."""
         source = self._get_color_source()
         is_screen = (source == COLOR_SOURCE_SCREEN)
 
-        # 색상 팔레트: 단색 모드에서만 표시
         self.color_group.setVisible(not is_screen)
-
-        # 구역 수: 화면 연동 모드에서 표시
         self.zone_count_row.setVisible(is_screen)
-
-        # 프리뷰 토글 버튼: 화면 연동 모드에서 표시
         self.btn_preview.setVisible(is_screen)
         if not is_screen:
             self.monitor_preview.setVisible(False)
             self._preview_active = False
             self.btn_preview.setChecked(False)
 
-        # 실행 중이면 비주얼라이저에 반영
         if self._visualizer:
             n_zones = self._get_zone_count() if is_screen else 4
             self._visualizer.set_color_source(source, n_zones=n_zones)
 
     def _on_zone_count_changed(self, idx):
-        """구역 수 변경 — zone 매핑 갱신 + 비주얼라이저 반영."""
         n_zones = self._get_zone_count()
 
-        # MonitorPreview의 zone 매핑 갱신
         if n_zones != N_ZONES_PER_LED:
             zone_map = _build_led_zone_map_by_side(self.config, n_zones)
             self.monitor_preview.set_zone_map(zone_map)
@@ -1042,17 +1019,14 @@ class AudioTab(QWidget):
             self._visualizer.set_color_source(COLOR_SOURCE_SCREEN, n_zones=n_zones)
 
     def _on_screen_colors_updated(self, colors):
-        """★ HybridVisualizer에서 전달받은 색상 → 프리뷰 위젯 (토글 활성 시만)."""
         if self._preview_active:
             self.monitor_preview.set_colors(colors)
 
     def _on_preview_toggled(self, checked):
-        """프리뷰 토글 — 켜면 위젯 표시 + 색상 업데이트 활성화."""
         self._preview_active = checked
         self.monitor_preview.setVisible(checked)
         if checked:
             self.btn_preview.setText("👁 프리뷰 숨기기")
-            # 현재 zone 매핑 설정
             n_zones = self._get_zone_count()
             if n_zones != N_ZONES_PER_LED:
                 zone_map = _build_led_zone_map_by_side(self.config, n_zones)
@@ -1070,20 +1044,17 @@ class AudioTab(QWidget):
 
         device_idx = self.combo_device.currentData()
 
-        # ★ HybridVisualizer 생성
         try:
             self._visualizer = HybridVisualizer(self.config, device_index=device_idx)
         except Exception as e:
             QMessageBox.warning(self, "초기화 실패", str(e))
             return
 
-        # 색상 소스 설정
         source = self._get_color_source()
         n_zones = self._get_zone_count()
         self._visualizer.color_source = source
         self._visualizer.n_zones = n_zones
 
-        # 단색/무지개 설정
         if self._is_rainbow:
             self._visualizer.set_rainbow(True)
         else:
@@ -1093,14 +1064,13 @@ class AudioTab(QWidget):
         self._visualizer.mode = self._get_current_mode()
         self._apply_params_to_visualizer()
 
-        # 시그널 연결
         self._visualizer.fps_updated.connect(self._on_fps)
         self._visualizer.energy_updated.connect(self._on_energy)
         self._visualizer.spectrum_updated.connect(self._on_spectrum)
         self._visualizer.status_changed.connect(self._on_status)
         self._visualizer.error.connect(self._on_error)
         self._visualizer.finished.connect(self._on_finished)
-        self._visualizer.screen_colors_updated.connect(self._on_screen_colors_updated)  # ★
+        self._visualizer.screen_colors_updated.connect(self._on_screen_colors_updated)
 
         self._visualizer.start()
         self._set_running(True)
@@ -1120,7 +1090,6 @@ class AudioTab(QWidget):
         self.btn_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         self.combo_device.setEnabled(not running)
-        # ★ 색상 소스/구역 수는 실행 중에도 변경 가능
         if not running:
             self._decay_timer.start()
         else:
@@ -1177,20 +1146,24 @@ class AudioTab(QWidget):
         except Exception:
             pass
 
-    # ── 모드별 UI 표시 ──────────────────────────────────────────────
+    # ── ★ 모드별 UI 표시 (3모드 대응) ──────────────────────────────
 
     def _update_mode_ui(self, mode_name):
-        is_spectrum = (mode_name == "spectrum")
+        # spectrum과 bass_detail 모두 대역 비율/감도 위젯 표시
+        is_banded = (mode_name in ("spectrum", "bass_detail"))
         for w in self._spectrum_only_widgets:
-            w.setVisible(is_spectrum)
-        self.label_sens.setText(
-            "감도 (대역별)" if is_spectrum else "감도 (Bass)"
-        )
+            w.setVisible(is_banded)
+        if mode_name == "bass_detail":
+            self.label_sens.setText("감도 (Bass Detail)")
+        elif mode_name == "spectrum":
+            self.label_sens.setText("감도 (대역별)")
+        else:
+            self.label_sens.setText("감도 (Bass)")
 
-    # ── 모드 전환 ─────────────────────────────────────────────────
+    # ── ★ 모드 전환 (3모드 대응) ──────────────────────────────────
 
     def _on_mode_changed(self, idx):
-        new_mode = ["pulse", "spectrum"][idx]
+        new_mode = ["pulse", "spectrum", "bass_detail"][idx]
         if new_mode == self._current_mode_key:
             return
 
@@ -1203,7 +1176,7 @@ class AudioTab(QWidget):
             self._apply_params_to_visualizer()
 
     def _get_current_mode(self):
-        return [MODE_PULSE, MODE_SPECTRUM][self.combo_mode.currentIndex()]
+        return [MODE_PULSE, MODE_SPECTRUM, MODE_BASS_DETAIL][self.combo_mode.currentIndex()]
 
     # ── 색상 (단색 모드) ──────────────────────────────────────────
 
