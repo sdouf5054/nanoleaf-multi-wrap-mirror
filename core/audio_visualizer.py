@@ -1,11 +1,10 @@
-"""오디오 비주얼라이저 v7 — 대칭 둘레 거리 + 대역 비율 조절
+"""오디오 비주얼라이저 v8 — 대칭 둘레 거리 + 대역 비율 + 저역 세밀 모드
 
-[주요 변경 v7]
-- ★ band_zone_weights (bass%, mid%, high%) — LED 둘레에서 각 대역이
-  차지하는 비율을 조절. 기본 33/33/34.
-- ★ 비율에 따라 색상 그라데이션과 주파수 밴드가 동시에 재배치
-  bass 50%면 → 하단 50% LED가 빨강~노랑 색상 + 저음 밴드 할당
-- ★ _remap_t() — 균등 둘레 비율(0~1)을 대역 비율에 맞게 비선형 변환
+[주요 변경 v8]
+- ★ MODE_BASS_DETAIL: 20Hz~500Hz를 16밴드 로그 분할하여 저역만 세밀 표현
+  중고역은 무시 — Trap Nation 스타일 저음 집중 비주얼
+- raw FFT에서 직접 밴드 분할 + 자체 AGC/스무딩
+- 렌더링은 spectrum 모드와 동일 (zone_weights, 색상 매핑 공유)
 """
 
 import time
@@ -14,43 +13,33 @@ import threading
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from core.audio_engine import AudioEngine
+from core.audio_engine import AudioEngine, _build_log_bands
 from core.device import NanoleafDevice
 from core.layout import get_led_positions
 
 MODE_PULSE = "pulse"
 MODE_SPECTRUM = "spectrum"
+MODE_BASS_DETAIL = "bass_detail"
 
 DEFAULT_FPS = 60
 MIN_BRIGHTNESS = 0.02
 
 # 기본 대역 비율 (합계 = 100)
-DEFAULT_ZONE_WEIGHTS = (33, 33, 34)  # bass, mid, high
+DEFAULT_ZONE_WEIGHTS = (33, 33, 34)
 
-# 무지개 색상에서 각 대역의 기본 색상 범위 (0~1)
-# bass = 빨~노 (0.0 ~ 0.33), mid = 초~시안 (0.33 ~ 0.67), high = 파~보 (0.67 ~ 1.0)
-_ZONE_COLOR_RANGES = [(0.0, 0.33), (0.33, 0.67), (0.67, 1.0)]
+# 저역 세밀 모드 주파수 범위
+BASS_DETAIL_FREQ_MIN = 20
+BASS_DETAIL_FREQ_MAX = 500
+BASS_DETAIL_N_BANDS = 16
 
 
 def _remap_t(t, zone_weights):
-    """균등 둘레 비율 t(0~1)를 대역 비율에 맞게 색상/밴드 t로 변환.
-
-    zone_weights: (bass%, mid%, high%) 합계 100
-
-    원리:
-    - 둘레의 처음 bass% 구간 → 색상 0.0~0.33 (빨~노)
-    - 다음 mid% 구간 → 색상 0.33~0.67 (초~시안)
-    - 마지막 high% 구간 → 색상 0.67~1.0 (파~보)
-
-    각 구간 내에서는 선형 보간으로 연속 그라데이션 유지.
-    """
+    """균등 둘레 비율 t(0~1)를 대역 비율에 맞게 색상/밴드 t로 변환."""
     b_pct, m_pct, h_pct = zone_weights[0] / 100.0, zone_weights[1] / 100.0, zone_weights[2] / 100.0
 
-    # 둘레 경계 (입력 t 기준)
     t_bound1 = b_pct
     t_bound2 = b_pct + m_pct
 
-    # 색상/밴드 경계 (출력 기준) — 고정 3등분
     c0, c1 = 0.0, 1.0 / 3.0
     c2, c3 = 1.0 / 3.0, 2.0 / 3.0
     c4, c5 = 2.0 / 3.0, 1.0
@@ -58,15 +47,12 @@ def _remap_t(t, zone_weights):
     t = max(0.0, min(1.0, t))
 
     if t <= t_bound1 and b_pct > 0:
-        # bass 구간
         frac = t / b_pct
         return c0 + frac * (c1 - c0)
     elif t <= t_bound2 and m_pct > 0:
-        # mid 구간
         frac = (t - t_bound1) / m_pct
         return c2 + frac * (c3 - c2)
     elif h_pct > 0:
-        # high 구간
         frac = (t - t_bound2) / h_pct
         return c4 + frac * (c5 - c4)
     else:
@@ -74,14 +60,7 @@ def _remap_t(t, zone_weights):
 
 
 def _compute_led_perimeter_t(config):
-    """각 LED의 균등 둘레 비율 t(0~1)를 계산.
-
-    하단 중앙 = 0.0, 상단 중앙 = 1.0, 좌우 대칭.
-    zone_weights와 독립 — 물리적 위치만 반영.
-
-    Returns:
-        perimeter_t: np.array (led_count,) float — 각 LED의 둘레 비율 0~1
-    """
+    """각 LED의 균등 둘레 비율 t(0~1)를 계산."""
     layout_cfg = config["layout"]
     mirror_cfg = config.get("mirror", {})
     dev_cfg = config["device"]
@@ -126,10 +105,7 @@ def _compute_led_perimeter_t(config):
 
 
 def _compute_led_band_mapping(perimeter_t, n_bands, zone_weights):
-    """둘레 비율 + 대역 비율 → 각 LED의 밴드 인덱스.
-
-    zone_weights로 remapping한 후 n_bands 범위로 스케일.
-    """
+    """둘레 비율 + 대역 비율 → 각 LED의 밴드 인덱스."""
     led_count = len(perimeter_t)
     band_indices = np.zeros(led_count, dtype=np.float64)
 
@@ -161,7 +137,7 @@ def _build_led_order_from_segments(segments, led_count):
 
 
 class AudioVisualizer(QThread):
-    """오디오 반응 LED 비주얼라이저 v7."""
+    """오디오 반응 LED 비주얼라이저 v8."""
 
     fps_updated = pyqtSignal(float)
     energy_updated = pyqtSignal(float, float, float)
@@ -174,7 +150,6 @@ class AudioVisualizer(QThread):
         self.config = copy.deepcopy(config)
         self._stop_event = threading.Event()
 
-        # 외부 파라미터
         self.base_color = np.array([255, 0, 80], dtype=np.float32)
         self.rainbow = False
         self.brightness = 1.0
@@ -185,17 +160,17 @@ class AudioVisualizer(QThread):
         self.target_fps = DEFAULT_FPS
         self.attack = 0.5
         self.release = 0.1
+        self.input_smoothing = 0.3  # ★ AudioEngine EMA 스무딩 (0=없음, 높을수록 평활)
 
-        # ★ 대역 비율 (bass%, mid%, high%) — 실시간 변경 가능
         self._zone_weights = list(DEFAULT_ZONE_WEIGHTS)
-        self._zone_dirty = False  # 변경 감지 플래그
+        self._zone_dirty = False
 
         self._device_index = device_index
         self._audio_engine = None
         self._nanoleaf = None
         self._led_count = 0
 
-        self._perimeter_t = None     # 물리적 둘레 비율 (고정)
+        self._perimeter_t = None
         self._led_band_indices = None
         self._led_order = []
 
@@ -204,13 +179,16 @@ class AudioVisualizer(QThread):
         self._smooth_high = 0.0
         self._smooth_spectrum = None
 
+        # ★ bass_detail 모드 전용 상태
+        self._bd_band_bins = None       # 저역 밴드 FFT 빈 범위
+        self._bd_agc = None             # 밴드별 AGC
+        self._bd_smooth = None          # 밴드별 스무딩 값
+
     def set_zone_weights(self, bass, mid, high):
-        """대역 비율 변경 (합계 100). 다음 프레임에서 반영."""
         self._zone_weights = [bass, mid, high]
         self._zone_dirty = True
 
     def _rebuild_band_mapping(self):
-        """zone_weights 변경 시 밴드 매핑 재계산."""
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
         self._led_band_indices = _compute_led_band_mapping(
             self._perimeter_t, n_bands, self._zone_weights
@@ -262,7 +240,6 @@ class AudioVisualizer(QThread):
 
         n_bands = self._audio_engine.n_bands
 
-        # ★ 물리적 둘레 비율 (고정) + 초기 밴드 매핑
         self._perimeter_t = _compute_led_perimeter_t(self.config)
         self._led_band_indices = _compute_led_band_mapping(
             self._perimeter_t, n_bands, self._zone_weights
@@ -271,6 +248,15 @@ class AudioVisualizer(QThread):
         self._led_order = _build_led_order_from_segments(segments, self._led_count)
 
         self._smooth_spectrum = np.zeros(n_bands, dtype=np.float64)
+
+        # ★ bass_detail 밴드 분할 초기화
+        fft_freqs = self._audio_engine.fft_freqs
+        self._bd_band_bins = _build_log_bands(
+            BASS_DETAIL_N_BANDS, BASS_DETAIL_FREQ_MIN, BASS_DETAIL_FREQ_MAX,
+            fft_freqs
+        )
+        self._bd_agc = np.full(BASS_DETAIL_N_BANDS, 0.01, dtype=np.float64)
+        self._bd_smooth = np.zeros(BASS_DETAIL_N_BANDS, dtype=np.float64)
 
         self.status_changed.emit("비주얼라이저 실행 중")
         return True
@@ -285,7 +271,6 @@ class AudioVisualizer(QThread):
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
 
-            # ★ zone_weights 변경 감지
             if self._zone_dirty:
                 self._rebuild_band_mapping()
 
@@ -293,6 +278,7 @@ class AudioVisualizer(QThread):
             eng.bass_sensitivity = self.bass_sensitivity
             eng.mid_sensitivity = self.mid_sensitivity
             eng.high_sensitivity = self.high_sensitivity
+            eng.smoothing = self.input_smoothing  # ★ 입력 평활화 실시간 반영
 
             bands = eng.get_band_energies()
             raw_bass, raw_mid, raw_high = bands["bass"], bands["mid"], bands["high"]
@@ -314,14 +300,24 @@ class AudioVisualizer(QThread):
             high = self._smooth_high
             spec = self._smooth_spectrum
 
-            if frame_count % 3 == 0:
-                self.energy_updated.emit(bass, mid, high)
-                self.spectrum_updated.emit(spec.copy())
-
             mode = self.mode
-            if mode == MODE_SPECTRUM:
+
+            # ★ bass_detail: raw FFT → 저역 16밴드 자체 처리
+            if mode == MODE_BASS_DETAIL:
+                bd_spec = self._process_bass_detail(eng, atk, rel)
+                if frame_count % 3 == 0:
+                    self.energy_updated.emit(bass, mid, high)
+                    self.spectrum_updated.emit(bd_spec.copy())
+                grb_data = self._render_spectrum(bd_spec)
+            elif mode == MODE_SPECTRUM:
+                if frame_count % 3 == 0:
+                    self.energy_updated.emit(bass, mid, high)
+                    self.spectrum_updated.emit(spec.copy())
                 grb_data = self._render_spectrum(spec)
             else:
+                if frame_count % 3 == 0:
+                    self.energy_updated.emit(bass, mid, high)
+                    self.spectrum_updated.emit(spec.copy())
                 grb_data = self._render_pulse(bass, mid, high)
 
             try:
@@ -348,6 +344,45 @@ class AudioVisualizer(QThread):
                 if stop_wait(timeout=sleep_time):
                     break
 
+    # ── Bass Detail 처리 ──────────────────────────────────────────
+
+    def _process_bass_detail(self, eng, atk_rate, rel_rate):
+        """raw FFT에서 저역(20~500Hz)만 16밴드로 분할 + AGC + 스무딩.
+
+        AudioEngine의 기존 16밴드(20~16kHz)와 독립적으로 동작.
+        추가 FFT 없음 — 같은 FFT 결과에서 빈 범위만 다르게 참조.
+        """
+        raw_fft = eng.get_raw_fft()
+        spec_len = len(raw_fft)
+        n = BASS_DETAIL_N_BANDS
+
+        raw_vals = np.zeros(n, dtype=np.float64)
+        for i, (lo, hi) in enumerate(self._bd_band_bins):
+            if lo < spec_len and hi <= spec_len and hi > lo:
+                band_data = raw_fft[lo:hi]
+                raw_vals[i] = float(np.sqrt(np.mean(band_data ** 2)))
+
+        # AGC (AudioEngine과 동일한 방식)
+        agc_atk, agc_rel, agc_floor = 0.3, 0.002, 0.005
+        for i in range(n):
+            if raw_vals[i] > self._bd_agc[i]:
+                self._bd_agc[i] += (raw_vals[i] - self._bd_agc[i]) * agc_atk
+            else:
+                self._bd_agc[i] *= (1.0 - agc_rel)
+                self._bd_agc[i] = max(self._bd_agc[i], agc_floor)
+
+        normalized = raw_vals / self._bd_agc
+        # 감도 적용 — bass_detail은 bass_sensitivity만 사용
+        val = np.minimum(1.0, (normalized * self.bass_sensitivity) ** 1.5)
+
+        # Attack/Release 스무딩
+        for i in range(n):
+            self._bd_smooth[i] = self._ar(self._bd_smooth[i], val[i], atk_rate, rel_rate)
+
+        return self._bd_smooth
+
+    # ── 공통 ─────────────────────────────────────────────────────
+
     @staticmethod
     def _ar(current, target, attack_rate, release_rate):
         if target > current:
@@ -372,7 +407,7 @@ class AudioVisualizer(QThread):
 
         return self._leds_to_grb(leds)
 
-    # ── Spectrum ──────────────────────────────────────────────────
+    # ── Spectrum (spectrum + bass_detail 공용) ────────────────────
 
     def _render_spectrum(self, spec):
         n_leds = self._led_count
@@ -405,14 +440,14 @@ class AudioVisualizer(QThread):
     def _band_color(t):
         """밴드 위치(0=저음, 1=고음) → RGB 무지개색."""
         keypoints = [
-            (0.000, 255,   0,   0),  # 빨강
-            (0.130, 255, 127,   0),  # 주황
-            (0.260, 255, 255,   0),  # 노랑
-            (0.400,   0, 255,   0),  # 초록
-            (0.540,   0, 180, 255),  # 시안/하늘
-            (0.680,   0,  50, 255),  # 파랑
-            (0.820,  80,   0, 255),  # 남색/인디고
-            (1.000, 160,   0, 220),  # 보라
+            (0.000, 255,   0,   0),
+            (0.130, 255, 127,   0),
+            (0.260, 255, 255,   0),
+            (0.400,   0, 255,   0),
+            (0.540,   0, 180, 255),
+            (0.680,   0,  50, 255),
+            (0.820,  80,   0, 255),
+            (1.000, 160,   0, 220),
         ]
 
         t = max(0.0, min(1.0, t))

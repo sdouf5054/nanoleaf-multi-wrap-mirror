@@ -71,7 +71,7 @@
   },
   "mirror": {
     "monitor_index": 0,
-    "target_fps": 30,
+    "target_fps": 60,
     "grid_cols": 64,
     "grid_rows": 32,
     "decay_radius": 0.3,
@@ -98,8 +98,9 @@
     "mid_sens": 100,
     "high_sens": 100,
     "brightness": 100,
-    "attack": 100,
-    "release": 80,
+    "attack": 85,
+    "release": 60,
+    "input_smooth": 30,
     "zone_bass": 60,
     "zone_mid": 25,
     "zone_high": 15
@@ -110,10 +111,23 @@
     "high_sens": 180,
     "brightness": 100,
     "attack": 70,
-    "release": 50,
+    "release": 60,
+    "input_smooth": 30,
     "zone_bass": 64,
     "zone_mid": 15,
     "zone_high": 21
+  },
+  "audio_bass_detail": {
+    "bass_sens": 100,
+    "mid_sens": 100,
+    "high_sens": 100,
+    "brightness": 100,
+    "attack": 10,
+    "release": 70,
+    "input_smooth": 75,
+    "zone_bass": 48,
+    "zone_mid": 26,
+    "zone_high": 26
   },
   "options": {
     "tray_enabled": true,
