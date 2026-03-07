@@ -346,7 +346,7 @@ class AudioTab(QWidget):
         self.min_bright_row=QWidget(); mbr=QHBoxLayout(self.min_bright_row); mbr.setContentsMargins(0,0,0,0)
         mbr.addWidget(QLabel("최소 밝기:"))
         self.slider_min_brightness=NoScrollSlider(Qt.Horizontal)
-        self.slider_min_brightness.setRange(0,50); self.slider_min_brightness.setValue(5)
+        self.slider_min_brightness.setRange(0,100); self.slider_min_brightness.setValue(5)
         self.slider_min_brightness.valueChanged.connect(self._on_min_brightness_changed)
         mbr.addWidget(self.slider_min_brightness)
         self.label_min_brightness=QLabel("5%"); self.label_min_brightness.setMinimumWidth(35)
