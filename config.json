@@ -75,7 +75,7 @@
     "grid_cols": 64,
     "grid_rows": 32,
     "decay_radius": 0.3,
-    "parallel_penalty": 5.0,
+    "parallel_penalty": 4.5,
     "decay_radius_per_side": {
       "top": 0.3,
       "bottom": 0.2,

@@ -56,7 +56,7 @@ from PyQt5.QtWidgets import (
     QButtonGroup, QSizePolicy, QSpinBox, QDoubleSpinBox,
     QCheckBox, QGridLayout, QSlider, QColorDialog, QProgressBar,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QEvent
 from PyQt5.QtGui import QColor
 
 from core.audio_engine import list_loopback_devices, HAS_PYAUDIO
@@ -117,13 +117,30 @@ _ZONE_OPTIONS = [
 ]
 
 
+class _NoScrollFilter(QObject):
+    """마우스 휠로 위젯 값이 변경되는 것을 방지하는 이벤트 필터.
+
+    QComboBox, QSpinBox, QDoubleSpinBox, QSlider 등에 설치하여
+    스크롤 영역 내에서 의도치 않은 값 변경을 막습니다.
+    """
+
+    _FILTERED_TYPES = (QComboBox, QSpinBox, QDoubleSpinBox, QSlider)
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QEvent.Wheel
+                and isinstance(obj, self._FILTERED_TYPES)):
+            event.ignore()
+            return True
+        return False
+
+
 class _ModeButton(QPushButton):
     """모드 선택용 토글 버튼 — 라디오 버튼처럼 동작."""
 
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self.setCheckable(True)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(30)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._update_style()
 
@@ -154,6 +171,7 @@ class ControlTab(QWidget):
     request_engine_start = pyqtSignal(str)    # 모드 문자열
     request_engine_stop = pyqtSignal()
     request_engine_pause = pyqtSignal()       # 일시정지/재개 토글
+    request_mode_switch = pyqtSignal(str)     # 실행 중 모드 전환 요청
     config_applied = pyqtSignal()             # config.json 저장 요청
 
     # 미러링 실시간 반영 시그널 (Step 8)
@@ -161,9 +179,11 @@ class ControlTab(QWidget):
     mirror_brightness_changed = pyqtSignal(int)
     mirror_smoothing_changed = pyqtSignal(bool)
     mirror_smoothing_factor_changed = pyqtSignal(float)
+    mirror_zone_count_changed = pyqtSignal(int)
 
     # 오디오 실시간 반영 시그널 (Step 9)
     audio_params_changed = pyqtSignal(dict)
+    audio_min_brightness_changed = pyqtSignal(float)
 
     # 하이브리드 실시간 반영 시그널 (Step 10)
     hybrid_params_changed = pyqtSignal(dict)
@@ -180,8 +200,6 @@ class ControlTab(QWidget):
         self._audio_mode_key = "pulse"  # 현재 오디오 서브모드 config 키
 
         # 하이브리드 상태
-        self._hybrid_current_color = (255, 0, 80)
-        self._hybrid_is_rainbow = True
         self._hybrid_mode_key = "pulse"  # 현재 하이브리드 서브모드 config 키
 
         # 마지막 "적용" 시점의 config 스냅샷 (되돌리기용)
@@ -220,8 +238,15 @@ class ControlTab(QWidget):
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setSpacing(8)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+        layout.setContentsMargins(6, 4, 6, 4)
+
+        # 컴팩트 그룹박스 스타일 — 내부 패딩 축소
+        container.setStyleSheet(
+            "QGroupBox { padding-top: 14px; margin-top: 4px; }"
+            "QGroupBox::title { subcontrol-position: top left;"
+            " padding: 0 4px; }"
+        )
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -251,14 +276,23 @@ class ControlTab(QWidget):
 
         layout.addStretch()
 
+        # 모든 QComboBox/QSpinBox/QDoubleSpinBox/QSlider에
+        # 마우스 휠 방지 필터 설치
+        self._no_scroll_filter = _NoScrollFilter(self)
+        for w in container.findChildren(QWidget):
+            if isinstance(w, _NoScrollFilter._FILTERED_TYPES):
+                w.setFocusPolicy(Qt.StrongFocus)
+                w.installEventFilter(self._no_scroll_filter)
+
     # ── 1. 상태 ──────────────────────────────────────────────────
 
     def _build_status_section(self, parent_layout):
         sg = QGroupBox("상태")
         sl = QHBoxLayout(sg)
+        sl.setContentsMargins(6, 16, 6, 4)
 
         self.status_label = QLabel("대기 중")
-        self.status_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.status_label.setStyleSheet("font-size: 13px; font-weight: bold;")
         sl.addWidget(self.status_label)
 
         sl.addStretch()
@@ -287,7 +321,7 @@ class ControlTab(QWidget):
         bl = QHBoxLayout()
 
         self.btn_start = QPushButton("▶ 시작")
-        self.btn_start.setMinimumHeight(42)
+        self.btn_start.setMinimumHeight(32)
         self.btn_start.setStyleSheet(
             "QPushButton { background: #2d8c46; color: white; font-size: 14px;"
             " font-weight: bold; border-radius: 6px; }"
@@ -298,7 +332,7 @@ class ControlTab(QWidget):
         bl.addWidget(self.btn_start)
 
         self.btn_pause = QPushButton("⏸ 일시정지")
-        self.btn_pause.setMinimumHeight(42)
+        self.btn_pause.setMinimumHeight(32)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setStyleSheet(
             "QPushButton { background: #2c3e50; color: white; font-size: 14px;"
@@ -310,7 +344,7 @@ class ControlTab(QWidget):
         bl.addWidget(self.btn_pause)
 
         self.btn_stop = QPushButton("⏹ 중지")
-        self.btn_stop.setMinimumHeight(42)
+        self.btn_stop.setMinimumHeight(32)
         self.btn_stop.setEnabled(False)
         self.btn_stop.setStyleSheet(
             "QPushButton { background: #c0392b; color: white; font-size: 14px;"
@@ -356,6 +390,8 @@ class ControlTab(QWidget):
     def _build_preview_section(self, parent_layout):
         pg = QGroupBox("LED 프리뷰")
         pl = QVBoxLayout(pg)
+        pl.setContentsMargins(6, 16, 6, 4)
+        pl.setSpacing(2)
 
         # 접기/펼치기 버튼
         self.btn_preview_toggle = QPushButton("👁 프리뷰 보기")
@@ -388,6 +424,9 @@ class ControlTab(QWidget):
         Step 10: 하이브리드 패널 채움
         """
         self.mode_stack = QStackedWidget()
+        self.mode_stack.setSizePolicy(
+            QSizePolicy.Preferred, QSizePolicy.Maximum
+        )
 
         # 미러링 패널 (index 0)
         self.panel_mirror = QWidget()
@@ -405,53 +444,67 @@ class ControlTab(QWidget):
         self.mode_stack.addWidget(self.panel_audio)
 
         self.mode_stack.setCurrentIndex(0)
+        self.mode_stack.currentChanged.connect(self._adjust_stack_size)
+        self._adjust_stack_size(0)  # 초기 크기 조정
         parent_layout.addWidget(self.mode_stack)
 
     def _build_mirror_panel(self, panel):
-        """미러링 모드 패널 — 밝기, 스무딩, 감쇠/페널티, 변별 오버라이드."""
+        """미러링 모드 패널 — 구역 수, 밝기/스무딩, 감쇠/페널티."""
         mirror_cfg = self.config.get("mirror", {})
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(2)
 
-        # ── 밝기 ──
-        bright_group = QGroupBox("밝기")
-        bright_layout = QHBoxLayout(bright_group)
+        # ── 구역 수 (per-LED vs zone 기반) ──
+        zone_row = QHBoxLayout()
+        zone_row.addWidget(QLabel("구역 수:"))
+        self.mirror_combo_zone_count = QComboBox()
+        self.mirror_combo_zone_count.addItem("LED별 개별 (기본)", N_ZONES_PER_LED)
+        for n, label in _ZONE_OPTIONS:
+            if n != N_ZONES_PER_LED:
+                self.mirror_combo_zone_count.addItem(label, n)
+        self.mirror_combo_zone_count.currentIndexChanged.connect(
+            self._on_mirror_zone_count_changed
+        )
+        zone_row.addWidget(self.mirror_combo_zone_count)
+        zone_row.addStretch()
+        layout.addLayout(zone_row)
 
+        # ── 밝기 + 스무딩 ──
+        ctrl_group = QGroupBox("밝기 / 스무딩")
+        cl = QVBoxLayout(ctrl_group)
+        cl.setSpacing(2)
+        cl.setContentsMargins(6, 14, 6, 2)
+
+        bright_row = QHBoxLayout()
+        bright_row.addWidget(QLabel("밝기:"))
         self.mirror_brightness_slider = QSlider(Qt.Horizontal)
         self.mirror_brightness_slider.setRange(0, 100)
         self.mirror_brightness_slider.setValue(
             int(mirror_cfg.get("brightness", 1.0) * 100)
         )
-        self.mirror_brightness_slider.setTickPosition(QSlider.TicksBelow)
-        self.mirror_brightness_slider.setTickInterval(25)
         self.mirror_brightness_slider.valueChanged.connect(
             self._on_mirror_brightness_changed
         )
-        bright_layout.addWidget(self.mirror_brightness_slider)
-
+        bright_row.addWidget(self.mirror_brightness_slider)
         self.mirror_brightness_label = QLabel(
             f'{int(mirror_cfg.get("brightness", 1.0) * 100)}%'
         )
-        self.mirror_brightness_label.setMinimumWidth(45)
+        self.mirror_brightness_label.setMinimumWidth(35)
         self.mirror_brightness_label.setAlignment(
             Qt.AlignRight | Qt.AlignVCenter
         )
-        bright_layout.addWidget(self.mirror_brightness_label)
+        bright_row.addWidget(self.mirror_brightness_label)
+        cl.addLayout(bright_row)
 
-        layout.addWidget(bright_group)
-
-        # ── 스무딩 ──
-        smooth_group = QGroupBox("스무딩")
-        smooth_layout = QHBoxLayout(smooth_group)
-
+        smooth_row = QHBoxLayout()
         self.mirror_chk_smoothing = QCheckBox("스무딩")
         self.mirror_chk_smoothing.setChecked(True)
         self.mirror_chk_smoothing.stateChanged.connect(
             self._on_mirror_smoothing_changed
         )
-        smooth_layout.addWidget(self.mirror_chk_smoothing)
-
-        smooth_layout.addWidget(QLabel("계수:"))
+        smooth_row.addWidget(self.mirror_chk_smoothing)
+        smooth_row.addWidget(QLabel("계수:"))
         self.mirror_spin_smoothing = QDoubleSpinBox()
         self.mirror_spin_smoothing.setRange(0.0, 0.95)
         self.mirror_spin_smoothing.setSingleStep(0.05)
@@ -461,14 +514,17 @@ class ControlTab(QWidget):
         self.mirror_spin_smoothing.valueChanged.connect(
             self._on_mirror_smoothing_factor_changed
         )
-        smooth_layout.addWidget(self.mirror_spin_smoothing)
-        smooth_layout.addStretch()
+        smooth_row.addWidget(self.mirror_spin_smoothing)
+        smooth_row.addStretch()
+        cl.addLayout(smooth_row)
 
-        layout.addWidget(smooth_group)
+        layout.addWidget(ctrl_group)
 
         # ── 감쇠 / 페널티 ──
         decay_group = QGroupBox("감쇠 / 타원 페널티")
         decay_layout = QVBoxLayout(decay_group)
+        decay_layout.setSpacing(3)
+        decay_layout.setContentsMargins(6, 16, 6, 4)
 
         # 전역 값
         global_row = QHBoxLayout()
@@ -483,7 +539,6 @@ class ControlTab(QWidget):
             self._on_mirror_layout_param_changed
         )
         global_row.addWidget(self.mirror_spin_decay)
-
         global_row.addWidget(QLabel("타원 페널티:"))
         self.mirror_spin_penalty = QDoubleSpinBox()
         self.mirror_spin_penalty.setRange(1.0, 10.0)
@@ -512,6 +567,7 @@ class ControlTab(QWidget):
 
         # 변별 그리드
         per_side_grid = QGridLayout()
+        per_side_grid.setSpacing(2)
         sides = ["top", "bottom", "left", "right"]
         side_labels = {
             "top": "상단", "bottom": "하단",
@@ -561,29 +617,37 @@ class ControlTab(QWidget):
         layout.addWidget(decay_group)
 
     def _build_hybrid_panel(self, panel):
-        """하이브리드 모드 패널 — 색상 소스 + 구역 + 오디오 파라미터."""
+        """하이브리드 모드 패널 — 에너지 + 화면 연동 + 오디오 파라미터."""
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(4)
 
-        # ── 색상 소스 ──
-        src_group = QGroupBox("색상 소스")
-        src_l = QVBoxLayout(src_group)
+        # ── 에너지 레벨 ──
+        energy_group = QGroupBox("에너지 레벨")
+        hel = QVBoxLayout(energy_group)
+        hel.setSpacing(3)
+        hel.setContentsMargins(6, 16, 6, 4)
+        heg = QGridLayout()
+        self.hybrid_bar_bass = self._make_progress_bar(heg, 0, "Bass", "#e74c3c")
+        self.hybrid_bar_mid = self._make_progress_bar(heg, 1, "Mid", "#27ae60")
+        self.hybrid_bar_high = self._make_progress_bar(heg, 2, "High", "#3498db")
+        hel.addLayout(heg)
 
-        self.hybrid_combo_color_source = QComboBox()
-        self.hybrid_combo_color_source.addItems([
-            "🎨 단색 / 무지개",
-            "🖥 화면 연동 — 화면색 + 오디오 밝기",
-        ])
-        self.hybrid_combo_color_source.currentIndexChanged.connect(
-            self._on_hybrid_color_source_changed
-        )
-        src_l.addWidget(self.hybrid_combo_color_source)
+        # 스펙트럼 (16밴드) — 오디오 탭과 동일
+        hel.addWidget(QLabel("스펙트럼 (16밴드)"))
+        self.hybrid_spectrum_widget = SpectrumWidget(16)
+        hel.addWidget(self.hybrid_spectrum_widget)
 
-        # 구역 수 (화면 연동 시에만 표시)
-        self.hybrid_zone_count_row = QWidget()
-        zcr = QHBoxLayout(self.hybrid_zone_count_row)
-        zcr.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(energy_group)
+
+        # ── 화면 연동 설정 ──
+        screen_group = QGroupBox("화면 연동")
+        scl = QVBoxLayout(screen_group)
+        scl.setSpacing(3)
+        scl.setContentsMargins(6, 16, 6, 4)
+
+        # 구역 수
+        zcr = QHBoxLayout()
         zcr.addWidget(QLabel("구역 수:"))
         self.hybrid_combo_zone_count = QComboBox()
         for n, label in _ZONE_OPTIONS:
@@ -593,84 +657,32 @@ class ControlTab(QWidget):
         )
         zcr.addWidget(self.hybrid_combo_zone_count)
         zcr.addStretch()
-        src_l.addWidget(self.hybrid_zone_count_row)
-        self.hybrid_zone_count_row.setVisible(False)
+        scl.addLayout(zcr)
 
-        # 최소 밝기 (화면 연동 시에만 표시)
-        self.hybrid_min_bright_row = QWidget()
-        mbr = QHBoxLayout(self.hybrid_min_bright_row)
-        mbr.setContentsMargins(0, 0, 0, 0)
+        # 최소 밝기
+        mbr = QHBoxLayout()
         mbr.addWidget(QLabel("최소 밝기:"))
         self.hybrid_slider_min_brightness = NoScrollSlider(Qt.Horizontal)
         self.hybrid_slider_min_brightness.setRange(0, 100)
         self.hybrid_slider_min_brightness.setValue(5)
+        self.hybrid_slider_min_brightness.valueChanged.connect(
+            self._on_hybrid_min_brightness_changed
+        )
         mbr.addWidget(self.hybrid_slider_min_brightness)
         self.hybrid_lbl_min_brightness = QLabel("5%")
         self.hybrid_lbl_min_brightness.setMinimumWidth(35)
         self.hybrid_lbl_min_brightness.setAlignment(
             Qt.AlignRight | Qt.AlignVCenter
         )
-        self.hybrid_slider_min_brightness.valueChanged.connect(
-            self._on_hybrid_min_brightness_changed
-        )
         mbr.addWidget(self.hybrid_lbl_min_brightness)
-        src_l.addWidget(self.hybrid_min_bright_row)
-        self.hybrid_min_bright_row.setVisible(False)
+        scl.addLayout(mbr)
 
-        src_l.addWidget(QLabel(
-            "단색/무지개: 아래 색상 팔레트에서 선택\n"
-            "화면 연동: 화면 색상 + 오디오 에너지로 밝기 제어"
-        ))
-        layout.addWidget(src_group)
-
-        # ── 색상 팔레트 (solid 모드 전용) ──
-        self.hybrid_color_group = QGroupBox("색상")
-        hcl = QVBoxLayout(self.hybrid_color_group)
-        hpg = QGridLayout()
-        for i, (name, r, g, b) in enumerate(_COLOR_PRESETS):
-            btn = QPushButton(name)
-            btn.setMinimumHeight(26)
-            if r is None:
-                btn.setStyleSheet(
-                    "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                    "stop:0 red,stop:0.17 orange,stop:0.33 yellow,"
-                    "stop:0.5 lime,stop:0.67 cyan,stop:0.83 blue,"
-                    "stop:1 purple);color:white;font-weight:bold;"
-                    "border-radius:4px;font-size:11px;"
-                )
-                btn.clicked.connect(lambda _: self._hybrid_set_rainbow())
-            else:
-                tc = "#000" if (r + g + b) > 380 else "#fff"
-                btn.setStyleSheet(
-                    f"background:rgb({r},{g},{b});color:{tc};"
-                    f"font-weight:bold;border-radius:4px;font-size:11px;"
-                )
-                btn.clicked.connect(
-                    lambda _, rgb=(r, g, b): self._hybrid_set_color(*rgb)
-                )
-            hpg.addWidget(btn, i // 5, i % 5)
-        hcl.addLayout(hpg)
-
-        hcr = QHBoxLayout()
-        btn_custom = QPushButton("🎨 커스텀")
-        btn_custom.clicked.connect(self._hybrid_pick_custom_color)
-        hcr.addWidget(btn_custom)
-        self.hybrid_color_preview = QFrame()
-        self.hybrid_color_preview.setFixedSize(40, 26)
-        self.hybrid_color_preview.setStyleSheet(
-            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 red,stop:0.17 orange,stop:0.33 yellow,"
-            "stop:0.5 lime,stop:0.67 cyan,stop:0.83 blue,"
-            "stop:1 purple);border:1px solid #555;border-radius:4px;"
-        )
-        hcr.addWidget(self.hybrid_color_preview)
-        hcr.addStretch()
-        hcl.addLayout(hcr)
-        layout.addWidget(self.hybrid_color_group)
+        layout.addWidget(screen_group)
 
         # ── 비주얼라이저 모드 ──
         mode_group = QGroupBox("비주얼라이저 모드")
         hml = QVBoxLayout(mode_group)
+        hml.setContentsMargins(6, 16, 6, 4)
         self.hybrid_combo_mode = QComboBox()
         self.hybrid_combo_mode.addItems([
             "🔴 Bass 반응", "🌈 Spectrum", "🔊 Bass Detail",
@@ -684,6 +696,8 @@ class ControlTab(QWidget):
         # ── 파라미터 ──
         param_group = QGroupBox("파라미터")
         hpl = QVBoxLayout(param_group)
+        hpl.setSpacing(3)
+        hpl.setContentsMargins(6, 16, 6, 4)
 
         self.hybrid_label_sens = QLabel("감도 (Bass)")
         hpl.addWidget(self.hybrid_label_sens)
@@ -821,6 +835,25 @@ class ControlTab(QWidget):
         cr.addWidget(self.audio_color_preview)
         cr.addStretch()
         cl.addLayout(cr)
+
+        # 최소 밝기
+        ambr = QHBoxLayout()
+        ambr.addWidget(QLabel("최소 밝기:"))
+        self.audio_slider_min_brightness = NoScrollSlider(Qt.Horizontal)
+        self.audio_slider_min_brightness.setRange(0, 100)
+        self.audio_slider_min_brightness.setValue(2)
+        self.audio_slider_min_brightness.valueChanged.connect(
+            self._on_audio_min_brightness_changed
+        )
+        ambr.addWidget(self.audio_slider_min_brightness)
+        self.audio_lbl_min_brightness = QLabel("2%")
+        self.audio_lbl_min_brightness.setMinimumWidth(35)
+        self.audio_lbl_min_brightness.setAlignment(
+            Qt.AlignRight | Qt.AlignVCenter
+        )
+        ambr.addWidget(self.audio_lbl_min_brightness)
+        cl.addLayout(ambr)
+
         layout.addWidget(color_group)
 
         # ── 비주얼라이저 모드 ──
@@ -957,6 +990,8 @@ class ControlTab(QWidget):
     def _build_common_settings(self, parent_layout):
         cg = QGroupBox("공통 설정")
         cl = QVBoxLayout(cg)
+        cl.setSpacing(3)
+        cl.setContentsMargins(6, 16, 6, 4)
 
         # 화면 방향
         orient_row = QHBoxLayout()
@@ -1016,7 +1051,7 @@ class ControlTab(QWidget):
         al.addStretch()
 
         self.btn_apply = QPushButton("💾 적용")
-        self.btn_apply.setMinimumHeight(36)
+        self.btn_apply.setMinimumHeight(28)
         self.btn_apply.setMinimumWidth(100)
         self.btn_apply.setStyleSheet(
             "QPushButton { background: #2e86c1; color: white; font-size: 13px;"
@@ -1027,7 +1062,7 @@ class ControlTab(QWidget):
         al.addWidget(self.btn_apply)
 
         self.btn_revert = QPushButton("↩ 되돌리기")
-        self.btn_revert.setMinimumHeight(36)
+        self.btn_revert.setMinimumHeight(28)
         self.btn_revert.setMinimumWidth(100)
         self.btn_revert.setStyleSheet(
             "QPushButton { background: #555; color: #ccc; font-size: 13px;"
@@ -1059,16 +1094,29 @@ class ControlTab(QWidget):
         self.request_engine_stop.emit()
 
     def _on_mode_changed(self, idx):
-        """모드 선택 변경 → 패널 전환."""
+        """모드 선택 변경 → 패널 전환 + 실행 중이면 모드 전환 요청."""
         self._current_mode = _INDEX_MODE.get(idx, MODE_MIRROR)
         self.mode_stack.setCurrentIndex(idx)
 
-        # 실행 중이면 모드 전환 시 엔진 재시작이 필요하다는 안내
-        # (실제 재시작은 사용자가 "적용"을 누를 때 또는 자동으로)
+        # 실행 중이면 MainWindow에 안전한 모드 전환 요청
         if self._is_running:
-            self.status_label.setText(
-                f"모드 변경됨 — 중지 후 다시 시작해주세요"
-            )
+            self._apply_all_settings()
+            self.config_applied.emit()
+            self.request_mode_switch.emit(self._current_mode)
+
+    def _adjust_stack_size(self, idx):
+        """QStackedWidget 크기를 현재 패널에 맞춤.
+
+        비활성 패널의 sizePolicy를 Ignored로 설정하여
+        QStackedWidget이 현재 패널의 sizeHint만 반영하도록 합니다.
+        """
+        for i in range(self.mode_stack.count()):
+            w = self.mode_stack.widget(i)
+            if i == idx:
+                w.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            else:
+                w.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.mode_stack.adjustSize()
 
     def _on_preview_toggled(self, checked):
         """LED 프리뷰 접기/펼치기."""
@@ -1094,6 +1142,12 @@ class ControlTab(QWidget):
         """스무딩 계수 변경."""
         if self._is_running:
             self.mirror_smoothing_factor_changed.emit(value)
+
+    def _on_mirror_zone_count_changed(self, idx):
+        """미러링 구역 수 변경."""
+        n = self.mirror_combo_zone_count.currentData()
+        if n is not None and self._is_running:
+            self.mirror_zone_count_changed.emit(n)
 
     def _on_mirror_layout_param_changed(self, _=None):
         """감쇠/페널티/변별 값 변경 → 디바운스 후 시그널."""
@@ -1122,6 +1176,12 @@ class ControlTab(QWidget):
         self.mirror_layout_params_changed.emit(params)
 
     # ── 오디오 패널 이벤트 (Step 9) ──────────────────────────────
+
+    def _on_audio_min_brightness_changed(self, value):
+        """오디오 최소 밝기 슬라이더 변경."""
+        self.audio_lbl_min_brightness.setText(f"{value}%")
+        if self._is_running:
+            self.audio_min_brightness_changed.emit(value / 100.0)
 
     def _on_audio_mode_changed(self, idx):
         """오디오 서브모드 변경 → 파라미터 전환 + UI 업데이트."""
@@ -1210,6 +1270,7 @@ class ControlTab(QWidget):
                 self.audio_combo_mode.currentIndex(), "pulse"
             ),
             "brightness": self.audio_slider_brightness.value() / 100.0,
+            "audio_min_brightness": self.audio_slider_min_brightness.value() / 100.0,
             "bass_sensitivity": self.audio_slider_bass_sens.value() / 100.0,
             "mid_sensitivity": self.audio_slider_mid_sens.value() / 100.0,
             "high_sensitivity": self.audio_slider_high_sens.value() / 100.0,
@@ -1251,15 +1312,6 @@ class ControlTab(QWidget):
             self._audio_set_color(c.red(), c.green(), c.blue())
 
     # ── 하이브리드 패널 이벤트 (Step 10) ─────────────────────────
-
-    def _on_hybrid_color_source_changed(self, idx):
-        """색상 소스 변경 — solid ↔ screen."""
-        is_screen = (idx == 1)
-        self.hybrid_color_group.setVisible(not is_screen)
-        self.hybrid_zone_count_row.setVisible(is_screen)
-        self.hybrid_min_bright_row.setVisible(is_screen)
-        if self._is_running:
-            self.hybrid_params_changed.emit(self._collect_hybrid_params())
 
     def _on_hybrid_zone_count_changed(self, idx):
         """화면 구역 수 변경."""
@@ -1350,12 +1402,11 @@ class ControlTab(QWidget):
 
     def _collect_hybrid_params(self):
         """현재 하이브리드 UI 값을 dict로 수집 — 엔진 전달용."""
-        is_screen = (self.hybrid_combo_color_source.currentIndex() == 1)
         return {
             "audio_mode": _INDEX_AUDIO_MODE.get(
                 self.hybrid_combo_mode.currentIndex(), "pulse"
             ),
-            "color_source": COLOR_SOURCE_SCREEN if is_screen else COLOR_SOURCE_SOLID,
+            "color_source": COLOR_SOURCE_SCREEN,
             "n_zones": self.hybrid_combo_zone_count.currentData() or 4,
             "min_brightness": self.hybrid_slider_min_brightness.value() / 100.0,
             "brightness": self.hybrid_slider_brightness.value() / 100.0,
@@ -1365,45 +1416,7 @@ class ControlTab(QWidget):
             "attack": self.hybrid_slider_attack.value() / 100.0,
             "release": self.hybrid_slider_release.value() / 100.0,
             "zone_weights": self.hybrid_zone_balance.get_values(),
-            "rainbow": self._hybrid_is_rainbow,
-            "base_color": self._hybrid_current_color,
         }
-
-    def _hybrid_set_color(self, r, g, b):
-        """하이브리드 단색 설정."""
-        self._hybrid_current_color = (r, g, b)
-        self._hybrid_is_rainbow = False
-        self.hybrid_color_preview.setStyleSheet(
-            f"background:rgb({r},{g},{b});"
-            f"border:1px solid #555;border-radius:4px;"
-        )
-        if self._is_running:
-            self.hybrid_params_changed.emit(self._collect_hybrid_params())
-
-    def _hybrid_set_rainbow(self):
-        """하이브리드 무지개 설정."""
-        self._hybrid_is_rainbow = True
-        self.hybrid_color_preview.setStyleSheet(
-            "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 red,stop:0.17 orange,stop:0.33 yellow,"
-            "stop:0.5 lime,stop:0.67 cyan,stop:0.83 blue,"
-            "stop:1 purple);border:1px solid #555;border-radius:4px;"
-        )
-        if self._is_running:
-            self.hybrid_params_changed.emit(self._collect_hybrid_params())
-
-    def _hybrid_pick_custom_color(self):
-        """하이브리드 커스텀 색상."""
-        r, g, b = self._hybrid_current_color
-        c = QColorDialog.getColor(QColor(r, g, b), self, "기본 색상")
-        if c.isValid():
-            self._hybrid_set_color(c.red(), c.green(), c.blue())
-
-    def get_hybrid_color_source(self):
-        """현재 하이브리드 색상 소스."""
-        return (COLOR_SOURCE_SCREEN
-                if self.hybrid_combo_color_source.currentIndex() == 1
-                else COLOR_SOURCE_SOLID)
 
     def get_hybrid_zone_count(self):
         """현재 하이브리드 구역 수."""
@@ -1589,17 +1602,30 @@ class ControlTab(QWidget):
         self.btn_pause.setEnabled(running)
         self.btn_stop.setEnabled(running)
 
-        # 모드 선택은 실행 중에는 비활성화 (모드 전환 시 엔진 재시작 필요)
-        for btn_id in _MODE_INDEX.values():
-            btn = self._mode_buttons.button(btn_id)
-            if btn:
-                btn.setEnabled(not running)
+        # 모드 선택은 실행 중에도 활성화 — 전환 시 엔진 자동 재시작
+        # (비활성화하지 않음)
 
         # 공통 설정 중 재시작 필요한 항목 비활성화
         self.combo_orientation.setEnabled(not running)
         self.combo_rotation.setEnabled(not running)
         self.spin_target_fps.setEnabled(not running)
         self.combo_audio_device.setEnabled(not running)
+
+    def set_switching(self, switching):
+        """모드 전환 중 UI 잠금/해제.
+
+        전환 중에는 모드 버튼 + 제어 버튼 모두 비활성화하여
+        중복 전환이나 중지/시작 경합을 방지합니다.
+        """
+        for btn_id in _MODE_INDEX.values():
+            btn = self._mode_buttons.button(btn_id)
+            if btn:
+                btn.setEnabled(not switching)
+        self.btn_start.setEnabled(not switching)
+        self.btn_stop.setEnabled(not switching)
+        self.btn_pause.setEnabled(not switching)
+        if switching:
+            self.update_status("모드 전환 중...")
 
     def update_fps(self, fps):
         """FPS 갱신 (엔진 시그널에서 호출)."""
@@ -1615,14 +1641,25 @@ class ControlTab(QWidget):
             self.monitor_preview.set_colors(colors)
 
     def update_energy(self, bass, mid, high):
-        """오디오 에너지 레벨 갱신 (엔진 시그널에서 호출)."""
+        """오디오 에너지 레벨 갱신 (엔진 시그널에서 호출).
+
+        오디오 패널과 하이브리드 패널 모두에 반영.
+        """
         self.audio_bar_bass.setValue(int(bass * 100))
         self.audio_bar_mid.setValue(int(mid * 100))
         self.audio_bar_high.setValue(int(high * 100))
+        # 하이브리드 패널 에너지 바
+        self.hybrid_bar_bass.setValue(int(bass * 100))
+        self.hybrid_bar_mid.setValue(int(mid * 100))
+        self.hybrid_bar_high.setValue(int(high * 100))
 
     def update_spectrum(self, spec):
-        """스펙트럼 갱신 (엔진 시그널에서 호출)."""
+        """스펙트럼 갱신 (엔진 시그널에서 호출).
+
+        오디오 패널과 하이브리드 패널 모두에 반영.
+        """
         self.audio_spectrum_widget.set_values(spec)
+        self.hybrid_spectrum_widget.set_values(spec)
 
     def get_audio_mode(self):
         """현재 오디오 서브모드 문자열."""
@@ -1655,6 +1692,8 @@ class ControlTab(QWidget):
                 "brightness": self.get_mirror_brightness(),
                 "smoothing_enabled": self.get_mirror_smoothing_enabled(),
                 "smoothing_factor": self.get_mirror_smoothing_factor(),
+                "mirror_n_zones": self.mirror_combo_zone_count.currentData()
+                    or N_ZONES_PER_LED,
             })
         elif mode == MODE_AUDIO:
             params.update(self._collect_audio_params())

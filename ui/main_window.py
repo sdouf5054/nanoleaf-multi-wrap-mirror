@@ -96,6 +96,7 @@ class MainWindow(QMainWindow):
         self.tab_control.request_engine_start.connect(self._start_engine)
         self.tab_control.request_engine_stop.connect(self._stop_engine)
         self.tab_control.request_engine_pause.connect(self._toggle_pause)
+        self.tab_control.request_mode_switch.connect(self._switch_mode)
         self.tab_control.config_applied.connect(self._save_config)
 
         # 미러링 실시간 반영 시그널
@@ -111,10 +112,16 @@ class MainWindow(QMainWindow):
         self.tab_control.mirror_layout_params_changed.connect(
             self._on_mirror_layout_params_changed
         )
+        self.tab_control.mirror_zone_count_changed.connect(
+            self._on_mirror_zone_count_changed
+        )
 
         # 오디오/하이브리드 실시간 반영 시그널
         self.tab_control.audio_params_changed.connect(
             self._on_audio_params_changed
+        )
+        self.tab_control.audio_min_brightness_changed.connect(
+            self._on_audio_min_brightness_changed
         )
         self.tab_control.hybrid_params_changed.connect(
             self._on_hybrid_params_changed
@@ -152,16 +159,39 @@ class MainWindow(QMainWindow):
     #  엔진 관리
     # ══════════════════════════════════════════════════════════════
 
+    def _cleanup_engine(self):
+        """현재 엔진을 완전히 정리 — 시그널 해제 + 동기 대기.
+
+        이전 엔진의 finished 시그널이 큐에 남아있어도
+        새 엔진에 영향을 주지 않도록 모든 시그널을 먼저 disconnect합니다.
+        """
+        if self._engine is None:
+            return
+
+        old = self._engine
+        self._engine = None  # 즉시 참조 해제 — finished 시그널이 와도 무시
+
+        # 모든 시그널 disconnect
+        for sig_name in ("fps_updated", "status_changed", "error",
+                         "finished", "energy_updated",
+                         "spectrum_updated", "screen_colors_updated"):
+            try:
+                getattr(old, sig_name).disconnect()
+            except (TypeError, RuntimeError, AttributeError):
+                pass
+
+        # 동기 중지
+        if old.isRunning():
+            old.stop_engine()
+            old.wait(3000)
+
     def _start_engine(self, mode=None):
         """UnifiedEngine 생성 + 시작.
 
-        Args:
-            mode: 엔진 모드 문자열 (None이면 tab_control의 현재 모드)
+        이전 엔진이 있으면 완전히 정리한 뒤 새 엔진을 생성합니다.
         """
-        # 기존 엔진 중지
-        if self._engine and self._engine.isRunning():
-            self._engine.stop_engine()
-            self._engine.wait(2000)
+        # 이전 엔진 완전 정리
+        self._cleanup_engine()
 
         # DeviceManager 강제 해제
         self.device_manager.force_release()
@@ -170,34 +200,51 @@ class MainWindow(QMainWindow):
             mode = self.tab_control.current_mode
 
         # 엔진 생성
-        self._engine = UnifiedEngine(
+        engine = UnifiedEngine(
             self.config,
             audio_device_index=self.tab_control.get_audio_device_index(),
         )
-        self._engine.mode = mode
+        engine.mode = mode
 
         # 초기 파라미터 설정
+        self._engine = engine  # _apply_params_to_engine에서 참조
         params = self.tab_control.collect_engine_init_params()
         self._apply_params_to_engine(params)
 
         # 시그널 연결
-        self._engine.fps_updated.connect(self.tab_control.update_fps)
-        self._engine.status_changed.connect(self._on_status_changed)
-        self._engine.error.connect(self._on_error)
-        self._engine.finished.connect(self._on_engine_finished)
+        engine.fps_updated.connect(self.tab_control.update_fps)
+        engine.status_changed.connect(self._on_status_changed)
+        engine.error.connect(self._on_error)
+        engine.finished.connect(self._on_engine_finished)
 
         # 오디오/하이브리드 시그널
-        self._engine.energy_updated.connect(self.tab_control.update_energy)
-        self._engine.spectrum_updated.connect(self.tab_control.update_spectrum)
-        self._engine.screen_colors_updated.connect(
+        engine.energy_updated.connect(self.tab_control.update_energy)
+        engine.spectrum_updated.connect(self.tab_control.update_spectrum)
+        engine.screen_colors_updated.connect(
             self.tab_control.update_preview_colors
         )
 
         self.tab_control.set_running_state(True)
-        self._engine.start()
+        engine.start()
 
         self.tray.onoff_action.setText("⏹ 엔진 중지")
         self.tray.update_status(f"{mode} 실행 중")
+
+    def _switch_mode(self, new_mode):
+        """실행 중 모드 전환 — 안전한 stop → start.
+
+        전환 중 UI를 잠그고, 이전 엔진을 완전 정리한 뒤 새 엔진을 시작합니다.
+        """
+        self.tab_control.set_switching(True)
+        try:
+            self._start_engine(new_mode)
+        finally:
+            self.tab_control.set_switching(False)
+            # set_running_state로 버튼 상태 복원
+            if self._engine and self._engine.isRunning():
+                self.tab_control.set_running_state(True)
+            else:
+                self.tab_control.set_running_state(False)
 
     def _stop_engine(self):
         """엔진 중지 요청 (비동기)."""
@@ -207,10 +254,9 @@ class MainWindow(QMainWindow):
 
     def _stop_engine_sync(self):
         """엔진 동기 중지 — setup/color 탭의 LED 연결 요청 시."""
-        if self._engine and self._engine.isRunning():
-            self._engine.stop_engine()
-            self._engine.wait(2000)
-            self.tab_control.update_status("설정 모드 진입으로 중지됨")
+        self._cleanup_engine()
+        self.tab_control.set_running_state(False)
+        self.tab_control.update_status("설정 모드 진입으로 중지됨")
 
     def _toggle_pause(self):
         """일시정지/재개 토글."""
@@ -220,7 +266,16 @@ class MainWindow(QMainWindow):
             self.tab_control.update_pause_button(is_paused)
 
     def _on_engine_finished(self):
-        """엔진 스레드 종료 시 UI 복원."""
+        """엔진 스레드 종료 시 UI 복원.
+
+        _cleanup_engine에서 이미 _engine = None이 된 경우
+        (모드 전환 중 등) 이 시그널은 무시됩니다.
+        """
+        # stale finished 시그널 방어 — _cleanup_engine에서 _engine을
+        # None으로 설정했다면 이미 정리 완료된 것
+        if self._engine is None:
+            return
+
         self.tab_control.set_running_state(False)
         self.tab_control.update_pause_button(False)
         self.tab_control.update_fps(0)
@@ -249,6 +304,8 @@ class MainWindow(QMainWindow):
             eng.smoothing_factor = params.get(
                 "smoothing_factor", eng.smoothing_factor
             )
+            if "mirror_n_zones" in params:
+                eng.mirror_n_zones = params["mirror_n_zones"]
 
         elif mode in (MODE_AUDIO, MODE_HYBRID):
             eng.audio_brightness = params.get("brightness", eng.audio_brightness)
@@ -263,6 +320,9 @@ class MainWindow(QMainWindow):
             )
             eng.attack = params.get("attack", eng.attack)
             eng.release = params.get("release", eng.release)
+
+            if "audio_min_brightness" in params:
+                eng.audio_min_brightness = params["audio_min_brightness"]
 
             if "audio_mode" in params:
                 eng.set_audio_mode(params["audio_mode"])
@@ -284,6 +344,7 @@ class MainWindow(QMainWindow):
                     )
                 if "min_brightness" in params:
                     eng.min_brightness = params["min_brightness"]
+                    eng.audio_min_brightness = params["min_brightness"]
 
     # ══════════════════════════════════════════════════════════════
     #  미러링 실시간 반영 시그널 핸들러
@@ -310,6 +371,13 @@ class MainWindow(QMainWindow):
                 penalty_per_side=params.get("penalty_per_side"),
             )
 
+    def _on_mirror_zone_count_changed(self, n_zones):
+        """미러링 구역 수 변경 → 엔진 재시작 (구역 변경은 리소스 재초기화 필요)."""
+        if self._engine and self._engine.isRunning():
+            self._engine.mirror_n_zones = n_zones
+            # 구역 수 변경은 weight_matrix 재빌드가 필요하므로 엔진 재시작
+            self._switch_mode(self.tab_control.current_mode)
+
     # ══════════════════════════════════════════════════════════════
     #  오디오/하이브리드 실시간 반영 시그널 핸들러
     # ══════════════════════════════════════════════════════════════
@@ -319,6 +387,11 @@ class MainWindow(QMainWindow):
         if self._engine and self._engine.isRunning():
             params["mode"] = MODE_AUDIO
             self._apply_params_to_engine(params)
+
+    def _on_audio_min_brightness_changed(self, value):
+        """오디오 최소 밝기 변경."""
+        if self._engine and self._engine.isRunning():
+            self._engine.audio_min_brightness = value
 
     def _on_hybrid_params_changed(self, params):
         """하이브리드 파라미터 dict를 엔진에 전달."""
@@ -407,10 +480,8 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def _shutdown(self):
-        # 엔진 중지
-        if self._engine and self._engine.isRunning():
-            self._engine.stop_engine()
-            self._engine.wait(3000)
+        # 엔진 완전 정리
+        self._cleanup_engine()
 
         # 탭 정리
         self.tab_control.cleanup()

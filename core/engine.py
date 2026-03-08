@@ -360,8 +360,10 @@ class UnifiedEngine(QThread):
 
         # ── 하이브리드 파라미터 (외부에서 실시간 변경 가능) ──
         self.color_source = COLOR_SOURCE_SOLID   # solid / screen
-        self.n_zones = 4                         # 화면 구역 수
+        self.n_zones = 4                         # 화면 구역 수 (하이브리드)
+        self.mirror_n_zones = N_ZONES_PER_LED    # 미러링 구역 수 (-1=per-LED)
         self.min_brightness = MIN_BRIGHTNESS     # 최소 밝기 (screen 모드)
+        self.audio_min_brightness = MIN_BRIGHTNESS  # 오디오/하이브리드 최소 밝기
 
         # ── _init_resources()에서 초기화 ──
         self._capture = None
@@ -686,7 +688,7 @@ class UnifiedEngine(QThread):
                 f"screen: {self._capture.screen_w}x{self._capture.screen_h}"
             )
 
-        # 가중치 행렬
+        # 가중치 행렬 (항상 빌드 — per-LED 모드 + 프리뷰용)
         self.status_changed.emit("가중치 행렬 생성...")
         self._active_w = self._capture.screen_w
         self._active_h = self._capture.screen_h
@@ -694,7 +696,16 @@ class UnifiedEngine(QThread):
             self._active_w, self._active_h
         )
 
-        # ColorPipeline 생성
+        # 구역 기반 모드 초기화
+        self._mirror_zone_map = None
+        self._mirror_cc = None
+        if self.mirror_n_zones != N_ZONES_PER_LED:
+            self._mirror_zone_map = _build_led_zone_map_by_side(
+                self.config, self.mirror_n_zones
+            )
+            self._mirror_cc = ColorCorrection(self.config.get("color", {}))
+
+        # ColorPipeline 생성 (per-LED 모드용)
         self._rebuild_pipeline()
 
     def _init_audio_resources(self):
@@ -917,13 +928,14 @@ class UnifiedEngine(QThread):
             mode = self.audio_mode
 
             # ── 렌더링 ──
+            raw_rgb = None
             if mode == AUDIO_BASS_DETAIL:
                 bd_spec = self._process_bass_detail(eng, atk, rel)
-                grb_data = self._render_spectrum(bd_spec)
+                grb_data, raw_rgb = self._render_spectrum(bd_spec)
             elif mode == AUDIO_SPECTRUM:
-                grb_data = self._render_spectrum(spec)
+                grb_data, raw_rgb = self._render_spectrum(spec)
             else:  # pulse
-                grb_data = self._render_pulse(bass, mid, high)
+                grb_data, raw_rgb = self._render_pulse(bass, mid, high)
 
             # ── USB 전송 ──
             try:
@@ -944,6 +956,10 @@ class UnifiedEngine(QThread):
                     self.spectrum_updated.emit(bd_spec.copy())
                 else:
                     self.spectrum_updated.emit(spec.copy())
+
+                # 프리뷰 (보정 전 색상)
+                if raw_rgb is not None:
+                    self.screen_colors_updated.emit(raw_rgb)
 
             # ── FPS 계산 ──
             frame_count += 1
@@ -1039,11 +1055,11 @@ class UnifiedEngine(QThread):
 
             if mode == AUDIO_BASS_DETAIL:
                 bd_spec = self._process_bass_detail(eng, atk, rel)
-                grb_data = self._render_spectrum(bd_spec)
+                grb_data, _raw = self._render_spectrum(bd_spec)
             elif mode == AUDIO_SPECTRUM:
-                grb_data = self._render_spectrum(spec)
+                grb_data, _raw = self._render_spectrum(spec)
             else:  # pulse
-                grb_data = self._render_pulse(bass, mid, high)
+                grb_data, _raw = self._render_pulse(bass, mid, high)
 
             # ── USB 전송 ──
             try:
@@ -1065,20 +1081,29 @@ class UnifiedEngine(QThread):
                 else:
                     self.spectrum_updated.emit(spec.copy())
 
-                # screen_colors_updated 시그널 (프리뷰용)
+                # screen_colors_updated 시그널 (프리뷰용 — 항상 per-LED로 변환)
                 if self._screen_sampler is not None:
                     if self.n_zones == N_ZONES_PER_LED:
                         if self._per_led_colors is not None:
                             self.screen_colors_updated.emit(
                                 self._per_led_colors.copy()
                             )
-                    elif self.n_zones == 1:
-                        gc = self._screen_sampler.get_global_color()
-                        self.screen_colors_updated.emit(gc.reshape(1, 3))
                     else:
-                        self.screen_colors_updated.emit(
-                            self._screen_sampler.get_zone_colors()
-                        )
+                        # zone_colors → per-LED 매핑
+                        if self.n_zones == 1:
+                            zc = self._screen_sampler.get_global_color().reshape(1, 3)
+                        else:
+                            zc = self._screen_sampler.get_zone_colors()
+                        if (self._led_zone_map is not None
+                                and zc is not None and len(zc) > 0):
+                            led_colors = np.zeros(
+                                (self._led_count, 3), dtype=np.float32
+                            )
+                            for i in range(self._led_count):
+                                zi = self._led_zone_map[i]
+                                if 0 <= zi < len(zc):
+                                    led_colors[i] = zc[zi]
+                            self.screen_colors_updated.emit(led_colors)
 
             # ── FPS 계산 ──
             frame_count += 1
@@ -1100,10 +1125,14 @@ class UnifiedEngine(QThread):
     # ══════════════════════════════════════════════════════════════
 
     def _render_pulse(self, bass, mid, high):
-        """Bass 에너지 기반 전체 밝기 + mid/high 색상 변조."""
+        """Bass 에너지 기반 전체 밝기 + mid/high 색상 변조.
+
+        Returns:
+            (grb_data, raw_rgb): GRB bytes + 보정 전 RGB (프리뷰용)
+        """
         n_leds = self._led_count
         n_bands = len(self._smooth_spectrum) if self._smooth_spectrum is not None else 16
-        min_b = self.min_brightness if self.mode == MODE_HYBRID else MIN_BRIGHTNESS
+        min_b = self.audio_min_brightness
         intensity = max(min_b, bass) * self.audio_brightness
 
         leds = np.zeros((n_leds, 3), dtype=np.float32)
@@ -1114,19 +1143,26 @@ class UnifiedEngine(QThread):
             c = c * (1 - white_mix) + 255.0 * white_mix
             leds[led_idx] = c * intensity
 
+        # 프리뷰용 보정 전 복사
+        raw_rgb = leds.copy()
+
         # ColorCorrection 적용 후 GRB 변환
         self._cc.apply(leds)
-        return self._leds_to_grb(leds)
+        return self._leds_to_grb(leds), raw_rgb
 
     # ══════════════════════════════════════════════════════════════
     #  오디오 렌더링 — Spectrum (spectrum + bass_detail 공용)
     # ══════════════════════════════════════════════════════════════
 
     def _render_spectrum(self, spec):
-        """주파수 밴드별 밝기 — 각 LED의 둘레 위치에 매핑."""
+        """주파수 밴드별 밝기 — 각 LED의 둘레 위치에 매핑.
+
+        Returns:
+            (grb_data, raw_rgb): GRB bytes + 보정 전 RGB (프리뷰용)
+        """
         n_leds = self._led_count
         n_bands = len(spec)
-        min_b = self.min_brightness if self.mode == MODE_HYBRID else MIN_BRIGHTNESS
+        min_b = self.audio_min_brightness
         leds = np.zeros((n_leds, 3), dtype=np.float32)
 
         for led_idx in range(n_leds):
@@ -1140,9 +1176,12 @@ class UnifiedEngine(QThread):
             intensity = max(min_b, energy) * self.audio_brightness
             leds[led_idx] = color * intensity
 
+        # 프리뷰용 보정 전 복사
+        raw_rgb = leds.copy()
+
         # ColorCorrection 적용 후 GRB 변환
         self._cc.apply(leds)
-        return self._leds_to_grb(leds)
+        return self._leds_to_grb(leds), raw_rgb
 
     # ══════════════════════════════════════════════════════════════
     #  오디오 — Bass Detail 처리
@@ -1423,12 +1462,101 @@ class UnifiedEngine(QThread):
                     pass
 
             # ── 색상 연산 ──
-            try:
-                grb_data, rgb_colors = pipeline.process(frame, prev_colors)
-                prev_colors = rgb_colors
-            except (ValueError, IndexError, FloatingPointError):
-                prev_colors = None
-                continue
+            if self._mirror_zone_map is not None:
+                # 구역 기반 모드: frame을 n_zones개 구역으로 평균
+                try:
+                    grid_flat = frame.reshape(-1, 3).astype(np.float32)
+                    n_zones = self.mirror_n_zones
+                    n_pixels = grid_flat.shape[0]
+                    grid_rows = frame.shape[0]
+                    grid_cols = frame.shape[1] if frame.ndim >= 2 else 1
+
+                    # 구역별 평균 색상 계산
+                    zone_colors = np.zeros((n_zones, 3), dtype=np.float32)
+                    zone_counts = np.zeros(n_zones, dtype=np.int32)
+
+                    if n_zones == 1:
+                        zone_colors[0] = grid_flat.mean(axis=0)
+                        zone_counts[0] = 1
+                    elif n_zones == 2:
+                        mid = grid_rows // 2
+                        zone_colors[0] = frame[:mid].reshape(-1, 3).astype(np.float32).mean(axis=0)
+                        zone_colors[1] = frame[mid:].reshape(-1, 3).astype(np.float32).mean(axis=0)
+                        zone_counts[:] = 1
+                    elif n_zones == 4:
+                        mid_r, mid_c = grid_rows // 2, grid_cols // 2
+                        zone_colors[0] = frame[:mid_r, :].reshape(-1, 3).astype(np.float32).mean(axis=0)
+                        zone_colors[1] = frame[:, mid_c:].reshape(-1, 3).astype(np.float32).mean(axis=0)
+                        zone_colors[2] = frame[mid_r:, :].reshape(-1, 3).astype(np.float32).mean(axis=0)
+                        zone_colors[3] = frame[:, :mid_c].reshape(-1, 3).astype(np.float32).mean(axis=0)
+                        zone_counts[:] = 1
+                    else:
+                        # 일반 N구역: 화면을 N등분 (시계방향 매핑과 일치)
+                        total = grid_rows * grid_cols
+                        for pi in range(total):
+                            r_idx = pi // grid_cols
+                            c_idx = pi % grid_cols
+                            # 화면 둘레 위치로 구역 결정
+                            rx = c_idx / max(1, grid_cols - 1)
+                            ry = r_idx / max(1, grid_rows - 1)
+                            # 간단한 구역 할당: 가장자리 기준
+                            if ry < 0.2:
+                                cw_t = rx * 0.25
+                            elif rx > 0.8:
+                                cw_t = 0.25 + ry * 0.25
+                            elif ry > 0.8:
+                                cw_t = 0.50 + (1 - rx) * 0.25
+                            elif rx < 0.2:
+                                cw_t = 0.75 + (1 - ry) * 0.25
+                            else:
+                                cw_t = 0.0  # 중앙 → zone 0
+                            zi = min(int(cw_t * n_zones), n_zones - 1)
+                            zone_colors[zi] += grid_flat[pi]
+                            zone_counts[zi] += 1
+
+                        for zi in range(n_zones):
+                            if zone_counts[zi] > 0:
+                                zone_colors[zi] /= zone_counts[zi]
+
+                    # LED에 구역 색상 할당
+                    led_count = self._led_count
+                    leds = np.zeros((led_count, 3), dtype=np.float32)
+                    for i in range(led_count):
+                        zi = self._mirror_zone_map[i]
+                        if 0 <= zi < n_zones:
+                            leds[i] = zone_colors[zi]
+
+                    # 밝기 적용
+                    leds *= self.brightness
+
+                    # 프리뷰 전달 (보정 전)
+                    if frame_count % 5 == 0:
+                        self.screen_colors_updated.emit(leds.tolist())
+
+                    # 색상 보정 + GRB 변환
+                    self._mirror_cc.apply(leds)
+                    grb_data = self._leds_to_grb(leds)
+                    prev_colors = None  # zone 모드에서는 스무딩 미사용
+                except (ValueError, IndexError, FloatingPointError):
+                    prev_colors = None
+                    continue
+            else:
+                # per-LED 모드: 기존 pipeline 사용
+                try:
+                    grb_data, rgb_colors = pipeline.process(frame, prev_colors)
+                    prev_colors = rgb_colors
+                except (ValueError, IndexError, FloatingPointError):
+                    prev_colors = None
+                    continue
+
+                # 프리뷰 전달 (5프레임마다, 보정 전 원본 색상)
+                if frame_count % 5 == 0 and frame is not None:
+                    try:
+                        grid_flat = frame.reshape(-1, 3).astype(np.float32)
+                        raw_rgb = self._weight_matrix @ grid_flat
+                        self.screen_colors_updated.emit(raw_rgb.tolist())
+                    except Exception:
+                        pass
 
             # ── USB 전송 ──
             try:
@@ -1588,6 +1716,15 @@ class UnifiedEngine(QThread):
                 prev_colors = None
                 continue
             t_color_acc += time.perf_counter() - t1
+
+            # 프리뷰 전달 (5프레임마다, 보정 전 원본 색상)
+            if frame_count % 5 == 0 and frame is not None:
+                try:
+                    grid_flat = frame.reshape(-1, 3).astype(np.float32)
+                    raw_rgb = self._weight_matrix @ grid_flat
+                    self.screen_colors_updated.emit(raw_rgb.tolist())
+                except Exception:
+                    pass
 
             # USB 전송
             t2 = time.perf_counter()
