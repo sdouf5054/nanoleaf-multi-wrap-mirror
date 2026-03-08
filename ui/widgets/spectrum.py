@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QWidget
 from PyQt5.QtGui import QPainter, QColor, QBrush
 from PyQt5.QtCore import Qt
 
-from core.audio_visualizer import _remap_t
+from core.engine import _remap_t
 from ui.widgets.gradient_preview import rainbow_color_at
 
 

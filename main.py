@@ -107,16 +107,14 @@ def main():
 
     # ★ --startup 모드: 창을 표시하지 않고 트레이에서만 실행
     if start_to_tray:
-        # 창을 숨긴 채로 시작 — 트레이 아이콘만 표시됨
-        # (window.show()를 호출하지 않음)
         pass
     else:
         window.show()
 
-    # 실행 시 미러링 자동 시작
+    # 실행 시 자동 시작 (auto_start_mirror 옵션)
     if config.get("options", {}).get("auto_start_mirror", False):
         from PyQt5.QtCore import QTimer
-        QTimer.singleShot(1000, window._start_mirror)
+        QTimer.singleShot(1000, lambda: window._start_engine())
 
     sys.exit(app.exec_())
 

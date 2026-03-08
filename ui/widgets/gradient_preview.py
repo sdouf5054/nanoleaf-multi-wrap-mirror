@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QWidget
 from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtCore import Qt
 
-from core.audio_visualizer import _remap_t
+from core.engine import _remap_t
 
 
 # 무지개 키포인트 (AudioVisualizer._band_color과 동일)
