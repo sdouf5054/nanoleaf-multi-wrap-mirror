@@ -1,6 +1,12 @@
 /*
  * fast_capture.cpp - DXGI Desktop Duplication + CPU subsample DLL
  *
+ * [Change] Support for portrait mode (rotated displays)
+ * - g_rotation: stores DXGI_OUTPUT_DESC.Rotation
+ * - g_texW, g_texH: actual size of the staging texture (physical panel orientation)
+ * - capture_grab: converts subsampling coordinates to texture coordinates based on rotation
+ * - capture_get_rotation: allows external query of current rotation state
+ *
  * Build:
  *   cl /LD /O2 /EHsc fast_capture.cpp /link d3d11.lib dxgi.lib /OUT:fast_capture.dll
  */
@@ -20,11 +26,14 @@ static ID3D11Texture2D*        g_staging     = NULL;
 
 static int  g_outW        = 64;
 static int  g_outH        = 32;
-static int  g_screenW     = 0;
+static int  g_screenW     = 0;     /* logical desktop size (DesktopCoordinates) */
 static int  g_screenH     = 0;
+static int  g_texW        = 0;     /* actual texture size (physical panel orientation) */
+static int  g_texH        = 0;
 static int  g_stagingW    = 0;
 static int  g_stagingH    = 0;
 static int  g_monitorIdx  = 0;
+static int  g_rotation    = 0;     /* DXGI_MODE_ROTATION value (0=Identity) */
 static BOOL g_initialized = FALSE;
 
 #define SAFE_RELEASE(p) do { if (p) { (p)->Release(); (p) = NULL; } } while(0)
@@ -34,15 +43,16 @@ static BOOL g_initialized = FALSE;
 
 static HRESULT ensure_staging(void)
 {
-    if (g_staging && g_stagingW == g_screenW && g_stagingH == g_screenH)
+    /* Create staging based on actual texture size (g_texW x g_texH) */
+    if (g_staging && g_stagingW == g_texW && g_stagingH == g_texH)
         return S_OK;
 
     SAFE_RELEASE(g_staging);
 
     D3D11_TEXTURE2D_DESC desc;
     memset(&desc, 0, sizeof(desc));
-    desc.Width              = (UINT)g_screenW;
-    desc.Height             = (UINT)g_screenH;
+    desc.Width              = (UINT)g_texW;
+    desc.Height             = (UINT)g_texH;
     desc.MipLevels          = 1;
     desc.ArraySize          = 1;
     desc.Format             = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -55,8 +65,8 @@ static HRESULT ensure_staging(void)
 
     HRESULT hr = g_device->CreateTexture2D(&desc, NULL, &g_staging);
     if (SUCCEEDED(hr)) {
-        g_stagingW = g_screenW;
-        g_stagingH = g_screenH;
+        g_stagingW = g_texW;
+        g_stagingH = g_texH;
     }
     return hr;
 }
@@ -83,8 +93,34 @@ static HRESULT acquire_duplication(void)
 
     DXGI_OUTPUT_DESC odesc;
     output->GetDesc(&odesc);
+
+    /* Logical desktop size (rotation-adjusted coordinates) */
     g_screenW = odesc.DesktopCoordinates.right  - odesc.DesktopCoordinates.left;
     g_screenH = odesc.DesktopCoordinates.bottom - odesc.DesktopCoordinates.top;
+
+    /* Store rotation info */
+    g_rotation = (int)odesc.Rotation;
+    /* DXGI_MODE_ROTATION:
+     *   0 = DXGI_MODE_ROTATION_UNSPECIFIED
+     *   1 = DXGI_MODE_ROTATION_IDENTITY    (no rotation)
+     *   2 = DXGI_MODE_ROTATION_ROTATE90    (90 degrees clockwise)
+     *   3 = DXGI_MODE_ROTATION_ROTATE180
+     *   4 = DXGI_MODE_ROTATION_ROTATE270   (90 degrees counter-clockwise)
+     */
+
+    /* Determine actual texture size.
+     * When rotated, the texture is in physical panel orientation, so W/H are swapped.
+     * Example: portrait mode (ROTATE90) - logical 1440x2560, texture 2560x1440
+     */
+    if (g_rotation == 2 || g_rotation == 4) {
+        /* 90 or 270 degree rotation: texture W/H are logical H/W */
+        g_texW = g_screenH;
+        g_texH = g_screenW;
+    } else {
+        /* No rotation or 180 degrees: texture matches logical size */
+        g_texW = g_screenW;
+        g_texH = g_screenH;
+    }
 
     IDXGIOutput1* output1 = NULL;
     hr = output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&output1);
@@ -110,12 +146,12 @@ EXPORT int capture_init(int monitor_index, int out_width, int out_height)
     D3D_FEATURE_LEVEL fl;
     D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0 };
     HRESULT hr = D3D11CreateDevice(
-        NULL,                       /* default adapter */
+        NULL,
         D3D_DRIVER_TYPE_HARDWARE,
-        NULL,                       /* no software rasterizer */
-        0,                          /* flags */
-        levels,                     /* feature levels array */
-        1,                          /* number of feature levels */
+        NULL,
+        0,
+        levels,
+        1,
         D3D11_SDK_VERSION,
         &g_device,
         &fl,
@@ -161,7 +197,6 @@ EXPORT int capture_grab(unsigned char* out_buf, int buf_size)
         return -2;
     }
 
-    /* full texture -> staging (DMA, low CPU cost) */
     ensure_staging();
     g_context->CopyResource(g_staging, tex);
 
@@ -178,21 +213,53 @@ EXPORT int capture_grab(unsigned char* out_buf, int buf_size)
 
     int outW = g_outW;
     int outH = g_outH;
-    int scrW = g_screenW;
-    int scrH = g_screenH;
+    int scrW = g_screenW;   /* logical width (e.g. 1440 in portrait mode) */
+    int scrH = g_screenH;   /* logical height (e.g. 2560 in portrait mode) */
+    int texW = g_texW;      /* actual texture width */
+    int texH = g_texH;
+    int rot  = g_rotation;
 
     for (int r = 0; r < outH; r++) {
-        int sy = (int)(((double)r + 0.5) / outH * scrH);
-        if (sy >= scrH) sy = scrH - 1;
+        int ly = (int)(((double)r + 0.5) / outH * scrH);
+        if (ly >= scrH) ly = scrH - 1;
 
-        unsigned char* srow = src + (size_t)sy * pitch;
         unsigned char* drow = out_buf + r * outW * 4;
 
         for (int c = 0; c < outW; c++) {
-            int sx = (int)(((double)c + 0.5) / outW * scrW);
-            if (sx >= scrW) sx = scrW - 1;
+            int lx = (int)(((double)c + 0.5) / outW * scrW);
+            if (lx >= scrW) lx = scrW - 1;
 
-            unsigned char* sp = srow + sx * 4;
+            int tx, ty;
+
+            switch (rot) {
+            case 2:  /* DXGI_MODE_ROTATION_ROTATE90 */
+                tx = ly;
+                ty = texH - 1 - lx;
+                break;
+
+            case 4:  /* DXGI_MODE_ROTATION_ROTATE270 */
+                tx = texW - 1 - ly;
+                ty = lx;
+                break;
+
+            case 3:  /* DXGI_MODE_ROTATION_ROTATE180 */
+                tx = texW - 1 - lx;
+                ty = texH - 1 - ly;
+                break;
+
+            default: /* IDENTITY / UNSPECIFIED */
+                tx = lx;
+                ty = ly;
+                break;
+            }
+
+            /* Clamp to valid range */
+            if (tx < 0) tx = 0;
+            if (tx >= texW) tx = texW - 1;
+            if (ty < 0) ty = 0;
+            if (ty >= texH) ty = texH - 1;
+
+            unsigned char* sp = src + (size_t)ty * pitch + tx * 4;
             unsigned char* dp = drow + c * 4;
             dp[0] = sp[0];
             dp[1] = sp[1];
@@ -207,8 +274,9 @@ EXPORT int capture_grab(unsigned char* out_buf, int buf_size)
 
 /* ---- helpers -------------------------------------------------- */
 
-EXPORT int  capture_get_width(void)  { return g_screenW; }
-EXPORT int  capture_get_height(void) { return g_screenH; }
+EXPORT int  capture_get_width(void)    { return g_screenW; }
+EXPORT int  capture_get_height(void)   { return g_screenH; }
+EXPORT int  capture_get_rotation(void) { return g_rotation; }  /* added */
 
 EXPORT void capture_reset(void)
 {
@@ -226,6 +294,9 @@ EXPORT void capture_cleanup(void)
     SAFE_RELEASE(g_device);
     g_stagingW = 0;
     g_stagingH = 0;
+    g_texW     = 0;
+    g_texH     = 0;
+    g_rotation = 0;
     g_initialized = FALSE;
 }
 

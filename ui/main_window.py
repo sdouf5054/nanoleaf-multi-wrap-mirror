@@ -1,11 +1,8 @@
 """메인 윈도우 — 탭 구조 + UnifiedEngine + 트레이 + 잠금 감지
 
-[Step 12] MainWindow 연결 — 기존 tab_mirror + tab_audio → tab_control 교체
-- UnifiedEngine 생성/시작/중지/일시정지 관리
-- tab_control 시그널 ↔ UnifiedEngine 연결
-- DeviceManager 통합 (force_release)
-- 잠금 감지, 트레이 연동 유지
-- tab_color, tab_setup, tab_options 변경 없음
+[변경] 세로모드/해상도 변경 대응
+- WM_DISPLAYCHANGE 감지 → 엔진에 on_display_changed() 알림
+- SessionEventFilter에 WM_DISPLAYCHANGE 콜백 추가
 """
 
 import ctypes
@@ -29,12 +26,13 @@ from core.config import save_config
 
 # Windows 메시지 상수
 WM_WTSSESSION_CHANGE = 0x02B1
+WM_DISPLAYCHANGE = 0x007E          # ★ 추가
 WTS_SESSION_LOCK = 0x7
 WTS_SESSION_UNLOCK = 0x8
 
 
 class SessionEventFilter(QAbstractNativeEventFilter):
-    """Windows 잠금/해제 이벤트 감지"""
+    """Windows 잠금/해제 + 디스플레이 변경 이벤트 감지"""
 
     def __init__(self, callback):
         super().__init__()
@@ -48,6 +46,9 @@ class SessionEventFilter(QAbstractNativeEventFilter):
                     self._callback("lock")
                 elif msg.wParam == WTS_SESSION_UNLOCK:
                     self._callback("unlock")
+            # ★ 디스플레이 변경 감지 (해상도/회전/모니터 연결 변경)
+            elif msg.message == WM_DISPLAYCHANGE:
+                self._callback("display_change")
         return False, 0
 
 
@@ -131,7 +132,7 @@ class MainWindow(QMainWindow):
         self.tab_setup.request_mirror_stop.connect(self._stop_engine_sync)
         self.tab_color.request_mirror_stop.connect(self._stop_engine_sync)
 
-        # --- 잠금 감지 ---
+        # --- 잠금 감지 + ★ 디스플레이 변경 감지 ---
         self._was_running_before_lock = False
         self._lock_restart_mode = None
         self._session_filter = SessionEventFilter(self._on_session_event)
@@ -142,6 +143,12 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
+
+        # ★ display change 디바운스 타이머 (연속 변경 시 마지막만 처리)
+        self._display_change_timer = QTimer(self)
+        self._display_change_timer.setSingleShot(True)
+        self._display_change_timer.setInterval(1500)  # 1.5초 대기 후 처리
+        self._display_change_timer.timeout.connect(self._on_display_change_settled)
 
     def nativeEvent(self, eventType, message):
         try:
@@ -160,18 +167,13 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _cleanup_engine(self):
-        """현재 엔진을 완전히 정리 — 시그널 해제 + 동기 대기.
-
-        이전 엔진의 finished 시그널이 큐에 남아있어도
-        새 엔진에 영향을 주지 않도록 모든 시그널을 먼저 disconnect합니다.
-        """
+        """현재 엔진을 완전히 정리 — 시그널 해제 + 동기 대기."""
         if self._engine is None:
             return
 
         old = self._engine
-        self._engine = None  # 즉시 참조 해제 — finished 시그널이 와도 무시
+        self._engine = None
 
-        # 모든 시그널 disconnect
         for sig_name in ("fps_updated", "status_changed", "error",
                          "finished", "energy_updated",
                          "spectrum_updated", "screen_colors_updated"):
@@ -180,44 +182,33 @@ class MainWindow(QMainWindow):
             except (TypeError, RuntimeError, AttributeError):
                 pass
 
-        # 동기 중지
         if old.isRunning():
             old.stop_engine()
             old.wait(3000)
 
     def _start_engine(self, mode=None):
-        """UnifiedEngine 생성 + 시작.
-
-        이전 엔진이 있으면 완전히 정리한 뒤 새 엔진을 생성합니다.
-        """
-        # 이전 엔진 완전 정리
+        """UnifiedEngine 생성 + 시작."""
         self._cleanup_engine()
-
-        # DeviceManager 강제 해제
         self.device_manager.force_release()
 
         if mode is None:
             mode = self.tab_control.current_mode
 
-        # 엔진 생성
         engine = UnifiedEngine(
             self.config,
             audio_device_index=self.tab_control.get_audio_device_index(),
         )
         engine.mode = mode
 
-        # 초기 파라미터 설정
-        self._engine = engine  # _apply_params_to_engine에서 참조
+        self._engine = engine
         params = self.tab_control.collect_engine_init_params()
         self._apply_params_to_engine(params)
 
-        # 시그널 연결
         engine.fps_updated.connect(self.tab_control.update_fps)
         engine.status_changed.connect(self._on_status_changed)
         engine.error.connect(self._on_error)
         engine.finished.connect(self._on_engine_finished)
 
-        # 오디오/하이브리드 시그널
         engine.energy_updated.connect(self.tab_control.update_energy)
         engine.spectrum_updated.connect(self.tab_control.update_spectrum)
         engine.screen_colors_updated.connect(
@@ -231,48 +222,34 @@ class MainWindow(QMainWindow):
         self.tray.update_status(f"{mode} 실행 중")
 
     def _switch_mode(self, new_mode):
-        """실행 중 모드 전환 — 안전한 stop → start.
-
-        전환 중 UI를 잠그고, 이전 엔진을 완전 정리한 뒤 새 엔진을 시작합니다.
-        """
+        """실행 중 모드 전환."""
         self.tab_control.set_switching(True)
         try:
             self._start_engine(new_mode)
         finally:
             self.tab_control.set_switching(False)
-            # set_running_state로 버튼 상태 복원
             if self._engine and self._engine.isRunning():
                 self.tab_control.set_running_state(True)
             else:
                 self.tab_control.set_running_state(False)
 
     def _stop_engine(self):
-        """엔진 중지 요청 (비동기)."""
         if self._engine and self._engine.isRunning():
             self._engine.stop_engine()
             self.tab_control.update_status("중지 중...")
 
     def _stop_engine_sync(self):
-        """엔진 동기 중지 — setup/color 탭의 LED 연결 요청 시."""
         self._cleanup_engine()
         self.tab_control.set_running_state(False)
         self.tab_control.update_status("설정 모드 진입으로 중지됨")
 
     def _toggle_pause(self):
-        """일시정지/재개 토글."""
         if self._engine and self._engine.isRunning():
             self._engine.toggle_pause()
             is_paused = self._engine._paused
             self.tab_control.update_pause_button(is_paused)
 
     def _on_engine_finished(self):
-        """엔진 스레드 종료 시 UI 복원.
-
-        _cleanup_engine에서 이미 _engine = None이 된 경우
-        (모드 전환 중 등) 이 시그널은 무시됩니다.
-        """
-        # stale finished 시그널 방어 — _cleanup_engine에서 _engine을
-        # None으로 설정했다면 이미 정리 완료된 것
         if self._engine is None:
             return
 
@@ -289,7 +266,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _apply_params_to_engine(self, params):
-        """dict의 파라미터를 UnifiedEngine에 적용."""
         if not self._engine:
             return
 
@@ -335,7 +311,6 @@ class MainWindow(QMainWindow):
                 r, g, b = params["base_color"]
                 eng.set_color(r, g, b)
 
-            # 하이브리드 전용
             if mode == MODE_HYBRID:
                 if "color_source" in params:
                     eng.set_color_source(
@@ -372,10 +347,8 @@ class MainWindow(QMainWindow):
             )
 
     def _on_mirror_zone_count_changed(self, n_zones):
-        """미러링 구역 수 변경 → 엔진 재시작 (구역 변경은 리소스 재초기화 필요)."""
         if self._engine and self._engine.isRunning():
             self._engine.mirror_n_zones = n_zones
-            # 구역 수 변경은 weight_matrix 재빌드가 필요하므로 엔진 재시작
             self._switch_mode(self.tab_control.current_mode)
 
     # ══════════════════════════════════════════════════════════════
@@ -383,18 +356,15 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _on_audio_params_changed(self, params):
-        """오디오 파라미터 dict를 엔진에 전달."""
         if self._engine and self._engine.isRunning():
             params["mode"] = MODE_AUDIO
             self._apply_params_to_engine(params)
 
     def _on_audio_min_brightness_changed(self, value):
-        """오디오 최소 밝기 변경."""
         if self._engine and self._engine.isRunning():
             self._engine.audio_min_brightness = value
 
     def _on_hybrid_params_changed(self, params):
-        """하이브리드 파라미터 dict를 엔진에 전달."""
         if self._engine and self._engine.isRunning():
             params["mode"] = MODE_HYBRID
             self._apply_params_to_engine(params)
@@ -431,14 +401,20 @@ class MainWindow(QMainWindow):
         self.tray.update_status(text)
 
     def _save_config(self):
-        """config_applied 시그널 수신 → config.json 저장."""
         save_config(self.config)
 
     # ══════════════════════════════════════════════════════════════
-    #  잠금 감지
+    #  잠금 감지 + ★ 디스플레이 변경 감지
     # ══════════════════════════════════════════════════════════════
 
     def _on_session_event(self, event):
+        if event == "display_change":
+            # ★ 디스플레이 변경 — 디바운스 타이머 시작/재시작
+            # 회전 시 WM_DISPLAYCHANGE가 여러 번 올 수 있으므로
+            # 마지막 메시지 후 1.5초 뒤에 처리
+            self._display_change_timer.start()
+            return
+
         opts = self.config.get("options", {})
         turn_off_enabled = opts.get("turn_off_on_lock", True)
 
@@ -457,6 +433,16 @@ class MainWindow(QMainWindow):
                     3000, lambda: self._start_engine(mode)
                 )
                 self.statusBar().showMessage("잠금 해제 — 3초 후 재시작")
+
+    def _on_display_change_settled(self):
+        """★ 디스플레이 변경 확정 — 엔진에 알림.
+
+        WM_DISPLAYCHANGE 디바운스 후 호출됩니다.
+        엔진이 실행 중이면 on_display_changed()로 캡처 재초기화를 트리거합니다.
+        """
+        if self._engine and self._engine.isRunning():
+            self._engine.on_display_changed()
+            self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")
 
     # ══════════════════════════════════════════════════════════════
     #  창 닫기 / 종료
@@ -480,22 +466,17 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def _shutdown(self):
-        # 엔진 완전 정리
         self._cleanup_engine()
 
-        # 탭 정리
         self.tab_control.cleanup()
         self.tab_color.cleanup()
         self.tab_setup.cleanup()
 
-        # DeviceManager 정리
         self.device_manager.cleanup()
 
-        # 트레이 정리
         self.tray.cleanup()
         self.tray.hide()
 
-        # 세션 알림 해제
         try:
             ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification(
                 int(self.winId())
@@ -503,7 +484,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # config 저장
         self.tab_control._apply_all_settings()
         save_config(self.config)
         QApplication.instance().quit()
