@@ -75,7 +75,7 @@
     "grid_cols": 64,
     "grid_rows": 32,
     "decay_radius": 0.3,
-    "parallel_penalty": 4.5,
+    "parallel_penalty": 5.0,
     "decay_radius_per_side": {
       "top": 0.3,
       "bottom": 0.2,
@@ -91,7 +91,8 @@
     "smoothing_factor": 0.5,
     "brightness": 1.0,
     "orientation": "auto",
-    "portrait_rotation": "cw"
+    "portrait_rotation": "cw",
+    "zone_count": -1
   },
   "audio_pulse": {
     "bass_sens": 100,
@@ -110,20 +111,20 @@
     "mid_sens": 116,
     "high_sens": 180,
     "brightness": 100,
-    "attack": 70,
-    "release": 60,
+    "attack": 75,
+    "release": 50,
     "input_smooth": 30,
     "zone_bass": 64,
     "zone_mid": 15,
     "zone_high": 21
   },
   "audio_bass_detail": {
-    "bass_sens": 100,
+    "bass_sens": 120,
     "mid_sens": 100,
     "high_sens": 100,
     "brightness": 100,
-    "attack": 10,
-    "release": 70,
+    "attack": 20,
+    "release": 80,
     "input_smooth": 75,
     "zone_bass": 48,
     "zone_mid": 26,
@@ -136,6 +137,22 @@
     "hotkey_toggle": "f21",
     "hotkey_bright_up": "f23",
     "hotkey_bright_down": "f22",
+    "default_mode": "hybrid",
+    "audio_state": {
+      "sub_mode": "pulse",
+      "color_rainbow": false,
+      "color_rgb": [
+        255,
+        255,
+        255
+      ],
+      "min_brightness": 50
+    },
+    "hybrid_state": {
+      "sub_mode": "pulse",
+      "zone_count": 4,
+      "min_brightness": 50
+    },
     "auto_start_mirror": true,
     "turn_off_on_lock": true
   }

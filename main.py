@@ -111,10 +111,11 @@ def main():
     else:
         window.show()
 
-    # 실행 시 자동 시작 (auto_start_mirror 옵션)
+    # ★ 실행 시 자동 시작 — 저장된 기본 모드로 엔진 시작
     if config.get("options", {}).get("auto_start_mirror", False):
+        default_mode = config.get("options", {}).get("default_mode", "mirror")
         from PyQt5.QtCore import QTimer
-        QTimer.singleShot(1000, lambda: window._start_engine())
+        QTimer.singleShot(1000, lambda: window._start_engine(default_mode))
 
     sys.exit(app.exec_())
 

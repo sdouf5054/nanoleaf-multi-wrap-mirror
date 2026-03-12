@@ -4,6 +4,11 @@
 이 클래스는 상태바, 제어 버튼, 모드 선택, LED 프리뷰, 공통 설정,
 적용/되돌리기 로직을 관리하는 컨테이너입니다.
 
+[변경] UI 상태 영속화
+- __init__에서 options.default_mode를 읽어 모드 버튼/스택 복원
+- "기본 모드로 설정" 버튼 추가
+- auto_start_mirror 체크박스 레이블을 "실행 시 엔진 자동 시작"으로 변경 준비
+
 Signals:
     request_engine_start(str): 모드 문자열과 함께 엔진 시작 요청
     request_engine_stop(): 엔진 중지 요청
@@ -45,6 +50,9 @@ from ui.panels.hybrid_panel import HybridPanel
 # ── 모드 인덱스 ──────────────────────────────────────────────────
 _MODE_INDEX = {MODE_MIRROR: 0, MODE_HYBRID: 1, MODE_AUDIO: 2}
 _INDEX_MODE = {0: MODE_MIRROR, 1: MODE_HYBRID, 2: MODE_AUDIO}
+
+# ★ 모드 한국어 이름 (기본 모드 버튼 피드백용)
+_MODE_NAMES = {"mirror": "미러링", "hybrid": "하이브리드", "audio": "오디오"}
 
 
 class _NoScrollFilter(QObject):
@@ -119,6 +127,13 @@ class ControlTab(QWidget):
                 ))
 
         self._build_ui()
+
+        # ★ 저장된 기본 모드 복원
+        saved_mode = config.get("options", {}).get("default_mode", "mirror")
+        saved_idx = _MODE_INDEX.get(saved_mode, 0)
+        self._mode_buttons.button(saved_idx).setChecked(True)
+        self._current_mode = saved_mode
+        self.mode_stack.setCurrentIndex(saved_idx)
 
         # 미러링 레이아웃 디바운스 타이머
         self._layout_debounce = QTimer(self)
@@ -238,8 +253,11 @@ class ControlTab(QWidget):
 
     def _build_mode_selector(self, parent_layout):
         mg = QGroupBox("모드")
-        ml = QHBoxLayout(mg)
+        ml = QVBoxLayout(mg)  # ★ QVBoxLayout으로 변경 (버튼 행 + 기본모드 행)
         ml.setSpacing(6)
+
+        # 모드 버튼 행
+        btn_row = QHBoxLayout()
         self._mode_buttons = QButtonGroup(self)
         self._mode_buttons.setExclusive(True)
         modes = [
@@ -250,9 +268,26 @@ class ControlTab(QWidget):
         for mode_key, label in modes:
             btn = _ModeButton(label)
             self._mode_buttons.addButton(btn, _MODE_INDEX[mode_key])
-            ml.addWidget(btn)
+            btn_row.addWidget(btn)
         self._mode_buttons.button(_MODE_INDEX[MODE_MIRROR]).setChecked(True)
         self._mode_buttons.idClicked.connect(self._on_mode_changed)
+        ml.addLayout(btn_row)
+
+        # ★ "기본 모드로 설정" 버튼 행
+        default_row = QHBoxLayout()
+        default_row.addStretch()
+        self.btn_set_default_mode = QPushButton("⭐ 현재 모드를 기본값으로 설정")
+        self.btn_set_default_mode.setFixedHeight(24)
+        self.btn_set_default_mode.setStyleSheet(
+            "QPushButton { background: #444; color: #bbb; font-size: 11px;"
+            " border-radius: 4px; padding: 2px 10px; }"
+            "QPushButton:hover { background: #555; color: #eee; }"
+        )
+        self.btn_set_default_mode.clicked.connect(self._on_set_default_mode)
+        default_row.addWidget(self.btn_set_default_mode)
+        default_row.addStretch()
+        ml.addLayout(default_row)
+
         parent_layout.addWidget(mg)
 
     # ── 4. LED 프리뷰 ────────────────────────────────────────────
@@ -423,6 +458,20 @@ class ControlTab(QWidget):
         self.btn_preview_toggle.setText(
             "👁 프리뷰 숨기기" if checked else "👁 프리뷰 보기"
         )
+
+    # ── ★ 기본 모드 설정 ─────────────────────────────────────────
+
+    def _on_set_default_mode(self):
+        """현재 선택된 모드를 기본 모드로 저장."""
+        self.config.setdefault("options", {})["default_mode"] = self._current_mode
+        self.config_applied.emit()  # → MainWindow → save_config
+
+        # 사용자 피드백: 버튼 텍스트 일시 변경
+        name = _MODE_NAMES.get(self._current_mode, self._current_mode)
+        self.btn_set_default_mode.setText(f"✅ {name}이(가) 기본 모드로 설정됨")
+        QTimer.singleShot(2000, lambda: self.btn_set_default_mode.setText(
+            "⭐ 현재 모드를 기본값으로 설정"
+        ))
 
     # ── 미러링 패널 → ControlTab 시그널 전달 ─────────────────────
 

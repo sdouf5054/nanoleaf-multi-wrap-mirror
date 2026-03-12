@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
         "brightness": 1.0,
         "orientation": "auto",
         "portrait_rotation": "cw",
+        "zone_count": -1,           # ★ 추가: 미러링 구역 수 (-1 = per-LED)
     },
     "audio_pulse": {
         "bass_sens": 100,
@@ -93,6 +94,18 @@ DEFAULT_CONFIG = {
         "hotkey_toggle": "ctrl+shift+o",
         "hotkey_bright_up": "ctrl+shift+up",
         "hotkey_bright_down": "ctrl+shift+down",
+        "default_mode": "mirror",    # ★ 추가: 앱 시작 시 기본 모드
+        "audio_state": {             # ★ 추가: 오디오 모드 UI 상태
+            "sub_mode": "pulse",
+            "color_rainbow": True,
+            "color_rgb": [255, 0, 80],
+            "min_brightness": 2,
+        },
+        "hybrid_state": {            # ★ 추가: 하이브리드 모드 UI 상태
+            "sub_mode": "pulse",
+            "zone_count": 4,
+            "min_brightness": 5,
+        },
     },
 }
 

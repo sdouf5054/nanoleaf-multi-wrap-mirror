@@ -1,4 +1,10 @@
-"""오디오 모드 패널 — 에너지 레벨, 색상 팔레트, 비주얼라이저 모드, 파라미터"""
+"""오디오 모드 패널 — 에너지 레벨, 색상 팔레트, 비주얼라이저 모드, 파라미터
+
+[변경] UI 상태 영속화
+- apply_to_config: options.audio_state에 서브모드/색상/최소밝기 저장
+- load_from_config: options.audio_state에서 복원
+- __init__에서 load_from_config 호출
+"""
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
@@ -14,6 +20,7 @@ from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
 
 # ── 오디오 서브모드 인덱스 ────────────────────────────────────────
 _INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail"}
+_MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2}
 
 # ── 색상 프리셋 ──────────────────────────────────────────────────
 _COLOR_PRESETS = [
@@ -45,7 +52,7 @@ class AudioPanel(QWidget):
         self._is_rainbow = True
         self._mode_key = "pulse"
         self._build_ui()
-        self._load_mode_params("pulse")
+        self.load_from_config()  # ★ 저장된 UI 상태 복원
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -264,9 +271,46 @@ class AudioPanel(QWidget):
         self.spectrum_widget.set_values(spec)
 
     def apply_to_config(self):
+        """설정 저장 — 모드 파라미터 + UI 상태."""
         self._save_mode_params(self._mode_key)
 
+        # ★ UI 상태를 options.audio_state에 저장
+        opts = self._config.setdefault("options", {})
+        opts["audio_state"] = {
+            "sub_mode": self._mode_key,
+            "color_rainbow": self._is_rainbow,
+            "color_rgb": list(self._current_color),
+            "min_brightness": self.slider_min_brightness.value(),
+        }
+
     def load_from_config(self):
+        """설정 로드 — UI 상태 복원 + 모드 파라미터 로드."""
+        # ★ UI 상태 복원
+        state = self._config.get("options", {}).get("audio_state", {})
+
+        # 서브모드 복원
+        saved_mode = state.get("sub_mode", "pulse")
+        idx = _MODE_TO_INDEX.get(saved_mode, 0)
+        self.combo_mode.blockSignals(True)
+        self.combo_mode.setCurrentIndex(idx)
+        self.combo_mode.blockSignals(False)
+        self._mode_key = saved_mode
+        self.param_widget.set_audio_mode(saved_mode)
+
+        # 색상 복원
+        self._is_rainbow = state.get("color_rainbow", True)
+        rgb = state.get("color_rgb", [255, 0, 80])
+        self._current_color = tuple(rgb) if isinstance(rgb, list) else (255, 0, 80)
+        self._update_color_preview()
+
+        # 최소 밝기 복원
+        min_b = state.get("min_brightness", 2)
+        self.slider_min_brightness.blockSignals(True)
+        self.slider_min_brightness.setValue(min_b)
+        self.slider_min_brightness.blockSignals(False)
+        self.lbl_min_brightness.setText(f"{min_b}%")
+
+        # 모드별 파라미터 (기존)
         self._load_mode_params(self._mode_key)
 
     def cleanup(self):

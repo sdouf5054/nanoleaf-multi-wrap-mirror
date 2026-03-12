@@ -1,4 +1,10 @@
-"""미러링 모드 패널 — 구역 수, 밝기/스무딩, 감쇠/페널티"""
+"""미러링 모드 패널 — 구역 수, 밝기/스무딩, 감쇠/페널티
+
+[변경] UI 상태 영속화
+- apply_to_config: mirror.zone_count 저장
+- load_from_config: mirror.zone_count 복원
+- __init__에서 load_from_config 호출하여 저장된 구역 수 복원
+"""
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
@@ -38,6 +44,7 @@ class MirrorPanel(QWidget):
         super().__init__(parent)
         self._config = config
         self._build_ui()
+        self.load_from_config(config)  # ★ 저장된 구역 수 등 복원
 
     def _build_ui(self):
         mirror_cfg = self._config.get("mirror", {})
@@ -219,6 +226,7 @@ class MirrorPanel(QWidget):
         m["smoothing_factor"] = self.spin_smoothing.value()
         m["decay_radius"] = self.spin_decay.value()
         m["parallel_penalty"] = self.spin_penalty.value()
+        m["zone_count"] = self.combo_zone_count.currentData() or -1  # ★ 추가
         if self.chk_per_side.isChecked():
             m["decay_radius_per_side"] = {
                 side: self.spin_decay_per[side].value()
@@ -254,3 +262,12 @@ class MirrorPanel(QWidget):
             self.spin_penalty_per[side].setValue(
                 per_penalty.get(side, m.get("parallel_penalty", 5.0))
             )
+
+        # ★ 구역 수 복원
+        saved_zone = m.get("zone_count", -1)
+        self.combo_zone_count.blockSignals(True)
+        for i in range(self.combo_zone_count.count()):
+            if self.combo_zone_count.itemData(i) == saved_zone:
+                self.combo_zone_count.setCurrentIndex(i)
+                break
+        self.combo_zone_count.blockSignals(False)
