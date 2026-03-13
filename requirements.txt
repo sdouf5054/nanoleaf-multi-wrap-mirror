@@ -1,9 +1,14 @@
-hidapi
-dxcam
+# Core dependencies (Phase 1 — no Qt)
 numpy
 opencv-python
-PyQt5
+hidapi        # Windows only — USB HID
+dxcam         # Windows only — screen capture
+PyAudioWPatch # Windows only — WASAPI loopback
+
+# Qt framework (Phase 2+)
+PySide6
+
+# Utilities
 keyboard
 Pillow
 psutil
-PyAudioWPatch

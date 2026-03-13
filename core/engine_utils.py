@@ -1,46 +1,42 @@
 """엔진 유틸리티 — LED 둘레 매핑, 밴드 계산, 구역 매핑, 공용 상수
 
-engine.py에서 분리된 순수 함수 모듈입니다.
-UnifiedEngine과 UI 위젯(gradient_preview, spectrum) 양쪽에서 사용됩니다.
+[ADR-014 적용] 벡터화된 오디오 렌더링 헬퍼 함수 추가
+- build_base_color_array(): 전체 LED 색상 배열을 한 번에 생성
+- vectorized_render_pulse(): Python 루프 없이 펄스 렌더링
+- vectorized_render_spectrum(): Python 루프 없이 스펙트럼 렌더링
+
+순수 numpy 모듈. Qt 의존성 없음.
 """
 
 import numpy as np
 from core.layout import get_led_positions
 
 # ══════════════════════════════════════════════════════════════════
-#  공용 상수 — engine.py, tab_control.py, main_window.py 등에서 사용
+#  공용 상수
 # ══════════════════════════════════════════════════════════════════
 
-# 엔진 모드
 MODE_MIRROR = "mirror"
 MODE_AUDIO = "audio"
 MODE_HYBRID = "hybrid"
 
-# 오디오 서브모드
 AUDIO_PULSE = "pulse"
 AUDIO_SPECTRUM = "spectrum"
 AUDIO_BASS_DETAIL = "bass_detail"
 
-# 색상 소스 (hybrid 모드)
 COLOR_SOURCE_SOLID = "solid"
 COLOR_SOURCE_SCREEN = "screen"
 
-# 특수 구역 수: LED 개별 미러링
 N_ZONES_PER_LED = -1
 
-# 스크린 갱신 간격 (오디오 프레임 수 기준)
 SCREEN_UPDATE_INTERVAL = 3
 
-# stale 복구 관련
 _STALE_RECREATE_COOLDOWN = 3.0
 _STALE_LED_OFF_THRESHOLD = 10.0
 
-# 오디오 관련
 DEFAULT_FPS = 60
 MIN_BRIGHTNESS = 0.02
 DEFAULT_ZONE_WEIGHTS = (33, 33, 34)
 
-# 저역 세밀 모드 주파수 범위
 BASS_DETAIL_FREQ_MIN = 20
 BASS_DETAIL_FREQ_MAX = 500
 BASS_DETAIL_N_BANDS = 16
@@ -156,12 +152,7 @@ def _build_led_order_from_segments(segments, led_count):
 
 
 def _build_led_zone_map_by_side(config, n_zones):
-    """각 LED가 어느 screen zone에 매핑되는지 계산.
-
-    멀티랩 자동 처리: get_led_positions()가 모든 세그먼트의
-    LED 위치와 side를 반환하므로, 같은 side의 LED는
-    바깥/안쪽 바퀴 무관하게 같은 zone 그룹에 속합니다.
-    """
+    """각 LED가 어느 screen zone에 매핑되는지 계산."""
     layout_cfg = config["layout"]
     mirror_cfg = config.get("mirror", {})
     dev_cfg = config["device"]
@@ -180,7 +171,7 @@ def _build_led_zone_map_by_side(config, n_zones):
     mapping = np.zeros(led_count, dtype=np.int32)
 
     if n_zones == 1:
-        pass  # 이미 0으로 초기화됨
+        pass
 
     elif n_zones == 2:
         cy = screen_h / 2.0
@@ -244,16 +235,7 @@ def _build_led_zone_map_by_side(config, n_zones):
 
 
 def per_led_to_zone_colors(per_led_colors, zone_map, n_zones):
-    """per-LED 색상 배열에서 구역별 평균 색상을 계산.
-
-    Args:
-        per_led_colors: (n_leds, 3) float32 — LED별 RGB
-        zone_map: (n_leds,) int32 — LED→zone 매핑
-        n_zones: 구역 수
-
-    Returns:
-        (n_zones, 3) float32 — 구역별 평균 RGB
-    """
+    """per-LED 색상 배열에서 구역별 평균 색상을 계산."""
     zone_colors = np.zeros((n_zones, 3), dtype=np.float32)
     zone_counts = np.zeros(n_zones, dtype=np.int32)
 
@@ -268,3 +250,157 @@ def per_led_to_zone_colors(per_led_colors, zone_map, n_zones):
             zone_colors[zi] /= zone_counts[zi]
 
     return zone_colors
+
+
+# ══════════════════════════════════════════════════════════════════
+#  [ADR-014] 벡터화된 오디오 렌더링 헬퍼
+# ══════════════════════════════════════════════════════════════════
+
+# 무지개 키포인트 (AudioEngineMixin._band_color과 동일)
+RAINBOW_KEYPOINTS = np.array([
+    [0.000, 255,   0,   0],
+    [0.130, 255, 127,   0],
+    [0.260, 255, 255,   0],
+    [0.400,   0, 255,   0],
+    [0.540,   0, 180, 255],
+    [0.680,   0,  50, 255],
+    [0.820,  80,   0, 255],
+    [1.000, 160,   0, 220],
+], dtype=np.float32)
+
+
+def band_color_vectorized(t_array):
+    """밴드 위치 배열 (n,) → RGB 배열 (n, 3).
+
+    Python 루프 대신 numpy 벡터 연산으로 전체 LED의 무지개 색상을 한 번에 계산.
+    """
+    t = np.clip(t_array, 0.0, 1.0)
+    n = len(t)
+    result = np.zeros((n, 3), dtype=np.float32)
+
+    kp = RAINBOW_KEYPOINTS
+    for seg_idx in range(len(kp) - 1):
+        t0 = kp[seg_idx, 0]
+        t1 = kp[seg_idx + 1, 0]
+        rgb0 = kp[seg_idx, 1:4]
+        rgb1 = kp[seg_idx + 1, 1:4]
+
+        mask = (t >= t0) & (t <= t1)
+        if not mask.any():
+            continue
+
+        frac = np.where(
+            t1 > t0,
+            (t[mask] - t0) / (t1 - t0),
+            np.float32(0.0)
+        )
+        # (k, 1) * (3,) broadcast
+        result[mask] = rgb0 + frac[:, np.newaxis] * (rgb1 - rgb0)
+
+    return result
+
+
+def build_base_color_array(led_band_indices, n_bands, rainbow=True,
+                           solid_color=None, screen_colors=None):
+    """전체 LED의 기본 색상 배열을 한 번에 생성.
+
+    [ADR-014] 매 프레임 Python 루프를 제거. 색상/모드 변경 시에만 재빌드.
+
+    Args:
+        led_band_indices: (n_leds,) float64 — LED별 밴드 인덱스
+        n_bands: 총 밴드 수
+        rainbow: 무지개 모드 여부
+        solid_color: (3,) float32 — 단색 RGB (rainbow=False일 때)
+        screen_colors: (n_leds, 3) float32 — 화면 색상 (하이브리드)
+
+    Returns:
+        (n_leds, 3) float32 — LED별 기본 RGB 색상
+    """
+    n_leds = len(led_band_indices)
+
+    if screen_colors is not None:
+        return screen_colors.copy()
+
+    if rainbow:
+        t = led_band_indices / max(1, n_bands - 1)
+        return band_color_vectorized(t)
+
+    # 단색
+    if solid_color is not None:
+        return np.broadcast_to(solid_color, (n_leds, 3)).copy()
+
+    return np.full((n_leds, 3), 255.0, dtype=np.float32)
+
+
+def vectorized_render_pulse(base_colors, bass, mid, high,
+                            min_brightness, audio_brightness):
+    """[ADR-014] 벡터화된 Pulse 렌더링.
+
+    Python 루프 없이 전체 LED를 한 번에 계산.
+
+    Args:
+        base_colors: (n_leds, 3) float32
+        bass, mid, high: float 0~1
+        min_brightness, audio_brightness: float
+
+    Returns:
+        (n_leds, 3) float32 — 보정 전 raw RGB
+    """
+    intensity = max(min_brightness, bass) * audio_brightness
+
+    # 색상 변조: mid로 밝기 미세 조절, high로 화이트 믹싱
+    leds = base_colors * (0.7 + mid * 0.3)
+    white_mix = high * 0.3
+    leds = leds * (1.0 - white_mix) + 255.0 * white_mix
+    leds *= intensity
+
+    return leds
+
+
+def vectorized_render_spectrum(base_colors, led_band_indices, spectrum,
+                               min_brightness, audio_brightness):
+    """[ADR-014] 벡터화된 Spectrum 렌더링.
+
+    Python 루프 없이 전체 LED를 한 번에 계산.
+
+    Args:
+        base_colors: (n_leds, 3) float32
+        led_band_indices: (n_leds,) float64
+        spectrum: (n_bands,) float64
+        min_brightness, audio_brightness: float
+
+    Returns:
+        (n_leds, 3) float32 — 보정 전 raw RGB
+    """
+    n_bands = len(spectrum)
+
+    # 밴드 인덱스에서 에너지를 보간하여 추출
+    band_lo = np.clip(np.floor(led_band_indices).astype(np.int32), 0, n_bands - 1)
+    band_hi = np.clip(band_lo + 1, 0, n_bands - 1)
+    frac = led_band_indices - np.floor(led_band_indices)
+
+    energy = spectrum[band_lo] * (1.0 - frac) + spectrum[band_hi] * frac
+    intensity = np.maximum(min_brightness, energy) * audio_brightness
+
+    # (n_leds, 3) * (n_leds, 1) broadcast
+    leds = base_colors * intensity[:, np.newaxis]
+
+    return leds.astype(np.float32)
+
+
+def leds_to_grb(leds):
+    """LED RGB 배열을 GRB bytes로 변환.
+
+    Args:
+        leds: (n_leds, 3) float32, 0~255
+
+    Returns:
+        bytes — GRB 순서
+    """
+    np.clip(leds, 0, 255, out=leds)
+    u8 = leds.astype(np.uint8)
+    grb = np.empty_like(u8)
+    grb[:, 0] = u8[:, 1]  # G
+    grb[:, 1] = u8[:, 0]  # R
+    grb[:, 2] = u8[:, 2]  # B
+    return grb.tobytes()

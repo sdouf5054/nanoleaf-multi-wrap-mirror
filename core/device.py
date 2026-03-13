@@ -1,8 +1,15 @@
-"""Nanoleaf Light Strip USB HID 통신"""
+"""Nanoleaf Light Strip USB HID 통신
 
-import hid
+순수 Python + hidapi. Qt 의존성 없음.
+"""
+
 import struct
 import time
+
+try:
+    import hid
+except ImportError:
+    hid = None
 
 from core.constants import HW_ERRORS
 
@@ -20,6 +27,8 @@ MAX_RECONNECT_ATTEMPTS = 3
 
 class NanoleafDevice:
     def __init__(self, vendor_id=0x37FA, product_id=0x8202, led_count=75):
+        if hid is None:
+            raise ImportError("hidapi가 필요합니다.\npip install hidapi")
         self.vendor_id = vendor_id
         self.product_id = product_id
         self.led_count = led_count
@@ -102,11 +111,6 @@ class NanoleafDevice:
 
     def turn_off(self):
         self.send_rgb(bytes(self.led_count * 3))
-
-    def test_rgb(self):
-        for name, r, g, b in [("빨강", 255, 0, 0), ("초록", 0, 255, 0), ("파랑", 0, 0, 255)]:
-            self.set_all_color(r, g, b)
-            time.sleep(0.3)
 
     def disconnect(self):
         if self.connected:
