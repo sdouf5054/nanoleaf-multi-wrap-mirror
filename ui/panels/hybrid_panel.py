@@ -1,9 +1,8 @@
 """하이브리드 모드 패널 — 에너지 레벨 + 화면 연동 + 오디오 파라미터
 
-[변경] UI 상태 영속화
-- apply_to_config: options.hybrid_state에 서브모드/구역/최소밝기 저장
-- load_from_config: options.hybrid_state에서 복원
-- __init__에서 load_from_config 호출
+[변경] 캡처 통합
+- color_source는 항상 COLOR_SOURCE_SCREEN (하이브리드 = 화면 + 오디오)
+- 구역 수는 미러링과 독립적으로 설정 가능
 """
 
 from PyQt5.QtWidgets import (
@@ -47,7 +46,7 @@ class HybridPanel(QWidget):
         self._is_running = False
         self._mode_key = "pulse"
         self._build_ui()
-        self.load_from_config()  # ★ 저장된 UI 상태 복원
+        self.load_from_config()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -178,7 +177,10 @@ class HybridPanel(QWidget):
         self._is_running = running
 
     def collect_params(self):
-        """엔진 전달용 파라미터 dict."""
+        """엔진 전달용 파라미터 dict.
+
+        ★ color_source는 항상 screen — 하이브리드 = 화면 + 오디오.
+        """
         p = self.param_widget.get_params()
         return {
             "audio_mode": _INDEX_AUDIO_MODE.get(
@@ -208,10 +210,8 @@ class HybridPanel(QWidget):
         self.spectrum_widget.set_values(spec)
 
     def apply_to_config(self):
-        """설정 저장 — 모드 파라미터 + UI 상태."""
         self._save_mode_params(self._mode_key)
 
-        # ★ UI 상태를 options.hybrid_state에 저장
         opts = self._config.setdefault("options", {})
         opts["hybrid_state"] = {
             "sub_mode": self._mode_key,
@@ -220,11 +220,8 @@ class HybridPanel(QWidget):
         }
 
     def load_from_config(self):
-        """설정 로드 — UI 상태 복원 + 모드 파라미터 로드."""
-        # ★ UI 상태 복원
         state = self._config.get("options", {}).get("hybrid_state", {})
 
-        # 서브모드 복원
         saved_mode = state.get("sub_mode", "pulse")
         idx = _MODE_TO_INDEX.get(saved_mode, 0)
         self.combo_mode.blockSignals(True)
@@ -233,7 +230,6 @@ class HybridPanel(QWidget):
         self._mode_key = saved_mode
         self.param_widget.set_audio_mode(saved_mode)
 
-        # 구역 수 복원
         saved_zone = state.get("zone_count", 4)
         self.combo_zone_count.blockSignals(True)
         for i in range(self.combo_zone_count.count()):
@@ -242,14 +238,12 @@ class HybridPanel(QWidget):
                 break
         self.combo_zone_count.blockSignals(False)
 
-        # 최소 밝기 복원
         min_b = state.get("min_brightness", 5)
         self.slider_min_brightness.blockSignals(True)
         self.slider_min_brightness.setValue(min_b)
         self.slider_min_brightness.blockSignals(False)
         self.lbl_min_brightness.setText(f"{min_b}%")
 
-        # 모드별 파라미터 (기존)
         self._load_mode_params(self._mode_key)
 
     def cleanup(self):

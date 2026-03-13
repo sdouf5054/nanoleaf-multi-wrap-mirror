@@ -1,8 +1,8 @@
 """메인 윈도우 — 탭 구조 + UnifiedEngine + 트레이 + 잠금 감지
 
-[변경] 세로모드/해상도 변경 대응
-- WM_DISPLAYCHANGE 감지 → 엔진에 on_display_changed() 알림
-- SessionEventFilter에 WM_DISPLAYCHANGE 콜백 추가
+[변경] 하이브리드 캡처 통합
+- ScreenSampler 관련 코드 제거
+- 하이브리드 파라미터 전달 단순화
 """
 
 import ctypes
@@ -26,7 +26,7 @@ from core.config import save_config
 
 # Windows 메시지 상수
 WM_WTSSESSION_CHANGE = 0x02B1
-WM_DISPLAYCHANGE = 0x007E          # ★ 추가
+WM_DISPLAYCHANGE = 0x007E
 WTS_SESSION_LOCK = 0x7
 WTS_SESSION_UNLOCK = 0x8
 
@@ -46,7 +46,6 @@ class SessionEventFilter(QAbstractNativeEventFilter):
                     self._callback("lock")
                 elif msg.wParam == WTS_SESSION_UNLOCK:
                     self._callback("unlock")
-            # ★ 디스플레이 변경 감지 (해상도/회전/모니터 연결 변경)
             elif msg.message == WM_DISPLAYCHANGE:
                 self._callback("display_change")
         return False, 0
@@ -64,14 +63,13 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(700, 780)
         self.resize(740, 840)
 
-        # DeviceManager — 앱 전체에서 단일 인스턴스
+        # DeviceManager
         self.device_manager = DeviceManager(config, parent=self)
 
         # --- 탭 ---
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        # DeviceManager를 각 탭에 주입
         self.tab_control = ControlTab(config)
         self.tab_color = ColorTab(config, device_manager=self.device_manager)
         self.tab_setup = SetupTab(config, device_manager=self.device_manager)
@@ -132,7 +130,7 @@ class MainWindow(QMainWindow):
         self.tab_setup.request_mirror_stop.connect(self._stop_engine_sync)
         self.tab_color.request_mirror_stop.connect(self._stop_engine_sync)
 
-        # --- 잠금 감지 + ★ 디스플레이 변경 감지 ---
+        # --- 잠금 감지 + 디스플레이 변경 감지 ---
         self._was_running_before_lock = False
         self._lock_restart_mode = None
         self._session_filter = SessionEventFilter(self._on_session_event)
@@ -144,10 +142,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # ★ display change 디바운스 타이머 (연속 변경 시 마지막만 처리)
+        # display change 디바운스 타이머
         self._display_change_timer = QTimer(self)
         self._display_change_timer.setSingleShot(True)
-        self._display_change_timer.setInterval(1500)  # 1.5초 대기 후 처리
+        self._display_change_timer.setInterval(1500)
         self._display_change_timer.timeout.connect(self._on_display_change_settled)
 
     def nativeEvent(self, eventType, message):
@@ -167,7 +165,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _cleanup_engine(self):
-        """현재 엔진을 완전히 정리 — 시그널 해제 + 동기 대기."""
         if self._engine is None:
             return
 
@@ -187,7 +184,6 @@ class MainWindow(QMainWindow):
             old.wait(3000)
 
     def _start_engine(self, mode=None):
-        """UnifiedEngine 생성 + 시작."""
         self._cleanup_engine()
         self.device_manager.force_release()
 
@@ -222,7 +218,6 @@ class MainWindow(QMainWindow):
         self.tray.update_status(f"{mode} 실행 중")
 
     def _switch_mode(self, new_mode):
-        """실행 중 모드 전환."""
         self.tab_control.set_switching(True)
         try:
             self._start_engine(new_mode)
@@ -404,14 +399,11 @@ class MainWindow(QMainWindow):
         save_config(self.config)
 
     # ══════════════════════════════════════════════════════════════
-    #  잠금 감지 + ★ 디스플레이 변경 감지
+    #  잠금 감지 + 디스플레이 변경 감지
     # ══════════════════════════════════════════════════════════════
 
     def _on_session_event(self, event):
         if event == "display_change":
-            # ★ 디스플레이 변경 — 디바운스 타이머 시작/재시작
-            # 회전 시 WM_DISPLAYCHANGE가 여러 번 올 수 있으므로
-            # 마지막 메시지 후 1.5초 뒤에 처리
             self._display_change_timer.start()
             return
 
@@ -435,11 +427,6 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("잠금 해제 — 3초 후 재시작")
 
     def _on_display_change_settled(self):
-        """★ 디스플레이 변경 확정 — 엔진에 알림.
-
-        WM_DISPLAYCHANGE 디바운스 후 호출됩니다.
-        엔진이 실행 중이면 on_display_changed()로 캡처 재초기화를 트리거합니다.
-        """
         if self._engine and self._engine.isRunning():
             self._engine.on_display_changed()
             self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")

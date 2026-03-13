@@ -241,3 +241,30 @@ def _build_led_zone_map_by_side(config, n_zones):
             mapping[i] = int(cw_t * n_zones)
 
     return mapping
+
+
+def per_led_to_zone_colors(per_led_colors, zone_map, n_zones):
+    """per-LED 색상 배열에서 구역별 평균 색상을 계산.
+
+    Args:
+        per_led_colors: (n_leds, 3) float32 — LED별 RGB
+        zone_map: (n_leds,) int32 — LED→zone 매핑
+        n_zones: 구역 수
+
+    Returns:
+        (n_zones, 3) float32 — 구역별 평균 RGB
+    """
+    zone_colors = np.zeros((n_zones, 3), dtype=np.float32)
+    zone_counts = np.zeros(n_zones, dtype=np.int32)
+
+    for i in range(len(per_led_colors)):
+        zi = zone_map[i]
+        if 0 <= zi < n_zones:
+            zone_colors[zi] += per_led_colors[i]
+            zone_counts[zi] += 1
+
+    for zi in range(n_zones):
+        if zone_counts[zi] > 0:
+            zone_colors[zi] /= zone_counts[zi]
+
+    return zone_colors

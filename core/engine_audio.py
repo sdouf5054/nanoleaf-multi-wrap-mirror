@@ -3,8 +3,10 @@
 UnifiedEngine에 mix-in으로 결합되어 오디오/하이브리드 모드의
 메인 루프와 렌더링 로직을 제공합니다.
 
-[변경] 세로모드/해상도 변경 대응
-- _run_hybrid: _display_change_flag 체크 → _handle_display_change() 호출
+[변경] 하이브리드 캡처 통합
+- ScreenSampler 제거 → self._capture + weight_matrix 직접 사용
+- _get_screen_color: per-LED 색상 또는 구역별 평균에서 색상 취득
+- 프리뷰는 항상 색상 보정 전(raw) 전송
 
 [self 속성 의존성] — UnifiedEngine에서 초기화
     _stop_event, _paused, _zone_dirty, _audio_engine,
@@ -13,15 +15,15 @@ UnifiedEngine에 mix-in으로 결합되어 오디오/하이브리드 모드의
     _smooth_spectrum, audio_mode, audio_brightness, audio_min_brightness,
     _led_count, _led_band_indices, _cc, _bd_band_bins, _bd_agc, _bd_smooth,
     base_color, rainbow, color_source, mode, n_zones, _per_led_colors,
-    _led_zone_map, _screen_sampler, _weight_matrix,
+    _hybrid_zone_map, _hybrid_zone_colors, _capture, _weight_matrix,
     target_fps, attack, release,
-    _display_change_flag,  # ★ 추가
+    _display_change_flag,
     # 시그널
     status_changed, fps_updated, energy_updated, spectrum_updated,
     screen_colors_updated, _device,
     # 메서드
-    _rebuild_band_mapping, _ensure_screen_sampler,
-    _handle_display_change,  # ★ 추가
+    _rebuild_band_mapping,
+    _handle_display_change,
 """
 
 import time
@@ -32,6 +34,7 @@ from core.engine_utils import (
     COLOR_SOURCE_SCREEN, COLOR_SOURCE_SOLID,
     MODE_HYBRID, N_ZONES_PER_LED,
     SCREEN_UPDATE_INTERVAL, BASS_DETAIL_N_BANDS,
+    per_led_to_zone_colors,
 )
 from core.constants import HW_ERRORS
 
@@ -140,7 +143,11 @@ class AudioEngineMixin:
     # ══════════════════════════════════════════════════════════════
 
     def _run_hybrid(self):
-        """하이브리드 비주얼라이저 메인 루프 — 오디오 + 화면 색상 소스."""
+        """하이브리드 비주얼라이저 메인 루프.
+
+        ★ 변경: ScreenSampler 대신 self._capture + weight_matrix를 직접 사용.
+        화면 색상은 미러링과 동일한 품질로 per-LED 단위로 계산됩니다.
+        """
         frame_interval = 1.0 / self.target_fps
         frame_count = 0
         fps_start = time.monotonic()
@@ -148,6 +155,7 @@ class AudioEngineMixin:
         stop_wait = self._stop_event.wait
 
         self.status_changed.emit("하이브리드 비주얼라이저 실행 중")
+        self._start_monitor_watcher()
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
@@ -157,15 +165,12 @@ class AudioEngineMixin:
                     break
                 continue
 
-            # ★ 디스플레이 변경 처리 (하이브리드 모드)
+            # ★ 디스플레이 변경 처리
             if self._display_change_flag.is_set():
                 self._handle_display_change()
 
             if self._zone_dirty:
                 self._rebuild_band_mapping()
-
-            if self.color_source != COLOR_SOURCE_SOLID:
-                self._ensure_screen_sampler()
 
             eng = self._audio_engine
             eng.bass_sensitivity = self.bass_sensitivity
@@ -193,16 +198,26 @@ class AudioEngineMixin:
             high = self._smooth_high
             spec = self._smooth_spectrum
 
-            if (self._screen_sampler is not None
+            # ★ 화면 색상 갱신: capture + weight_matrix
+            if (self.color_source != COLOR_SOURCE_SOLID
+                    and self._capture is not None
+                    and self._weight_matrix is not None
                     and frame_count % SCREEN_UPDATE_INTERVAL == 0):
-                self._screen_sampler.update()
-
-                if (self.n_zones == N_ZONES_PER_LED
-                        and self._weight_matrix is not None):
-                    frame = self._screen_sampler.get_last_frame()
-                    if frame is not None:
-                        grid_flat = frame.reshape(-1, 3).astype(np.float32)
+                screen_frame = self._capture.grab()
+                if screen_frame is not None:
+                    try:
+                        grid_flat = screen_frame.reshape(-1, 3).astype(np.float32)
                         self._per_led_colors = self._weight_matrix @ grid_flat
+                        # N구역 모드: 구역별 평균 캐시 갱신
+                        if (self.n_zones != N_ZONES_PER_LED
+                                and self._hybrid_zone_map is not None):
+                            self._hybrid_zone_colors = per_led_to_zone_colors(
+                                self._per_led_colors,
+                                self._hybrid_zone_map,
+                                self.n_zones,
+                            )
+                    except (ValueError, IndexError):
+                        pass
 
             mode = self.audio_mode
             bd_spec = None
@@ -233,27 +248,9 @@ class AudioEngineMixin:
                 else:
                     self.spectrum_updated.emit(spec.copy())
 
-                if self._screen_sampler is not None:
-                    if self.n_zones == N_ZONES_PER_LED:
-                        if self._per_led_colors is not None:
-                            self.screen_colors_updated.emit(
-                                self._per_led_colors.copy()
-                            )
-                    else:
-                        if self.n_zones == 1:
-                            zc = self._screen_sampler.get_global_color().reshape(1, 3)
-                        else:
-                            zc = self._screen_sampler.get_zone_colors()
-                        if (self._led_zone_map is not None
-                                and zc is not None and len(zc) > 0):
-                            led_colors = np.zeros(
-                                (self._led_count, 3), dtype=np.float32
-                            )
-                            for i in range(self._led_count):
-                                zi = self._led_zone_map[i]
-                                if 0 <= zi < len(zc):
-                                    led_colors[i] = zc[zi]
-                            self.screen_colors_updated.emit(led_colors)
+                # ★ 프리뷰: 항상 보정 전 raw 색상
+                if _raw is not None:
+                    self.screen_colors_updated.emit(_raw)
 
             frame_count += 1
             now = time.monotonic()
@@ -273,6 +270,11 @@ class AudioEngineMixin:
     # ══════════════════════════════════════════════════════════════
 
     def _render_pulse(self, bass, mid, high):
+        """Pulse 렌더링.
+
+        Returns: (grb_bytes, raw_rgb_for_preview)
+        raw_rgb는 색상 보정 전 값 (프리뷰용).
+        """
         n_leds = self._led_count
         n_bands = len(self._smooth_spectrum) if self._smooth_spectrum is not None else 16
         min_b = self.audio_min_brightness
@@ -286,7 +288,10 @@ class AudioEngineMixin:
             c = c * (1 - white_mix) + 255.0 * white_mix
             leds[led_idx] = c * intensity
 
+        # ★ 프리뷰용: 보정 전 raw
         raw_rgb = leds.copy()
+
+        # LED 출력용: 보정 적용
         self._cc.apply(leds)
         return self._leds_to_grb(leds), raw_rgb
 
@@ -295,6 +300,11 @@ class AudioEngineMixin:
     # ══════════════════════════════════════════════════════════════
 
     def _render_spectrum(self, spec):
+        """Spectrum 렌더링.
+
+        Returns: (grb_bytes, raw_rgb_for_preview)
+        raw_rgb는 색상 보정 전 값 (프리뷰용).
+        """
         n_leds = self._led_count
         n_bands = len(spec)
         min_b = self.audio_min_brightness
@@ -311,7 +321,10 @@ class AudioEngineMixin:
             intensity = max(min_b, energy) * self.audio_brightness
             leds[led_idx] = color * intensity
 
+        # ★ 프리뷰용: 보정 전 raw
         raw_rgb = leds.copy()
+
+        # LED 출력용: 보정 적용
         self._cc.apply(leds)
         return self._leds_to_grb(leds), raw_rgb
 
@@ -351,6 +364,11 @@ class AudioEngineMixin:
     # ══════════════════════════════════════════════════════════════
 
     def _get_base_color(self, led_idx, n_bands):
+        """LED의 기본 색상을 결정.
+
+        하이브리드 + screen 소스: per-LED 화면 색상 사용
+        그 외: 단색 또는 무지개
+        """
         source = self.color_source
 
         if source == COLOR_SOURCE_SCREEN and self.mode == MODE_HYBRID:
@@ -366,24 +384,29 @@ class AudioEngineMixin:
             return self.base_color.copy()
 
     def _get_screen_color(self, led_idx, n_bands):
-        if self._screen_sampler is None or not self._screen_sampler.has_data:
+        """★ 하이브리드 화면 색상 — per-LED 또는 구역별 평균.
+
+        self._per_led_colors가 capture + weight_matrix로 계산된
+        보정 전 raw RGB이므로, 그대로 반환합니다.
+
+        N구역 모드에서는 _hybrid_zone_colors 캐시를 사용합니다.
+        캐시는 _update_hybrid_zone_colors()에서 스크린 갱신 시 계산됩니다.
+        """
+        if self._per_led_colors is None:
             return self._get_solid_color(led_idx, n_bands)
 
         if self.n_zones == N_ZONES_PER_LED:
-            if self._per_led_colors is not None:
-                return self._per_led_colors[led_idx].copy()
-            return self._get_solid_color(led_idx, n_bands)
+            # per-LED: weight_matrix 결과를 직접 사용
+            return self._per_led_colors[led_idx].copy()
 
-        if self.n_zones == 1:
-            return self._screen_sampler.get_global_color().copy()
+        # N구역 모드: 캐시된 구역 색상에서 LED의 구역 인덱스로 참조
+        if (self._hybrid_zone_map is not None
+                and self._hybrid_zone_colors is not None):
+            zone_idx = self._hybrid_zone_map[led_idx]
+            if 0 <= zone_idx < len(self._hybrid_zone_colors):
+                return self._hybrid_zone_colors[zone_idx].copy()
 
-        zone_idx = self._led_zone_map[led_idx]
-        zone_colors = self._screen_sampler.get_zone_colors()
-
-        if zone_idx >= len(zone_colors):
-            zone_idx = zone_idx % len(zone_colors)
-
-        return zone_colors[zone_idx].copy()
+        return self._get_solid_color(led_idx, n_bands)
 
     @staticmethod
     def _band_color(t):

@@ -4,16 +4,19 @@
 오디오/하이브리드 루프와 렌더링은 AudioEngineMixin(engine_audio.py)에,
 유틸리티 함수와 공용 상수는 engine_utils.py에 있습니다.
 
+[변경] 하이브리드 캡처 통합
+- 하이브리드 모드가 미러링과 동일한 self._capture + weight_matrix 사용
+- ScreenSampler 제거 → 캡처 경로 단일화
+- per-LED 색상에서 구역별 평균을 사후 계산 (per_led_to_zone_colors)
+- 프리뷰는 항상 색상 보정 전(raw RGB)을 전송
+
 [변경] 세로모드 미러링 수정
 - _resolve_grid_size(): 화면 방향에 따라 grid_cols/grid_rows를 swap
 - _active_grid_cols, _active_grid_rows: 현재 사용 중인 grid 크기 추적
-- 캡처 생성/재생성 시 방향별 grid 크기 적용
-- _build_layout, _rebuild_pipeline: _active_grid_* 사용
 
 [변경] 디스플레이 변경 대응
 - on_display_changed(): MainWindow에서 호출 (WM_DISPLAYCHANGE)
 - _handle_display_change(): 캡처 재생성 + grid swap + layout 재빌드
-- 모니터 watcher: 해상도 폴링 추가
 
 Signals:
     fps_updated(float), error(str, str), status_changed(str),
@@ -42,7 +45,6 @@ from core.layout import get_led_positions, build_weight_matrix
 from core.color import ColorPipeline
 from core.color_correction import ColorCorrection
 from core.audio_engine import AudioEngine, _build_log_bands
-from core.screen_sampler import ScreenSampler
 
 from core.engine_utils import (
     MODE_MIRROR, MODE_AUDIO, MODE_HYBRID,
@@ -57,6 +59,7 @@ from core.engine_utils import (
     _compute_led_band_mapping,
     _build_led_order_from_segments,
     _build_led_zone_map_by_side,
+    per_led_to_zone_colors,
 )
 
 from core.engine_audio import AudioEngineMixin
@@ -131,9 +134,9 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         self._zone_dirty = False
         self._audio_device_index = audio_device_index
 
-        self.color_source = COLOR_SOURCE_SOLID
-        self.n_zones = 4
-        self.mirror_n_zones = N_ZONES_PER_LED
+        self.color_source = COLOR_SOURCE_SCREEN  # ★ 하이브리드 기본값 screen
+        self.n_zones = 4                          # 하이브리드 구역 수
+        self.mirror_n_zones = N_ZONES_PER_LED     # 미러링 구역 수
         self.min_brightness = MIN_BRIGHTNESS
         self.audio_min_brightness = MIN_BRIGHTNESS
 
@@ -163,9 +166,11 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         self._bd_agc = None
         self._bd_smooth = None
 
-        self._screen_sampler = None
-        self._led_zone_map = None
+        # ★ per-LED 색상 (하이브리드에서 capture + weight_matrix로 계산)
         self._per_led_colors = None
+        # ★ 하이브리드 구역 매핑 + 캐시
+        self._hybrid_zone_map = None
+        self._hybrid_zone_colors = None
 
     @property
     def _running(self):
@@ -176,12 +181,7 @@ class UnifiedEngine(AudioEngineMixin, QThread):
     # ══════════════════════════════════════════════════════════════
 
     def _resolve_grid_size(self, screen_w, screen_h):
-        """화면 방향에 따라 grid_cols/grid_rows를 결정.
-
-        세로 모드(screen_h > screen_w)이고 orientation이 auto/portrait면
-        config의 grid_cols/grid_rows를 swap합니다.
-        예: 가로 64×32 → 세로 32×64
-        """
+        """화면 방향에 따라 grid_cols/grid_rows를 결정."""
         mirror_cfg = self.config["mirror"]
         base_cols = mirror_cfg.get("grid_cols", 64)
         base_rows = mirror_cfg.get("grid_rows", 32)
@@ -194,9 +194,9 @@ class UnifiedEngine(AudioEngineMixin, QThread):
             is_portrait = True
 
         if is_portrait:
-            return base_rows, base_cols   # swap: 32×64
+            return base_rows, base_cols
         else:
-            return base_cols, base_rows   # 기본: 64×32
+            return base_cols, base_rows
 
     # ══════════════════════════════════════════════════════════════
     #  외부 제어 API
@@ -237,14 +237,11 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         self.color_source = source
         if n_zones is not None and n_zones != self.n_zones:
             self.n_zones = n_zones
-            if n_zones == N_ZONES_PER_LED:
-                if self._weight_matrix is None and self._perimeter_t is not None:
-                    self._build_hybrid_weight_matrix(self.config.get("mirror", {}))
-            else:
-                if self._perimeter_t is not None:
-                    self._led_zone_map = _build_led_zone_map_by_side(self.config, n_zones)
-                if self._screen_sampler is not None:
-                    self._screen_sampler.set_n_zones(n_zones)
+            # ★ 구역 매핑 재계산
+            if n_zones != N_ZONES_PER_LED:
+                self._hybrid_zone_map = _build_led_zone_map_by_side(
+                    self.config, n_zones
+                )
 
     def pause(self):
         self._paused = True
@@ -287,7 +284,7 @@ class UnifiedEngine(AudioEngineMixin, QThread):
 
         new_w, new_h = new_res
 
-        # 3. ★ 새 방향에 맞는 grid 크기
+        # 3. 새 방향에 맞는 grid 크기
         new_grid_cols, new_grid_rows = self._resolve_grid_size(new_w, new_h)
 
         # 4. 캡처 재생성
@@ -331,25 +328,6 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         except (ValueError, IndexError, np.linalg.LinAlgError) as e:
             self.status_changed.emit(f"layout 재빌드 실패: {e}")
 
-        # 7. ScreenSampler 재생성 (하이브리드)
-        if self._screen_sampler is not None:
-            try:
-                self._screen_sampler.stop()
-            except Exception:
-                pass
-            self._screen_sampler = None
-            try:
-                self._screen_sampler = ScreenSampler(
-                    n_zones=self.n_zones if self.n_zones != N_ZONES_PER_LED else 4,
-                    grid_cols=new_grid_cols,
-                    grid_rows=new_grid_rows,
-                )
-                self._screen_sampler.start(monitor_index=mirror_cfg.get("monitor_index", 0))
-                if self.n_zones == N_ZONES_PER_LED:
-                    self._build_hybrid_weight_matrix(mirror_cfg)
-            except Exception:
-                self._screen_sampler = None
-
         self._expected_resolution = new_res
 
     # ══════════════════════════════════════════════════════════════
@@ -381,7 +359,6 @@ class UnifiedEngine(AudioEngineMixin, QThread):
 
         current_monitors = self._get_monitor_count()
 
-        # ★ 해상도 폴링 (WM_DISPLAYCHANGE 폴백)
         current_res = self._get_primary_resolution()
         if (current_res[0] > 0 and current_res[1] > 0
                 and self._expected_resolution[0] > 0
@@ -493,6 +470,7 @@ class UnifiedEngine(AudioEngineMixin, QThread):
             self._logger.propagate = False
 
         try:
+            # ★ 미러링과 하이브리드 모두 캡처 + weight_matrix 필요
             if self.mode in (MODE_MIRROR, MODE_HYBRID):
                 self._init_mirror_resources(mirror_cfg)
             if self.mode in (MODE_AUDIO, MODE_HYBRID):
@@ -516,7 +494,7 @@ class UnifiedEngine(AudioEngineMixin, QThread):
     def _init_mirror_resources(self, mirror_cfg):
         target_fps = mirror_cfg["target_fps"]
 
-        # ★ 초기 해상도로 grid 크기 결정
+        # 초기 해상도로 grid 크기 결정
         init_res = self._get_primary_resolution()
         if init_res[0] > 0 and init_res[1] > 0:
             grid_cols, grid_rows = self._resolve_grid_size(init_res[0], init_res[1])
@@ -549,6 +527,7 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         self._active_h = self._capture.screen_h
         self._weight_matrix = self._build_layout(self._active_w, self._active_h)
 
+        # 미러링 구역 매핑 (per-LED이 아닌 경우)
         self._mirror_zone_map = None
         self._mirror_cc = None
         if self.mirror_n_zones != N_ZONES_PER_LED:
@@ -587,75 +566,21 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         self._bd_smooth = np.zeros(BASS_DETAIL_N_BANDS, dtype=np.float64)
 
     def _init_hybrid_resources(self):
-        mirror_cfg = self.config.get("mirror", {})
-        if self.n_zones != N_ZONES_PER_LED:
-            self._led_zone_map = _build_led_zone_map_by_side(self.config, self.n_zones)
-        if self.n_zones == N_ZONES_PER_LED:
-            self._build_hybrid_weight_matrix(mirror_cfg)
-        if self.color_source != COLOR_SOURCE_SOLID:
-            self._init_screen_sampler(mirror_cfg)
-
-    def _build_hybrid_weight_matrix(self, mirror_cfg):
-        layout_cfg = self.config["layout"]
-        grid_cols = self._active_grid_cols
-        grid_rows = self._active_grid_rows
-        screen_w = grid_cols * 40
-        screen_h = grid_rows * 40
-
-        positions, sides = get_led_positions(
-            screen_w, screen_h, layout_cfg["segments"], self._led_count,
-            orientation=mirror_cfg.get("orientation", "auto"),
-            portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
-        )
-
-        decay = mirror_cfg.get("decay_radius", 0.3)
-        penalty = mirror_cfg.get("parallel_penalty", 5.0)
-        per_decay = mirror_cfg.get("decay_radius_per_side", {})
-        decay_param = (
-            {s: per_decay.get(s, decay) for s in ("top", "bottom", "left", "right")}
-            if per_decay else decay
-        )
-        per_penalty = mirror_cfg.get("parallel_penalty_per_side", {})
-        penalty_param = (
-            {s: per_penalty.get(s, penalty) for s in ("top", "bottom", "left", "right")}
-            if per_penalty else penalty
-        )
-
-        self._weight_matrix = build_weight_matrix(
-            screen_w, screen_h, positions, sides,
-            grid_cols, grid_rows, decay_param, penalty_param,
-        )
+        """★ 하이브리드 리소스 — capture/weight_matrix는 _init_mirror_resources에서 생성 완료.
+        여기서는 구역 매핑 + per-LED 버퍼만 초기화.
+        """
         self._per_led_colors = np.zeros((self._led_count, 3), dtype=np.float32)
 
-    def _init_screen_sampler(self, mirror_cfg):
-        self.status_changed.emit("화면 캡처 초기화...")
-        try:
-            self._screen_sampler = ScreenSampler(
-                n_zones=self.n_zones if self.n_zones != N_ZONES_PER_LED else 4,
-                grid_cols=self._active_grid_cols,
-                grid_rows=self._active_grid_rows,
+        # 구역 매핑 (per-LED이 아닌 경우)
+        if self.n_zones != N_ZONES_PER_LED:
+            self._hybrid_zone_map = _build_led_zone_map_by_side(
+                self.config, self.n_zones
             )
-            self._screen_sampler.start(monitor_index=mirror_cfg.get("monitor_index", 0))
-        except Exception as e:
-            self.error.emit(f"화면 캡처 실패 — 단색 모드로 전환: {e}", "warning")
-            self._screen_sampler = None
-            self.color_source = COLOR_SOURCE_SOLID
-
-    def _ensure_screen_sampler(self):
-        if self._screen_sampler is not None:
-            return True
-        if self.color_source == COLOR_SOURCE_SOLID:
-            return True
-        self._init_screen_sampler(self.config.get("mirror", {}))
-        return self._screen_sampler is not None
 
     def _cleanup_partial(self):
         if self._audio_engine:
             self._audio_engine.stop()
             self._audio_engine = None
-        if self._screen_sampler:
-            self._screen_sampler.stop()
-            self._screen_sampler = None
         if self._capture:
             self._capture.stop()
             self._capture = None
@@ -686,49 +611,31 @@ class UnifiedEngine(AudioEngineMixin, QThread):
     # ══════════════════════════════════════════════════════════════
 
     def _compute_mirror_zone_colors(self, frame):
+        """미러링 N구역 모드: frame → 구역별 평균 → zone_map으로 LED 할당.
+
+        Returns: (grb_bytes, raw_leds_for_preview)
+        프리뷰용으로는 색상 보정 전 값을 반환합니다.
+        """
+        # weight_matrix로 per-LED raw 색상 계산
         grid_flat = frame.reshape(-1, 3).astype(np.float32)
+        per_led_raw = self._weight_matrix @ grid_flat  # (n_leds, 3)
+
+        # per-LED → 구역별 평균 → zone_map으로 LED에 재할당
         n_zones = self.mirror_n_zones
-        grid_rows = frame.shape[0]
-        grid_cols = frame.shape[1] if frame.ndim >= 2 else 1
-
-        zone_colors = np.zeros((n_zones, 3), dtype=np.float32)
-
-        if n_zones == 1:
-            zone_colors[0] = grid_flat.mean(axis=0)
-        elif n_zones == 2:
-            mid = grid_rows // 2
-            zone_colors[0] = frame[:mid].reshape(-1, 3).astype(np.float32).mean(axis=0)
-            zone_colors[1] = frame[mid:].reshape(-1, 3).astype(np.float32).mean(axis=0)
-        elif n_zones == 4:
-            mid_r, mid_c = grid_rows // 2, grid_cols // 2
-            zone_colors[0] = frame[:mid_r, :].reshape(-1, 3).astype(np.float32).mean(axis=0)
-            zone_colors[1] = frame[:, mid_c:].reshape(-1, 3).astype(np.float32).mean(axis=0)
-            zone_colors[2] = frame[mid_r:, :].reshape(-1, 3).astype(np.float32).mean(axis=0)
-            zone_colors[3] = frame[:, :mid_c].reshape(-1, 3).astype(np.float32).mean(axis=0)
-        else:
-            zone_counts = np.zeros(n_zones, dtype=np.int32)
-            total = grid_rows * grid_cols
-            for pi in range(total):
-                r_idx = pi // grid_cols
-                c_idx = pi % grid_cols
-                rx = c_idx / max(1, grid_cols - 1)
-                ry = r_idx / max(1, grid_rows - 1)
-                if ry < 0.2:     cw_t = rx * 0.25
-                elif rx > 0.8:   cw_t = 0.25 + ry * 0.25
-                elif ry > 0.8:   cw_t = 0.50 + (1 - rx) * 0.25
-                elif rx < 0.2:   cw_t = 0.75 + (1 - ry) * 0.25
-                else:            cw_t = 0.0
-                zi = min(int(cw_t * n_zones), n_zones - 1)
-                zone_colors[zi] += grid_flat[pi]
-                zone_counts[zi] += 1
-            for zi in range(n_zones):
-                if zone_counts[zi] > 0:
-                    zone_colors[zi] /= zone_counts[zi]
-
+        zone_colors = per_led_to_zone_colors(
+            per_led_raw, self._mirror_zone_map, n_zones
+        )
         leds = zone_colors[self._mirror_zone_map]
+
+        # ★ 프리뷰용: 보정 전 raw (밝기만 적용)
+        raw_preview = leds.copy()
+        raw_preview *= self.brightness
+
+        # LED 출력용: 보정 적용
         leds *= self.brightness
         self._mirror_cc.apply(leds)
-        return self._leds_to_grb(leds), leds
+
+        return self._leds_to_grb(leds), raw_preview
 
     def _run_mirror(self):
         mirror_cfg = self.config["mirror"]
@@ -777,7 +684,7 @@ class UnifiedEngine(AudioEngineMixin, QThread):
                 if stop_wait(timeout=0.5): break
                 continue
 
-            # ★ 디스플레이 변경 처리
+            # 디스플레이 변경 처리
             if self._display_change_flag.is_set():
                 self._handle_display_change()
                 pipeline = self._pipeline
@@ -823,7 +730,6 @@ class UnifiedEngine(AudioEngineMixin, QThread):
                         new_h = self._capture.screen_h
                         if (new_w > 0 and new_h > 0
                                 and (new_w != self._active_w or new_h != self._active_h)):
-                            # 해상도 변경 감지 → full display change
                             self._display_change_flag.set()
 
                 if stale_duration > _STALE_LED_OFF_THRESHOLD and not led_turned_off:
@@ -844,14 +750,13 @@ class UnifiedEngine(AudioEngineMixin, QThread):
                 if not debug:
                     self.status_changed.emit("미러링 실행 중")
 
-            # ★ 해상도 변경 감지
+            # 해상도 변경 감지
             try:
                 current_h, current_w = frame.shape[:2]
             except (AttributeError, ValueError):
                 continue
 
             if not _NATIVE_CAPTURE:
-                # dxcam: frame.shape로 감지
                 if current_h != self._active_h or current_w != self._active_w:
                     self._active_w, self._active_h = current_w, current_h
                     self._capture.screen_w = current_w
@@ -868,7 +773,6 @@ class UnifiedEngine(AudioEngineMixin, QThread):
                     except (ValueError, IndexError, np.linalg.LinAlgError):
                         pass
             else:
-                # 네이티브: capture.screen_w/h로 감지
                 cap_w, cap_h = self._capture.screen_w, self._capture.screen_h
                 if (cap_w > 0 and cap_h > 0
                         and (cap_w != self._active_w or cap_h != self._active_h)):
@@ -879,21 +783,25 @@ class UnifiedEngine(AudioEngineMixin, QThread):
             if debug: t1 = _timer()
 
             if self._mirror_zone_map is not None:
+                # ★ N구역 모드
                 try:
-                    grb_data, leds_preview = self._compute_mirror_zone_colors(frame)
+                    grb_data, raw_preview = self._compute_mirror_zone_colors(frame)
                     prev_colors = None
                     if frame_count % 5 == 0:
-                        self.screen_colors_updated.emit(leds_preview.tolist())
+                        self.screen_colors_updated.emit(raw_preview.tolist())
                 except (ValueError, IndexError, FloatingPointError):
                     prev_colors = None
                     continue
             else:
+                # per-LED 모드 (기본)
                 try:
                     grb_data, rgb_colors = pipeline.process(frame, prev_colors)
                     prev_colors = rgb_colors
                 except (ValueError, IndexError, FloatingPointError):
                     prev_colors = None
                     continue
+
+                # ★ 프리뷰: weight_matrix로 raw RGB 계산 (보정 전)
                 if frame_count % 5 == 0:
                     try:
                         grid_flat = frame.reshape(-1, 3).astype(np.float32)
@@ -942,9 +850,6 @@ class UnifiedEngine(AudioEngineMixin, QThread):
         if self._audio_engine:
             self._audio_engine.stop()
             self._audio_engine = None
-        if self._screen_sampler:
-            self._screen_sampler.stop()
-            self._screen_sampler = None
         try:
             if self._device:
                 self._device.turn_off()
