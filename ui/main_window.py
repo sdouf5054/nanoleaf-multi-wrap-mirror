@@ -1,29 +1,31 @@
-"""메인 윈도우 — 탭 구조 + UnifiedEngine + 트레이 + 잠금 감지 + DPI 재조정
+"""메인 윈도우 — 탭 구조 + EngineController + 트레이 + 잠금 감지 (PySide6)
 
-[변경] Per-Monitor DPI 수동 재조정 추가
-- showEvent에서 screenChanged 시그널 연결
-- 모니터 이동 시 전역 폰트 + 위젯 크기 재조정
-- _base_font_size: 기준 폰트 크기 저장 (누적 방지)
+[ADR-019] EngineController를 통해 엔진 관리 — MainWindow는 릴레이 슬롯 최소화
+[ADR-029] DPI 수동 재조정 코드 제거 — PySide6 빌트인 스케일링에 위임
+[ADR-030] WTSRegisterSessionNotification + NativeEventFilter (KEEP)
+[ADR-031] Display change debouncing 1500ms (KEEP)
+[ADR-039] 트레이 밝기를 시그널로 분리 — 위젯 직접 접근 제거
+
+Phase 3에서는 탭 내부 위젯은 placeholder로 둡니다.
+Phase 4/5에서 실제 패널을 구현합니다.
 """
 
 import ctypes
 import ctypes.wintypes
-from PyQt5.QtWidgets import (
-    QMainWindow, QTabWidget, QMessageBox, QSystemTrayIcon, QApplication
-)
-from PyQt5.QtCore import Qt, QAbstractNativeEventFilter, QTimer
-from PyQt5.QtGui import QIcon, QFont
 
-from core.device_manager import DeviceManager
-from ui.tab_setup import SetupTab
-from ui.tab_color import ColorTab
-from ui.tab_control import ControlTab
-from ui.tab_options import OptionsTab
-from ui.tray import SystemTray
-from core.engine import (
-    UnifiedEngine, MODE_MIRROR, MODE_AUDIO, MODE_HYBRID,
+from PySide6.QtWidgets import (
+    QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel,
+    QMessageBox, QSystemTrayIcon, QApplication,
 )
+from PySide6.QtCore import Qt, QTimer, QAbstractNativeEventFilter
+from PySide6.QtGui import QIcon
+
 from core.config import save_config
+from core.device_manager import DeviceManager
+from core.engine_controller import EngineController
+from core.engine_params import MirrorParams
+from core.engine_utils import MODE_MIRROR
+from ui.tray import SystemTray
 
 # Windows 메시지 상수
 WM_WTSSESSION_CHANGE = 0x02B1
@@ -33,7 +35,7 @@ WTS_SESSION_UNLOCK = 0x8
 
 
 class SessionEventFilter(QAbstractNativeEventFilter):
-    """Windows 잠금/해제 + 디스플레이 변경 이벤트 감지"""
+    """Windows 잠금/해제 + 디스플레이 변경 이벤트 감지."""
 
     def __init__(self, callback):
         super().__init__()
@@ -41,106 +43,82 @@ class SessionEventFilter(QAbstractNativeEventFilter):
 
     def nativeEventFilter(self, eventType, message):
         if eventType == b"windows_generic_MSG":
-            msg = ctypes.wintypes.MSG.from_address(int(message))
-            if msg.message == WM_WTSSESSION_CHANGE:
-                if msg.wParam == WTS_SESSION_LOCK:
-                    self._callback("lock")
-                elif msg.wParam == WTS_SESSION_UNLOCK:
-                    self._callback("unlock")
-            elif msg.message == WM_DISPLAYCHANGE:
-                self._callback("display_change")
+            try:
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == WM_WTSSESSION_CHANGE:
+                    if msg.wParam == WTS_SESSION_LOCK:
+                        self._callback("lock")
+                    elif msg.wParam == WTS_SESSION_UNLOCK:
+                        self._callback("unlock")
+                elif msg.message == WM_DISPLAYCHANGE:
+                    self._callback("display_change")
+            except Exception:
+                pass
         return False, 0
 
 
+class _PlaceholderTab(QWidget):
+    """Phase 4/5에서 실제 위젯으로 교체될 placeholder 탭."""
+
+    def __init__(self, name, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        label = QLabel(f"{name}\n(Phase 4/5에서 구현 예정)")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("color: #888; font-size: 14px;")
+        layout.addWidget(label)
+
+
 class MainWindow(QMainWindow):
+    """메인 윈도우 — UI Shell.
+
+    EngineController가 엔진 수명주기를 관리하므로,
+    MainWindow는 OS 이벤트 처리와 탭/트레이 연결만 담당합니다.
+    """
+
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self._engine = None
         self._force_quit = False
-        self._has_shown_tray_message = False
-
-        # ── DPI 재조정용 상태 ──
-        self._base_font_size = 8.0   # main.py에서 설정한 기준 폰트 크기 (pt)
-        self._current_dpi_ratio = 1.4  # 현재 DPI / 96
-        self._dpi_connected = False    # screenChanged 연결 여부
-        self._dpi_timer = QTimer(self)
-        self._dpi_timer.setSingleShot(True)
-        self._dpi_timer.setInterval(200)  # 200ms 디바운스
-        self._dpi_timer.timeout.connect(self._apply_dpi_adjustment)
 
         self.setWindowTitle("Nanoleaf Screen Mirror")
-        self.setMinimumSize(700, 780)
-        self.resize(740, 840)
+        self.setMinimumSize(600, 700)
 
-        # DeviceManager
+        # ── DeviceManager ──
         self.device_manager = DeviceManager(config, parent=self)
 
-        # --- 탭 ---
+        # ── EngineController (ADR-019) ──
+        self.engine_ctrl = EngineController(config, parent=self)
+        self._connect_engine_signals()
+
+        # ── 탭 구조 ──
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        self.tab_control = ControlTab(config)
-        self.tab_color = ColorTab(config, device_manager=self.device_manager)
-        self.tab_setup = SetupTab(config, device_manager=self.device_manager)
-        self.tab_options = OptionsTab(config, main_window=self)
+        # Phase 3: placeholder 탭들. Phase 4/5에서 실제 위젯으로 교체.
+        self.tab_control = _PlaceholderTab("🎛 컨트롤")
+        self.tab_color = _PlaceholderTab("🎨 색상 보정")
+        self.tab_setup = _PlaceholderTab("⚙ LED 설정")
+        self.tab_options = _PlaceholderTab("🔧 옵션")
 
         self.tabs.addTab(self.tab_control, "🎛 컨트롤")
         self.tabs.addTab(self.tab_color, "🎨 색상 보정")
         self.tabs.addTab(self.tab_setup, "⚙ LED 설정")
         self.tabs.addTab(self.tab_options, "🔧 옵션")
 
-        # --- 상태바 ---
+        # ── 상태바 ──
         self.statusBar().showMessage("준비")
 
-        # --- 시스템 트레이 ---
+        # ── 시스템 트레이 (ADR-033, ADR-039) ──
         opts = config.get("options", {})
-        self.tray = SystemTray(self)
-        if QSystemTrayIcon.isSystemTrayAvailable() and opts.get("tray_enabled", True):
+        self.tray = SystemTray(config, parent=None)
+        self._connect_tray_signals()
+
+        if (QSystemTrayIcon.isSystemTrayAvailable()
+                and opts.get("tray_enabled", True)):
             self.tray.show()
-        if not opts.get("hotkey_enabled", True):
-            self.tray.cleanup()
 
-        # --- tab_control 시그널 연결 ---
-        self.tab_control.request_engine_start.connect(self._start_engine)
-        self.tab_control.request_engine_stop.connect(self._stop_engine)
-        self.tab_control.request_engine_pause.connect(self._toggle_pause)
-        self.tab_control.request_mode_switch.connect(self._switch_mode)
-        self.tab_control.config_applied.connect(self._save_config)
-
-        # 미러링 실시간 반영 시그널
-        self.tab_control.mirror_brightness_changed.connect(
-            self._on_mirror_brightness_changed
-        )
-        self.tab_control.mirror_smoothing_changed.connect(
-            self._on_mirror_smoothing_changed
-        )
-        self.tab_control.mirror_smoothing_factor_changed.connect(
-            self._on_mirror_smoothing_factor_changed
-        )
-        self.tab_control.mirror_layout_params_changed.connect(
-            self._on_mirror_layout_params_changed
-        )
-        self.tab_control.mirror_zone_count_changed.connect(
-            self._on_mirror_zone_count_changed
-        )
-
-        # 오디오/하이브리드 실시간 반영 시그널
-        self.tab_control.audio_params_changed.connect(
-            self._on_audio_params_changed
-        )
-        self.tab_control.audio_min_brightness_changed.connect(
-            self._on_audio_min_brightness_changed
-        )
-        self.tab_control.hybrid_params_changed.connect(
-            self._on_hybrid_params_changed
-        )
-
-        # setup/color 탭의 미러링 중지 요청
-        self.tab_setup.request_mirror_stop.connect(self._stop_engine_sync)
-        self.tab_color.request_mirror_stop.connect(self._stop_engine_sync)
-
-        # --- 잠금 감지 + 디스플레이 변경 감지 ---
+        # ── 잠금 감지 + 디스플레이 변경 (ADR-030, ADR-031) ──
         self._was_running_before_lock = False
         self._lock_restart_mode = None
         self._session_filter = SessionEventFilter(self._on_session_event)
@@ -152,305 +130,80 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # display change 디바운스 타이머
+        # ADR-031: display change 디바운스 1500ms
         self._display_change_timer = QTimer(self)
         self._display_change_timer.setSingleShot(True)
         self._display_change_timer.setInterval(1500)
         self._display_change_timer.timeout.connect(self._on_display_change_settled)
 
     # ══════════════════════════════════════════════════════════════
-    #  DPI 수동 재조정
+    #  시그널 연결
     # ══════════════════════════════════════════════════════════════
 
-    def showEvent(self, event):
-        """창이 처음 표시될 때 screenChanged 시그널 연결 + 초기 DPI 적용."""
-        super().showEvent(event)
-        if not self._dpi_connected:
-            handle = self.windowHandle()
-            if handle:
-                handle.screenChanged.connect(self._on_screen_changed)
-                self._dpi_connected = True
-                # 초기 DPI 적용
-                self._apply_dpi_adjustment()
+    def _connect_engine_signals(self):
+        ctrl = self.engine_ctrl
+        ctrl.status_changed.connect(self._on_status_changed)
+        ctrl.error.connect(self._on_error)
+        ctrl.running_changed.connect(self._on_running_changed)
+        ctrl.engine_stopped.connect(self._on_engine_stopped)
 
-    def _on_screen_changed(self, screen):
-        """모니터 이동 감지 → 디바운스 후 DPI 재조정."""
-        self._dpi_timer.start()
-
-    def _apply_dpi_adjustment(self):
-        """현재 모니터의 DPI를 읽어 전역 폰트와 창 크기를 재조정.
-
-        System DPI Aware가 아닌 Per-Monitor DPI Aware 모드이므로,
-        screen.logicalDotsPerInchX()가 실제 모니터의 DPI를 반환함.
-        """
-        handle = self.windowHandle()
-        if not handle:
-            return
-        screen = handle.screen()
-        if not screen:
-            return
-
-        dpi = screen.logicalDotsPerInchX()
-        new_ratio = dpi / 96.0
-
-        # 변화가 미미하면 무시 (떨림 방지)
-        if abs(new_ratio - self._current_dpi_ratio) < 0.05:
-            return
-
-        old_ratio = self._current_dpi_ratio
-        self._current_dpi_ratio = new_ratio
-
-        # ── 1) 전역 폰트 크기 재설정 (기준값 × DPI 비율) ──
-        app = QApplication.instance()
-        new_font = QFont(app.font())
-        new_font.setPointSizeF(self._base_font_size * new_ratio)
-        app.setFont(new_font)
-
-        # ── 2) 창 크기 비례 조정 ──
-        scale = new_ratio / old_ratio if old_ratio > 0 else 1.0
-        new_w = int(self.width() * scale)
-        new_h = int(self.height() * scale)
-        self.resize(new_w, new_h)
-
-        # ── 3) 최소 크기도 비례 조정 ──
-        min_w = int(600 * new_ratio)
-        min_h = int(700 * new_ratio)
-        self.setMinimumSize(min_w, min_h)
-
-        # ── 4) 모든 위젯에 폰트 전파 + 레이아웃 재계산 강제 ──
-        for widget in self.findChildren(QApplication.instance().__class__):
-            pass  # findChildren은 QWidget 기준
-        # 전체 위젯 트리에 스타일 재적용
-        self.setStyleSheet(self.styleSheet())
-
-        # 상태바 알림
-        pct = int(new_ratio * 100)
-        self.statusBar().showMessage(
-            f"디스플레이 변경 감지 — DPI {int(dpi)} ({pct}%) 적용됨", 3000
-        )
-
-    def nativeEvent(self, eventType, message):
-        try:
-            msg = ctypes.wintypes.MSG.from_address(int(message))
-            if msg.message == 0x8001:
-                self.showNormal()
-                self.activateWindow()
-                self.raise_()
-                return True, 0
-        except Exception:
-            pass
-        return super().nativeEvent(eventType, message)
+    def _connect_tray_signals(self):
+        """[ADR-039] 트레이 시그널 → MainWindow 슬롯."""
+        self.tray.toggle_requested.connect(self._toggle_engine)
+        self.tray.brightness_delta.connect(self._on_tray_brightness_delta)
+        self.tray.brightness_set.connect(self._on_tray_brightness_set)
+        self.tray.show_window_requested.connect(self._show_window)
+        self.tray.quit_requested.connect(self._quit)
 
     # ══════════════════════════════════════════════════════════════
-    #  엔진 관리
+    #  엔진 제어 (EngineController에 위임)
     # ══════════════════════════════════════════════════════════════
 
-    def _cleanup_engine(self):
-        if self._engine is None:
-            return
-
-        old = self._engine
-        self._engine = None
-
-        for sig_name in ("fps_updated", "status_changed", "error",
-                         "finished", "energy_updated",
-                         "spectrum_updated", "screen_colors_updated"):
-            try:
-                getattr(old, sig_name).disconnect()
-            except (TypeError, RuntimeError, AttributeError):
-                pass
-
-        if old.isRunning():
-            old.stop_engine()
-            old.wait(3000)
-
-    def _start_engine(self, mode=None):
-        self._cleanup_engine()
+    def start_engine(self, mode=None):
+        """엔진 시작 — 외부(main.py 자동시작, 트레이)에서 호출 가능."""
         self.device_manager.force_release()
+        self.engine_ctrl.start_engine(mode)
 
-        if mode is None:
-            mode = self.tab_control.current_mode
+    def stop_engine(self):
+        self.engine_ctrl.stop_engine()
 
-        engine = UnifiedEngine(
-            self.config,
-            audio_device_index=self.tab_control.get_audio_device_index(),
-        )
-        engine.mode = mode
+    def _toggle_engine(self):
+        """트레이 on/off 토글."""
+        if self.engine_ctrl.is_running:
+            self.engine_ctrl.stop_engine()
+        else:
+            self.start_engine()
 
-        self._engine = engine
-        params = self.tab_control.collect_engine_init_params()
-        self._apply_params_to_engine(params)
+    # ══════════════════════════════════════════════════════════════
+    #  ADR-039: 트레이 밝기 시그널 처리
+    # ══════════════════════════════════════════════════════════════
 
-        engine.fps_updated.connect(self.tab_control.update_fps)
-        engine.status_changed.connect(self._on_status_changed)
-        engine.error.connect(self._on_error)
-        engine.finished.connect(self._on_engine_finished)
-
-        engine.energy_updated.connect(self.tab_control.update_energy)
-        engine.spectrum_updated.connect(self.tab_control.update_spectrum)
-        engine.screen_colors_updated.connect(
-            self.tab_control.update_preview_colors
-        )
-
-        self.tab_control.set_running_state(True)
-        engine.start()
-
-        self.tray.onoff_action.setText("⏹ 엔진 중지")
-        self.tray.update_status(f"{mode} 실행 중")
-
-    def _switch_mode(self, new_mode):
-        self.tab_control.set_switching(True)
-        try:
-            self._start_engine(new_mode)
-        finally:
-            self.tab_control.set_switching(False)
-            if self._engine and self._engine.isRunning():
-                self.tab_control.set_running_state(True)
-            else:
-                self.tab_control.set_running_state(False)
-
-    def _stop_engine(self):
-        if self._engine and self._engine.isRunning():
-            self._engine.stop_engine()
-            self.tab_control.update_status("중지 중...")
-
-    def _stop_engine_sync(self):
-        self._cleanup_engine()
-        self.tab_control.set_running_state(False)
-        self.tab_control.update_status("설정 모드 진입으로 중지됨")
-
-    def _toggle_pause(self):
-        if self._engine and self._engine.isRunning():
-            self._engine.toggle_pause()
-            is_paused = self._engine._paused
-            self.tab_control.update_pause_button(is_paused)
-
-    def _on_engine_finished(self):
-        if self._engine is None:
+    def _on_tray_brightness_delta(self, delta):
+        """트레이 밝기 +/- 시그널 → EngineController로 전달."""
+        if not self.engine_ctrl.is_running:
             return
-
-        self.tab_control.set_running_state(False)
-        self.tab_control.update_pause_button(False)
-        self.tab_control.update_fps(0)
-        self.tab_control.fps_label.setText("— fps")
-        self.tray.update_status("대기 중")
-        self.tray.onoff_action.setText("▶ 엔진 시작")
-        self._engine = None
-
-    # ══════════════════════════════════════════════════════════════
-    #  엔진 파라미터 전달
-    # ══════════════════════════════════════════════════════════════
-
-    def _apply_params_to_engine(self, params):
-        if not self._engine:
+        engine = self.engine_ctrl.engine
+        if engine is None:
             return
+        current = engine._current_mirror_params.brightness
+        new_val = max(0.0, min(1.0, current + delta / 100.0))
+        self.engine_ctrl.set_mirror_params(
+            MirrorParams(brightness=new_val)
+        )
 
-        eng = self._engine
-        mode = params.get("mode", eng.mode)
-
-        if mode == MODE_MIRROR:
-            eng.brightness = params.get("brightness", eng.brightness)
-            eng.smoothing_enabled = params.get(
-                "smoothing_enabled", eng.smoothing_enabled
-            )
-            eng.smoothing_factor = params.get(
-                "smoothing_factor", eng.smoothing_factor
-            )
-            if "mirror_n_zones" in params:
-                eng.mirror_n_zones = params["mirror_n_zones"]
-
-        elif mode in (MODE_AUDIO, MODE_HYBRID):
-            eng.audio_brightness = params.get("brightness", eng.audio_brightness)
-            eng.bass_sensitivity = params.get(
-                "bass_sensitivity", eng.bass_sensitivity
-            )
-            eng.mid_sensitivity = params.get(
-                "mid_sensitivity", eng.mid_sensitivity
-            )
-            eng.high_sensitivity = params.get(
-                "high_sensitivity", eng.high_sensitivity
-            )
-            eng.attack = params.get("attack", eng.attack)
-            eng.release = params.get("release", eng.release)
-
-            if "audio_min_brightness" in params:
-                eng.audio_min_brightness = params["audio_min_brightness"]
-
-            if "audio_mode" in params:
-                eng.set_audio_mode(params["audio_mode"])
-            if "zone_weights" in params:
-                zw = params["zone_weights"]
-                eng.set_zone_weights(*zw)
-            if params.get("rainbow"):
-                eng.set_rainbow(True)
-            elif "base_color" in params:
-                r, g, b = params["base_color"]
-                eng.set_color(r, g, b)
-
-            if mode == MODE_HYBRID:
-                if "color_source" in params:
-                    eng.set_color_source(
-                        params["color_source"],
-                        n_zones=params.get("n_zones"),
-                    )
-                if "min_brightness" in params:
-                    eng.min_brightness = params["min_brightness"]
-                    eng.audio_min_brightness = params["min_brightness"]
+    def _on_tray_brightness_set(self, pct):
+        """트레이 밝기 절대값 시그널."""
+        if not self.engine_ctrl.is_running:
+            return
+        self.engine_ctrl.set_mirror_params(
+            MirrorParams(brightness=pct / 100.0)
+        )
 
     # ══════════════════════════════════════════════════════════════
-    #  미러링 실시간 반영 시그널 핸들러
-    # ══════════════════════════════════════════════════════════════
-
-    def _on_mirror_brightness_changed(self, value):
-        if self._engine and self._engine.isRunning():
-            self._engine.brightness = value / 100.0
-
-    def _on_mirror_smoothing_changed(self, enabled):
-        if self._engine and self._engine.isRunning():
-            self._engine.smoothing_enabled = enabled
-
-    def _on_mirror_smoothing_factor_changed(self, value):
-        if self._engine and self._engine.isRunning():
-            self._engine.smoothing_factor = value
-
-    def _on_mirror_layout_params_changed(self, params):
-        if self._engine and self._engine.isRunning():
-            self._engine.update_layout_params(
-                decay_radius=params.get("decay_radius"),
-                parallel_penalty=params.get("parallel_penalty"),
-                decay_per_side=params.get("decay_per_side"),
-                penalty_per_side=params.get("penalty_per_side"),
-            )
-
-    def _on_mirror_zone_count_changed(self, n_zones):
-        if self._engine and self._engine.isRunning():
-            self._engine.mirror_n_zones = n_zones
-            self._switch_mode(self.tab_control.current_mode)
-
-    # ══════════════════════════════════════════════════════════════
-    #  오디오/하이브리드 실시간 반영 시그널 핸들러
-    # ══════════════════════════════════════════════════════════════
-
-    def _on_audio_params_changed(self, params):
-        if self._engine and self._engine.isRunning():
-            params["mode"] = MODE_AUDIO
-            self._apply_params_to_engine(params)
-
-    def _on_audio_min_brightness_changed(self, value):
-        if self._engine and self._engine.isRunning():
-            self._engine.audio_min_brightness = value
-
-    def _on_hybrid_params_changed(self, params):
-        if self._engine and self._engine.isRunning():
-            params["mode"] = MODE_HYBRID
-            self._apply_params_to_engine(params)
-
-    # ══════════════════════════════════════════════════════════════
-    #  상태/에러 처리
+    #  엔진 상태 콜백
     # ══════════════════════════════════════════════════════════════
 
     def _on_status_changed(self, text):
-        self.tab_control.update_status(text)
         self.statusBar().showMessage(text)
         self.tray.update_status(text)
 
@@ -458,29 +211,26 @@ class MainWindow(QMainWindow):
         if severity == "critical":
             QMessageBox.warning(self, "오류", msg)
         else:
-            warning_text = f"⚠ {msg}"
-            self.statusBar().showMessage(warning_text)
-            self.tab_control.update_status(warning_text)
-            self.tray.update_status(warning_text)
-            QTimer.singleShot(5000, self._restore_status_after_warning)
+            self.statusBar().showMessage(f"⚠ {msg}")
+            self.tray.update_status(f"⚠ {msg}")
+            QTimer.singleShot(5000, self._restore_status)
 
-    def _restore_status_after_warning(self):
-        if self._engine and self._engine.isRunning():
-            if self._engine._paused:
-                text = "일시정지"
-            else:
-                text = "실행 중"
+    def _on_running_changed(self, running):
+        self.tray.set_engine_running(running)
+
+    def _on_engine_stopped(self):
+        self.tray.update_status("대기 중")
+
+    def _restore_status(self):
+        if self.engine_ctrl.is_running:
+            text = "실행 중"
         else:
             text = "준비"
         self.statusBar().showMessage(text)
-        self.tab_control.update_status(text)
         self.tray.update_status(text)
 
-    def _save_config(self):
-        save_config(self.config)
-
     # ══════════════════════════════════════════════════════════════
-    #  잠금 감지 + 디스플레이 변경 감지
+    #  ADR-030: 잠금 감지 + ADR-031: 디스플레이 변경
     # ══════════════════════════════════════════════════════════════
 
     def _on_session_event(self, event):
@@ -492,10 +242,10 @@ class MainWindow(QMainWindow):
         turn_off_enabled = opts.get("turn_off_on_lock", True)
 
         if event == "lock":
-            if turn_off_enabled and self._engine and self._engine.isRunning():
+            if turn_off_enabled and self.engine_ctrl.is_running:
                 self._was_running_before_lock = True
-                self._lock_restart_mode = self.tab_control.current_mode
-                self._stop_engine()
+                self._lock_restart_mode = self.engine_ctrl.current_mode
+                self.engine_ctrl.stop_engine()
                 self.statusBar().showMessage("잠금 감지 — 엔진 중지")
 
         elif event == "unlock":
@@ -503,18 +253,42 @@ class MainWindow(QMainWindow):
                 self._was_running_before_lock = False
                 mode = self._lock_restart_mode or MODE_MIRROR
                 QTimer.singleShot(
-                    3000, lambda: self._start_engine(mode)
+                    3000, lambda: self.start_engine(mode)
                 )
                 self.statusBar().showMessage("잠금 해제 — 3초 후 재시작")
 
     def _on_display_change_settled(self):
-        if self._engine and self._engine.isRunning():
-            self._engine.on_display_changed()
-            self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")
+        """ADR-031: 1500ms 디바운스 후 디스플레이 변경 처리."""
+        self.engine_ctrl.on_display_changed()
+        self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")
 
     # ══════════════════════════════════════════════════════════════
-    #  창 닫기 / 종료
+    #  ADR-028: 단일 인스턴스 — 기존 창 복원
     # ══════════════════════════════════════════════════════════════
+
+    def nativeEvent(self, eventType, message):
+        try:
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            if msg.message == 0x8001:
+                self._show_window()
+                return True, 0
+        except Exception:
+            pass
+        return super().nativeEvent(eventType, message)
+
+    # ══════════════════════════════════════════════════════════════
+    #  창 표시 / 닫기 / 종료
+    # ══════════════════════════════════════════════════════════════
+
+    def _show_window(self):
+        self.show()
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def _quit(self):
+        self._force_quit = True
+        self.close()
 
     def closeEvent(self, event):
         if self._force_quit:
@@ -534,14 +308,8 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def _shutdown(self):
-        self._cleanup_engine()
-
-        self.tab_control.cleanup()
-        self.tab_color.cleanup()
-        self.tab_setup.cleanup()
-
+        self.engine_ctrl.cleanup()
         self.device_manager.cleanup()
-
         self.tray.cleanup()
         self.tray.hide()
 
@@ -552,7 +320,5 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.tab_control._apply_all_settings()
         save_config(self.config)
         QApplication.instance().quit()
-        

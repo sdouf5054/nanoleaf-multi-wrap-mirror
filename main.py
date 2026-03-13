@@ -1,83 +1,82 @@
 """
-Nanoleaf Screen Mirror — GUI 앱 진입점
+Nanoleaf Screen Mirror — GUI 앱 진입점 (PySide6)
 
 사용법:
     python main.py
     python main.py --startup   ← 트레이로 바로 시작 (창 숨김)
 
-High DPI 전략 (PyQt5 5.15):
-    1) SetProcessDpiAwareness(2) — Per-Monitor DPI Aware
-       → Windows가 모니터 이동 시 DPI 변경 이벤트를 앱에 전달
-    2) AA_EnableHighDpiScaling = False
-       → Qt 자동 스케일링 OFF (이중 스케일링 방지)
-    3) MainWindow에서 screenChanged 시그널을 감지해 수동으로
-       전역 폰트 크기 재설정 + 레이아웃 재조정
+[ADR-028] Named Mutex 단일 인스턴스 (KEEP)
+[ADR-029] PySide6 빌트인 High DPI 스케일링 (CHANGE → B)
+  - SetProcessDpiAwareness + Qt 자동 스케일링을 PySide6에 위임
+  - 수동 DPI 재조정 코드 40줄 제거
 """
 
 import sys
 import os
 import ctypes
-import json
 
-# === 1) pythonw.exe 스트림 보호 (stdout/stderr 없을 때 크래시 방지) ===
+# === 1) pythonw.exe 스트림 보호 ===
 if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w')
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
-# === 2) Windows Per-Monitor DPI Aware 설정 ===
-#   Per-Monitor(2)를 사용해야 screenChanged 시그널에서 실제 DPI를 읽을 수 있음.
-#   Qt 자동 스케일링은 끄므로 이중 스케일링 발생 안 함.
+# === 2) Windows Per-Monitor DPI Aware ===
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor DPI Aware
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     try:
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
 
-# === 3) 작업 디렉토리를 main.py 위치로 강제 설정 ===
+# === 3) 작업 디렉토리 설정 ===
 if getattr(sys, 'frozen', False):
     os.chdir(os.path.dirname(sys.executable))
 else:
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-# === 4) Windows 콘솔 창 숨기기 (python.exe로 실행해도 콘솔 안 보임) ===
+# === 4) 콘솔 창 숨기기 ===
 try:
-    ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
+    ctypes.windll.user32.ShowWindow(
+        ctypes.windll.kernel32.GetConsoleWindow(), 0
+    )
 except Exception:
     pass
 
-# === 5) Qt High DPI 설정 ===
-#   AA_EnableHighDpiScaling = False → Qt 자동 스케일링 OFF
-#   AA_UseHighDpiPixmaps = True → 고해상도 아이콘 사용
-#   Per-Monitor DPI Aware + Qt 스케일링 OFF = 이중 스케일링 없음
-#   DPI 변화는 MainWindow._on_screen_changed()에서 수동 처리
-from PyQt5.QtCore import Qt, QCoreApplication
-QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, False)
-QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+# === 5) PySide6 High DPI (ADR-029: 빌트인 스케일링 사용) ===
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QIcon
 
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QIcon
+# PySide6는 기본적으로 High DPI를 잘 지원함.
+# PassThrough로 설정하면 OS DPI 설정을 그대로 반영.
+QApplication.setHighDpiScaleFactorRoundingPolicy(
+    Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+)
+
 from core.config import load_config
 from ui.main_window import MainWindow
 
 
 def main():
-    # === 0) 중복 실행 방지 — Mutex로 기존 인스턴스 감지 후 창 복원 ===
-    mutex_name = "nanoleaf_mirror_singleton_mutex"
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+    # === 0) ADR-028: 단일 인스턴스 — Named Mutex ===
+    try:
+        mutex_name = "nanoleaf_mirror_singleton_mutex"
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+        if ctypes.windll.kernel32.GetLastError() == 183:
+            hwnd = ctypes.windll.user32.FindWindowW(
+                None, "Nanoleaf Screen Mirror"
+            )
+            if hwnd:
+                ctypes.windll.user32.PostMessageW(hwnd, 0x8001, 0, 0)
+            sys.exit(0)
+    except Exception:
+        pass  # Non-Windows: 단일 인스턴스 미적용
 
-    if ctypes.windll.kernel32.GetLastError() == 183:
-        hwnd = ctypes.windll.user32.FindWindowW(None, "Nanoleaf Screen Mirror")
-        if hwnd:
-            ctypes.windll.user32.PostMessageW(hwnd, 0x8001, 0, 0)
-        sys.exit(0)
-
-    # ★ --startup 인자 감지: 시작프로그램에서 실행 시 트레이로 바로 시작
     start_to_tray = "--startup" in sys.argv
 
-    # === 6) Windows에 독립된 앱으로 인식시키기 ===
+    # === 6) Windows 앱 ID ===
     try:
         myappid = 'NanoleafMirror'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
@@ -85,13 +84,10 @@ def main():
         pass
 
     app = QApplication(sys.argv)
-
-    # 마지막 창이 닫혀도 프로그램이 종료되지 않도록 설정 (트레이 대기용)
     app.setQuitOnLastWindowClosed(False)
-
     app.setStyle("Fusion")
 
-    # === 7) 프로그램 전체 아이콘 설정 ===
+    # === 7) 아이콘 ===
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
     else:
@@ -101,7 +97,7 @@ def main():
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
 
-    # === 8) 폰트 기본 크기 설정 ===
+    # === 8) 기본 폰트 ===
     font = app.font()
     font.setPointSize(10)
     app.setFont(font)
@@ -109,30 +105,27 @@ def main():
     config = load_config()
     window = MainWindow(config)
 
-    # === 9) 윈도우 크기 ===
+    # === 9) 윈도우 크기 + 화면 중앙 배치 ===
     window.resize(740, 840)
     window.setMinimumSize(600, 700)
 
-    # 화면 중앙에 배치
     screen = app.primaryScreen()
-    screen_geo = screen.availableGeometry()
-    x = (screen_geo.width() - window.width()) // 2
-    y = (screen_geo.height() - window.height()) // 2
-    window.move(max(0, x), max(0, y))
+    if screen:
+        screen_geo = screen.availableGeometry()
+        x = (screen_geo.width() - window.width()) // 2
+        y = (screen_geo.height() - window.height()) // 2
+        window.move(max(0, x), max(0, y))
 
-    # ★ --startup 모드: 창을 표시하지 않고 트레이에서만 실행
-    if start_to_tray:
-        pass
-    else:
+    if not start_to_tray:
         window.show()
 
-    # ★ 실행 시 자동 시작 — 저장된 기본 모드로 엔진 시작
+    # === 10) 자동 시작 ===
     if config.get("options", {}).get("auto_start_mirror", False):
         default_mode = config.get("options", {}).get("default_mode", "mirror")
-        from PyQt5.QtCore import QTimer
-        QTimer.singleShot(1000, lambda: window._start_engine(default_mode))
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1000, lambda: window.start_engine(default_mode))
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
