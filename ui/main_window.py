@@ -26,6 +26,7 @@ from core.engine_controller import EngineController
 from core.engine_params import MirrorParams
 from core.engine_utils import MODE_MIRROR
 from ui.tray import SystemTray
+from ui.tab_control import ControlTab
 
 # Windows 메시지 상수
 WM_WTSSESSION_CHANGE = 0x02B1
@@ -95,16 +96,25 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        # Phase 3: placeholder 탭들. Phase 4/5에서 실제 위젯으로 교체.
-        self.tab_control = _PlaceholderTab("🎛 컨트롤")
+        # Phase 4: 실제 ControlTab
+        self.tab_control = ControlTab(config, engine_ctrl=self.engine_ctrl)
+        self.tab_control.set_engine_ctrl(self.engine_ctrl)
+        self.tabs.addTab(self.tab_control, "🎛 컨트롤")
+
+        # Phase 5: placeholder 탭들
         self.tab_color = _PlaceholderTab("🎨 색상 보정")
         self.tab_setup = _PlaceholderTab("⚙ LED 설정")
         self.tab_options = _PlaceholderTab("🔧 옵션")
-
-        self.tabs.addTab(self.tab_control, "🎛 컨트롤")
         self.tabs.addTab(self.tab_color, "🎨 색상 보정")
         self.tabs.addTab(self.tab_setup, "⚙ LED 설정")
         self.tabs.addTab(self.tab_options, "🔧 옵션")
+
+        # ── ControlTab 시그널 연결 ──
+        self.tab_control.request_engine_start.connect(self.start_engine)
+        self.tab_control.request_engine_stop.connect(self.stop_engine)
+        self.tab_control.request_engine_pause.connect(self._toggle_pause)
+        self.tab_control.request_mode_switch.connect(self._switch_mode)
+        self.tab_control.config_applied.connect(self._save_config)
 
         # ── 상태바 ──
         self.statusBar().showMessage("준비")
@@ -146,6 +156,16 @@ class MainWindow(QMainWindow):
         ctrl.error.connect(self._on_error)
         ctrl.running_changed.connect(self._on_running_changed)
         ctrl.engine_stopped.connect(self._on_engine_stopped)
+
+        # EngineController → ControlTab (데이터 시그널)
+        ctrl.fps_updated.connect(lambda fps: self.tab_control.update_fps(fps)
+                                 if hasattr(self, 'tab_control') else None)
+        ctrl.energy_updated.connect(lambda b, m, h: self.tab_control.update_energy(b, m, h)
+                                    if hasattr(self, 'tab_control') else None)
+        ctrl.spectrum_updated.connect(lambda s: self.tab_control.update_spectrum(s)
+                                      if hasattr(self, 'tab_control') else None)
+        ctrl.screen_colors_updated.connect(lambda c: self.tab_control.update_preview_colors(c)
+                                           if hasattr(self, 'tab_control') else None)
 
     def _connect_tray_signals(self):
         """[ADR-039] 트레이 시그널 → MainWindow 슬롯."""
@@ -217,9 +237,31 @@ class MainWindow(QMainWindow):
 
     def _on_running_changed(self, running):
         self.tray.set_engine_running(running)
+        if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'set_running_state'):
+            self.tab_control.set_running_state(running)
 
     def _on_engine_stopped(self):
         self.tray.update_status("대기 중")
+        if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'update_fps'):
+            self.tab_control.update_fps(0)
+            self.tab_control.update_pause_button(False)
+
+    def _toggle_pause(self):
+        is_paused = self.engine_ctrl.toggle_pause()
+        if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'update_pause_button'):
+            self.tab_control.update_pause_button(is_paused)
+
+    def _switch_mode(self, new_mode):
+        if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'set_switching'):
+            self.tab_control.set_switching(True)
+        try:
+            self.engine_ctrl.switch_mode(new_mode)
+        finally:
+            if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'set_switching'):
+                self.tab_control.set_switching(False)
+
+    def _save_config(self):
+        save_config(self.config)
 
     def _restore_status(self):
         if self.engine_ctrl.is_running:
@@ -309,6 +351,8 @@ class MainWindow(QMainWindow):
 
     def _shutdown(self):
         self.engine_ctrl.cleanup()
+        if hasattr(self.tab_control, 'cleanup'):
+            self.tab_control.cleanup()
         self.device_manager.cleanup()
         self.tray.cleanup()
         self.tray.hide()
