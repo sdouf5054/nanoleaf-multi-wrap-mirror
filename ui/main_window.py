@@ -1,8 +1,9 @@
-"""메인 윈도우 — 탭 구조 + UnifiedEngine + 트레이 + 잠금 감지
+"""메인 윈도우 — 탭 구조 + UnifiedEngine + 트레이 + 잠금 감지 + DPI 재조정
 
-[변경] 하이브리드 캡처 통합
-- ScreenSampler 관련 코드 제거
-- 하이브리드 파라미터 전달 단순화
+[변경] Per-Monitor DPI 수동 재조정 추가
+- showEvent에서 screenChanged 시그널 연결
+- 모니터 이동 시 전역 폰트 + 위젯 크기 재조정
+- _base_font_size: 기준 폰트 크기 저장 (누적 방지)
 """
 
 import ctypes
@@ -11,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QTabWidget, QMessageBox, QSystemTrayIcon, QApplication
 )
 from PyQt5.QtCore import Qt, QAbstractNativeEventFilter, QTimer
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QFont
 
 from core.device_manager import DeviceManager
 from ui.tab_setup import SetupTab
@@ -58,6 +59,15 @@ class MainWindow(QMainWindow):
         self._engine = None
         self._force_quit = False
         self._has_shown_tray_message = False
+
+        # ── DPI 재조정용 상태 ──
+        self._base_font_size = 8.0   # main.py에서 설정한 기준 폰트 크기 (pt)
+        self._current_dpi_ratio = 1.4  # 현재 DPI / 96
+        self._dpi_connected = False    # screenChanged 연결 여부
+        self._dpi_timer = QTimer(self)
+        self._dpi_timer.setSingleShot(True)
+        self._dpi_timer.setInterval(200)  # 200ms 디바운스
+        self._dpi_timer.timeout.connect(self._apply_dpi_adjustment)
 
         self.setWindowTitle("Nanoleaf Screen Mirror")
         self.setMinimumSize(700, 780)
@@ -147,6 +157,77 @@ class MainWindow(QMainWindow):
         self._display_change_timer.setSingleShot(True)
         self._display_change_timer.setInterval(1500)
         self._display_change_timer.timeout.connect(self._on_display_change_settled)
+
+    # ══════════════════════════════════════════════════════════════
+    #  DPI 수동 재조정
+    # ══════════════════════════════════════════════════════════════
+
+    def showEvent(self, event):
+        """창이 처음 표시될 때 screenChanged 시그널 연결 + 초기 DPI 적용."""
+        super().showEvent(event)
+        if not self._dpi_connected:
+            handle = self.windowHandle()
+            if handle:
+                handle.screenChanged.connect(self._on_screen_changed)
+                self._dpi_connected = True
+                # 초기 DPI 적용
+                self._apply_dpi_adjustment()
+
+    def _on_screen_changed(self, screen):
+        """모니터 이동 감지 → 디바운스 후 DPI 재조정."""
+        self._dpi_timer.start()
+
+    def _apply_dpi_adjustment(self):
+        """현재 모니터의 DPI를 읽어 전역 폰트와 창 크기를 재조정.
+
+        System DPI Aware가 아닌 Per-Monitor DPI Aware 모드이므로,
+        screen.logicalDotsPerInchX()가 실제 모니터의 DPI를 반환함.
+        """
+        handle = self.windowHandle()
+        if not handle:
+            return
+        screen = handle.screen()
+        if not screen:
+            return
+
+        dpi = screen.logicalDotsPerInchX()
+        new_ratio = dpi / 96.0
+
+        # 변화가 미미하면 무시 (떨림 방지)
+        if abs(new_ratio - self._current_dpi_ratio) < 0.05:
+            return
+
+        old_ratio = self._current_dpi_ratio
+        self._current_dpi_ratio = new_ratio
+
+        # ── 1) 전역 폰트 크기 재설정 (기준값 × DPI 비율) ──
+        app = QApplication.instance()
+        new_font = QFont(app.font())
+        new_font.setPointSizeF(self._base_font_size * new_ratio)
+        app.setFont(new_font)
+
+        # ── 2) 창 크기 비례 조정 ──
+        scale = new_ratio / old_ratio if old_ratio > 0 else 1.0
+        new_w = int(self.width() * scale)
+        new_h = int(self.height() * scale)
+        self.resize(new_w, new_h)
+
+        # ── 3) 최소 크기도 비례 조정 ──
+        min_w = int(600 * new_ratio)
+        min_h = int(700 * new_ratio)
+        self.setMinimumSize(min_w, min_h)
+
+        # ── 4) 모든 위젯에 폰트 전파 + 레이아웃 재계산 강제 ──
+        for widget in self.findChildren(QApplication.instance().__class__):
+            pass  # findChildren은 QWidget 기준
+        # 전체 위젯 트리에 스타일 재적용
+        self.setStyleSheet(self.styleSheet())
+
+        # 상태바 알림
+        pct = int(new_ratio * 100)
+        self.statusBar().showMessage(
+            f"디스플레이 변경 감지 — DPI {int(dpi)} ({pct}%) 적용됨", 3000
+        )
 
     def nativeEvent(self, eventType, message):
         try:
@@ -474,3 +555,4 @@ class MainWindow(QMainWindow):
         self.tab_control._apply_all_settings()
         save_config(self.config)
         QApplication.instance().quit()
+        

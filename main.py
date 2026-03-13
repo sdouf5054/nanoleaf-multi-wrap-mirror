@@ -4,11 +4,20 @@ Nanoleaf Screen Mirror — GUI 앱 진입점
 사용법:
     python main.py
     python main.py --startup   ← 트레이로 바로 시작 (창 숨김)
+
+High DPI 전략 (PyQt5 5.15):
+    1) SetProcessDpiAwareness(2) — Per-Monitor DPI Aware
+       → Windows가 모니터 이동 시 DPI 변경 이벤트를 앱에 전달
+    2) AA_EnableHighDpiScaling = False
+       → Qt 자동 스케일링 OFF (이중 스케일링 방지)
+    3) MainWindow에서 screenChanged 시그널을 감지해 수동으로
+       전역 폰트 크기 재설정 + 레이아웃 재조정
 """
 
 import sys
 import os
 import ctypes
+import json
 
 # === 1) pythonw.exe 스트림 보호 (stdout/stderr 없을 때 크래시 방지) ===
 if sys.stdout is None:
@@ -16,9 +25,11 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
-# === 2) Windows DPI Awareness 설정 (QApplication 생성 전, 최우선) ===
+# === 2) Windows Per-Monitor DPI Aware 설정 ===
+#   Per-Monitor(2)를 사용해야 screenChanged 시그널에서 실제 DPI를 읽을 수 있음.
+#   Qt 자동 스케일링은 끄므로 이중 스케일링 발생 안 함.
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)  # System DPI Aware
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor DPI Aware
 except Exception:
     try:
         ctypes.windll.user32.SetProcessDPIAware()
@@ -37,7 +48,11 @@ try:
 except Exception:
     pass
 
-# === 5) Qt High DPI 설정 (QApplication 생성 전) ===
+# === 5) Qt High DPI 설정 ===
+#   AA_EnableHighDpiScaling = False → Qt 자동 스케일링 OFF
+#   AA_UseHighDpiPixmaps = True → 고해상도 아이콘 사용
+#   Per-Monitor DPI Aware + Qt 스케일링 OFF = 이중 스케일링 없음
+#   DPI 변화는 MainWindow._on_screen_changed()에서 수동 처리
 from PyQt5.QtCore import Qt, QCoreApplication
 QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, False)
 QCoreApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
