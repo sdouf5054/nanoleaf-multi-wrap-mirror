@@ -27,6 +27,9 @@ from core.engine_params import MirrorParams
 from core.engine_utils import MODE_MIRROR
 from ui.tray import SystemTray
 from ui.tab_control import ControlTab
+from ui.tab_color import ColorTab
+from ui.tab_setup import SetupTab
+from ui.tab_options import OptionsTab
 
 # Windows 메시지 상수
 WM_WTSSESSION_CHANGE = 0x02B1
@@ -56,18 +59,6 @@ class SessionEventFilter(QAbstractNativeEventFilter):
             except Exception:
                 pass
         return False, 0
-
-
-class _PlaceholderTab(QWidget):
-    """Phase 4/5에서 실제 위젯으로 교체될 placeholder 탭."""
-
-    def __init__(self, name, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        label = QLabel(f"{name}\n(Phase 4/5에서 구현 예정)")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("color: #888; font-size: 14px;")
-        layout.addWidget(label)
 
 
 class MainWindow(QMainWindow):
@@ -101,13 +92,17 @@ class MainWindow(QMainWindow):
         self.tab_control.set_engine_ctrl(self.engine_ctrl)
         self.tabs.addTab(self.tab_control, "🎛 컨트롤")
 
-        # Phase 5: placeholder 탭들
-        self.tab_color = _PlaceholderTab("🎨 색상 보정")
-        self.tab_setup = _PlaceholderTab("⚙ LED 설정")
-        self.tab_options = _PlaceholderTab("🔧 옵션")
+        # Phase 5: 실제 탭들
+        self.tab_color = ColorTab(config, device_manager=self.device_manager)
+        self.tab_setup = SetupTab(config, device_manager=self.device_manager)
+        self.tab_options = OptionsTab(config, main_window=self)
         self.tabs.addTab(self.tab_color, "🎨 색상 보정")
         self.tabs.addTab(self.tab_setup, "⚙ LED 설정")
         self.tabs.addTab(self.tab_options, "🔧 옵션")
+
+        # setup/color 탭의 미러링 중지 요청
+        self.tab_color.request_mirror_stop.connect(self._stop_engine_for_tab)
+        self.tab_setup.request_mirror_stop.connect(self._stop_engine_for_tab)
 
         # ── ControlTab 시그널 연결 ──
         self.tab_control.request_engine_start.connect(self.start_engine)
@@ -186,6 +181,13 @@ class MainWindow(QMainWindow):
 
     def stop_engine(self):
         self.engine_ctrl.stop_engine()
+
+    def _stop_engine_for_tab(self):
+        """setup/color 탭이 USB 디바이스를 사용하기 위해 엔진 중지 요청."""
+        self.engine_ctrl.stop_engine_sync()
+        if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'set_running_state'):
+            self.tab_control.set_running_state(False)
+            self.tab_control.update_status("설정 모드 진입으로 중지됨")
 
     def _toggle_engine(self):
         """트레이 on/off 토글."""
@@ -353,6 +355,10 @@ class MainWindow(QMainWindow):
         self.engine_ctrl.cleanup()
         if hasattr(self.tab_control, 'cleanup'):
             self.tab_control.cleanup()
+        if hasattr(self.tab_color, 'cleanup'):
+            self.tab_color.cleanup()
+        if hasattr(self.tab_setup, 'cleanup'):
+            self.tab_setup.cleanup()
         self.device_manager.cleanup()
         self.tray.cleanup()
         self.tray.hide()
