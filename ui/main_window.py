@@ -5,17 +5,13 @@
 [ADR-030] WTSRegisterSessionNotification + NativeEventFilter (KEEP)
 [ADR-031] Display change debouncing 1500ms (KEEP)
 [ADR-039] 트레이 밝기를 시그널로 분리 — 위젯 직접 접근 제거
-
-Phase 3에서는 탭 내부 위젯은 placeholder로 둡니다.
-Phase 4/5에서 실제 패널을 구현합니다.
 """
 
 import ctypes
 import ctypes.wintypes
 
 from PySide6.QtWidgets import (
-    QMainWindow, QTabWidget, QWidget, QVBoxLayout, QLabel,
-    QMessageBox, QSystemTrayIcon, QApplication,
+    QMainWindow, QTabWidget, QMessageBox, QSystemTrayIcon, QApplication,
 )
 from PySide6.QtCore import Qt, QTimer, QAbstractNativeEventFilter
 from PySide6.QtGui import QIcon
