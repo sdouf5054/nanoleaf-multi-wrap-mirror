@@ -64,12 +64,12 @@ class SystemTray(QSystemTrayIcon):
         menu.addAction(self.status_action)
         menu.addSeparator()
 
-        self.onoff_action = QAction("▶ 엔진 시작", menu)
+        self.onoff_action = QAction("엔진 시작", menu)
         self.onoff_action.triggered.connect(self.toggle_requested.emit)
         menu.addAction(self.onoff_action)
         menu.addSeparator()
 
-        bright_menu = QMenu("💡 밝기", menu)
+        bright_menu = QMenu("밝기", menu)
         for pct in (25, 50, 75, 100):
             action = QAction(f"{pct}%", bright_menu)
             action.triggered.connect(
@@ -79,12 +79,12 @@ class SystemTray(QSystemTrayIcon):
         menu.addMenu(bright_menu)
         menu.addSeparator()
 
-        show_action = QAction("⚙ 설정 열기", menu)
+        show_action = QAction("설정 열기", menu)
         show_action.triggered.connect(self.show_window_requested.emit)
         menu.addAction(show_action)
         menu.addSeparator()
 
-        quit_action = QAction("❌ 종료", menu)
+        quit_action = QAction("종료", menu)
         quit_action.triggered.connect(self.quit_requested.emit)
         menu.addAction(quit_action)
 
@@ -142,9 +142,9 @@ class SystemTray(QSystemTrayIcon):
 
     def set_engine_running(self, running):
         if running:
-            self.onoff_action.setText("⏹ 엔진 중지")
+            self.onoff_action.setText("엔진 중지")
         else:
-            self.onoff_action.setText("▶ 엔진 시작")
+            self.onoff_action.setText("엔진 시작")
 
     # ── 이벤트 ───────────────────────────────────────────────────
 
