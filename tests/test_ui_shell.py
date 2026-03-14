@@ -46,10 +46,10 @@ class TestMainWindowStructure(unittest.TestCase):
 
     def test_tab_names(self):
         names = [self.win.tabs.tabText(i) for i in range(4)]
-        self.assertIn("🎛 컨트롤", names)
-        self.assertIn("🎨 색상 보정", names)
-        self.assertIn("⚙ LED 설정", names)
-        self.assertIn("🔧 옵션", names)
+        self.assertIn("컨트롤", names)
+        self.assertIn("색상 보정", names)
+        self.assertIn("LED 설정", names)
+        self.assertIn("옵션", names)
 
     def test_window_title(self):
         self.assertEqual(self.win.windowTitle(), "Nanoleaf Screen Mirror")

@@ -51,7 +51,7 @@ class HybridPanel(QWidget):
         scl.addLayout(mbr); layout.addWidget(sg)
 
         mg = QGroupBox("비주얼라이저 모드"); hml = QVBoxLayout(mg); hml.setContentsMargins(6, 16, 6, 4)
-        self.combo_mode = QComboBox(); self.combo_mode.addItems(["🔴 Bass 반응", "🌈 Spectrum", "🔊 Bass Detail"])
+        self.combo_mode = QComboBox(); self.combo_mode.addItems(["Bass 반응", "Spectrum", "Bass Detail"])
         self.combo_mode.currentIndexChanged.connect(self._on_mode_changed); hml.addWidget(self.combo_mode); layout.addWidget(mg)
 
         pg = QGroupBox("파라미터"); hpl = QVBoxLayout(pg); hpl.setSpacing(3); hpl.setContentsMargins(6, 16, 6, 4)

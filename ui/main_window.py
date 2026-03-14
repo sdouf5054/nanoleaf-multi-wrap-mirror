@@ -86,15 +86,15 @@ class MainWindow(QMainWindow):
         # Phase 4: 실제 ControlTab
         self.tab_control = ControlTab(config, engine_ctrl=self.engine_ctrl)
         self.tab_control.set_engine_ctrl(self.engine_ctrl)
-        self.tabs.addTab(self.tab_control, "🎛 컨트롤")
+        self.tabs.addTab(self.tab_control, "컨트롤")
 
         # Phase 5: 실제 탭들
         self.tab_color = ColorTab(config, device_manager=self.device_manager)
         self.tab_setup = SetupTab(config, device_manager=self.device_manager)
         self.tab_options = OptionsTab(config, main_window=self)
-        self.tabs.addTab(self.tab_color, "🎨 색상 보정")
-        self.tabs.addTab(self.tab_setup, "⚙ LED 설정")
-        self.tabs.addTab(self.tab_options, "🔧 옵션")
+        self.tabs.addTab(self.tab_color, "색상 보정")
+        self.tabs.addTab(self.tab_setup, "LED 설정")
+        self.tabs.addTab(self.tab_options, "옵션")
 
         # setup/color 탭의 미러링 중지 요청
         self.tab_color.request_mirror_stop.connect(self._stop_engine_for_tab)

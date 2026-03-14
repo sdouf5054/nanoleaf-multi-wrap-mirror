@@ -129,12 +129,12 @@ class ControlTab(QWidget):
         mg = QGroupBox("모드"); ml = QVBoxLayout(mg); ml.setSpacing(6)
         btn_row = QHBoxLayout()
         self._mode_buttons = QButtonGroup(self); self._mode_buttons.setExclusive(True)
-        for mode_key, label in [(MODE_MIRROR, "🖥  미러링"), (MODE_HYBRID, "🎵+🖥  하이브리드"), (MODE_AUDIO, "🎵  오디오")]:
+        for mode_key, label in [(MODE_MIRROR, "🖥  미러링"), (MODE_HYBRID, "하이브리드"), (MODE_AUDIO, "🎵  오디오")]:
             btn = _ModeButton(label); self._mode_buttons.addButton(btn, _MODE_INDEX[mode_key]); btn_row.addWidget(btn)
         self._mode_buttons.button(0).setChecked(True)
         self._mode_buttons.idClicked.connect(self._on_mode_changed); ml.addLayout(btn_row)
         dr = QHBoxLayout(); dr.addStretch()
-        self.btn_set_default = QPushButton("⭐ 현재 모드를 기본값으로 설정"); self.btn_set_default.setFixedHeight(24)
+        self.btn_set_default = QPushButton("현재 모드를 기본값으로 설정"); self.btn_set_default.setFixedHeight(24)
         self.btn_set_default.setStyleSheet("QPushButton{background:#444;color:#bbb;font-size:11px;border-radius:4px;padding:2px 10px;}QPushButton:hover{background:#555;color:#eee;}")
         self.btn_set_default.clicked.connect(self._on_set_default); dr.addWidget(self.btn_set_default); dr.addStretch(); ml.addLayout(dr)
         parent.addWidget(mg)
@@ -190,7 +190,7 @@ class ControlTab(QWidget):
     def _build_actions(self, parent):
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFrameShadow(QFrame.Shadow.Sunken); parent.addWidget(line)
         al = QHBoxLayout(); al.addStretch()
-        self.btn_apply = QPushButton("💾 적용"); self.btn_apply.setMinimumHeight(28); self.btn_apply.setMinimumWidth(100)
+        self.btn_apply = QPushButton("💾 저장"); self.btn_apply.setMinimumHeight(28); self.btn_apply.setMinimumWidth(100)
         self.btn_apply.setStyleSheet("QPushButton{background:#2e86c1;color:white;font-size:13px;font-weight:bold;border-radius:6px;}QPushButton:hover{background:#3498db;}")
         self.btn_apply.clicked.connect(self._on_apply); al.addWidget(self.btn_apply)
         self.btn_revert = QPushButton("↩ 되돌리기"); self.btn_revert.setMinimumHeight(28); self.btn_revert.setMinimumWidth(100)

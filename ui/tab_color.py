@@ -75,7 +75,7 @@ class ColorTab(QWidget):
 
         # 연결 상태
         conn_layout = QHBoxLayout()
-        self.btn_connect = QPushButton("🔌 LED 연결")
+        self.btn_connect = QPushButton("LED 연결")
         self.btn_connect.clicked.connect(self._toggle_connection)
         conn_layout.addWidget(self.btn_connect)
         self.conn_label = QLabel("연결 안 됨")
@@ -159,12 +159,12 @@ class ColorTab(QWidget):
     def _set_connected_ui(self):
         self.conn_label.setText("연결됨 ✅")
         self.conn_label.setStyleSheet("color: #2d8c46;")
-        self.btn_connect.setText("🔌 연결 해제")
+        self.btn_connect.setText("연결 해제")
 
     def _set_disconnected_ui(self):
         self.conn_label.setText("연결 안 됨")
         self.conn_label.setStyleSheet("color: #c0392b;")
-        self.btn_connect.setText("🔌 LED 연결")
+        self.btn_connect.setText("LED 연결")
 
     def _on_force_released(self, prev_owner):
         if prev_owner == _OWNER:

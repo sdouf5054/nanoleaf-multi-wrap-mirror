@@ -14,7 +14,7 @@ from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
 _INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail"}
 _MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2}
 _COLOR_PRESETS = [
-    ("🌈 무지개", None, None, None), ("핑크/마젠타", 255, 0, 80), ("빨강", 255, 30, 0),
+    ("무지개", None, None, None), ("핑크/마젠타", 255, 0, 80), ("빨강", 255, 30, 0),
     ("주황", 255, 120, 0), ("노랑", 255, 220, 0), ("초록", 0, 255, 80),
     ("시안", 0, 220, 255), ("파랑", 30, 0, 255), ("보라", 150, 0, 255), ("흰색", 255, 255, 255),
 ]
@@ -61,7 +61,7 @@ class AudioPanel(QWidget):
             pg.addWidget(btn, i // 5, i % 5)
         cl.addLayout(pg)
         cr = QHBoxLayout()
-        btn_custom = QPushButton("🎨 커스텀"); btn_custom.clicked.connect(self._pick_custom_color); cr.addWidget(btn_custom)
+        btn_custom = QPushButton("커스텀"); btn_custom.clicked.connect(self._pick_custom_color); cr.addWidget(btn_custom)
         self.color_preview = QFrame(); self.color_preview.setFixedSize(40, 26); self._update_color_preview(); cr.addWidget(self.color_preview); cr.addStretch()
         cl.addLayout(cr)
         ambr = QHBoxLayout(); ambr.addWidget(QLabel("최소 밝기:"))
@@ -75,7 +75,7 @@ class AudioPanel(QWidget):
         # 비주얼라이저 모드
         mg = QGroupBox("비주얼라이저 모드"); ml = QVBoxLayout(mg)
         self.combo_mode = QComboBox()
-        self.combo_mode.addItems(["🔴 Bass 반응 — 저음 기반 전체 밝기", "🌈 Spectrum — 16밴드 주파수 매핑", "🔊 Bass Detail — 저역 세밀 16밴드"])
+        self.combo_mode.addItems(["Bass 반응 — 저음 기반 전체 밝기", "Spectrum — 16밴드 주파수 매핑", "Bass Detail — 저역 세밀 16밴드"])
         self.combo_mode.currentIndexChanged.connect(self._on_mode_changed); ml.addWidget(self.combo_mode); layout.addWidget(mg)
 
         # 파라미터

@@ -93,7 +93,7 @@ class SetupTab(QWidget):
 
         # 연결
         conn_layout = QHBoxLayout()
-        self.btn_connect = QPushButton("🔌 LED 연결"); self.btn_connect.clicked.connect(self._toggle_connection); conn_layout.addWidget(self.btn_connect)
+        self.btn_connect = QPushButton("LED 연결"); self.btn_connect.clicked.connect(self._toggle_connection); conn_layout.addWidget(self.btn_connect)
         self.conn_label = QLabel("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); conn_layout.addWidget(self.conn_label); conn_layout.addStretch()
         layout.addLayout(conn_layout)
 
@@ -165,9 +165,9 @@ class SetupTab(QWidget):
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
     def _set_connected_ui(self):
-        self.conn_label.setText("연결됨 ✅"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("🔌 연결 해제")
+        self.conn_label.setText("연결됨 ✅"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
     def _set_disconnected_ui(self):
-        self.conn_label.setText("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); self.btn_connect.setText("🔌 LED 연결")
+        self.conn_label.setText("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); self.btn_connect.setText("LED 연결")
 
     def _on_force_released(self, prev_owner):
         if prev_owner == _OWNER: self._stop_scan(); self._set_disconnected_ui()
