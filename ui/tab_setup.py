@@ -137,7 +137,7 @@ class SetupTab(QWidget):
         scan_desc = QLabel("LED를 순차 점등하면서 각 코너의 LED 번호를 기록합니다."); scan_desc.setWordWrap(True); scan_layout.addWidget(scan_desc)
         ctrl_layout = QHBoxLayout()
         self.btn_scan_start = QPushButton("▶ 자동 스캔"); self.btn_scan_start.clicked.connect(self._start_auto_scan); ctrl_layout.addWidget(self.btn_scan_start)
-        self.btn_manual = QPushButton("🖐 수동 모드"); self.btn_manual.clicked.connect(self._start_manual_mode); ctrl_layout.addWidget(self.btn_manual)
+        self.btn_manual = QPushButton("수동 모드"); self.btn_manual.clicked.connect(self._start_manual_mode); ctrl_layout.addWidget(self.btn_manual)
         self.btn_prev = QPushButton("◀"); self.btn_prev.setFixedWidth(50); self.btn_prev.clicked.connect(self._step_backward); self.btn_prev.setEnabled(False); ctrl_layout.addWidget(self.btn_prev)
         self.btn_next = QPushButton("▶"); self.btn_next.setFixedWidth(50); self.btn_next.clicked.connect(self._step_forward); self.btn_next.setEnabled(False); ctrl_layout.addWidget(self.btn_next)
         self.btn_scan_stop = QPushButton("⏹ 중지"); self.btn_scan_stop.clicked.connect(self._stop_scan); self.btn_scan_stop.setEnabled(False); ctrl_layout.addWidget(self.btn_scan_stop)
@@ -199,7 +199,7 @@ class SetupTab(QWidget):
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
     def _set_connected_ui(self):
-        self.conn_label.setText("연결됨 ✅"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
+        self.conn_label.setText("연결됨"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
     def _set_disconnected_ui(self):
         self.conn_label.setText("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); self.btn_connect.setText("LED 연결")
 

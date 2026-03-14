@@ -175,7 +175,7 @@ class ColorTab(QWidget):
         layout.addLayout(btn_layout)
 
     def _set_connected_ui(self):
-        self.conn_label.setText("연결됨 ✅")
+        self.conn_label.setText("연결됨")
         self.conn_label.setStyleSheet("color: #2d8c46;")
         self.btn_connect.setText("연결 해제")
 
