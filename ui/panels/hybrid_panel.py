@@ -1,4 +1,9 @@
-"""하이브리드 모드 패널 — 에너지 레벨 + 화면 연동 + 오디오 파라미터."""
+"""하이브리드 모드 패널 — 에너지 레벨 + 화면 연동 + 오디오 파라미터.
+
+[ADR-040] AudioPanel ↔ HybridPanel 공통 섹션 마진/스페이싱 통일.
+[ADR-041] 비주얼라이저 모드 + 파라미터를 "오디오 반응" 하나로 통합.
+         콤보 항목·힌트 텍스트를 AudioPanel과 동일하게 유지.
+"""
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
@@ -18,6 +23,19 @@ _ZONE_OPTIONS = [
     (16, "16구역"), (32, "32구역"), (N_ZONES_PER_LED, "LED별 개별 (미러링)"),
 ]
 
+# ── [ADR-040] 공통 레이아웃 상수 (AudioPanel과 동일) ──
+_PANEL_MARGINS = (0, 2, 0, 2)
+_PANEL_SPACING = 4
+_GROUP_MARGINS = (6, 16, 6, 4)
+_GROUP_SPACING = 3
+
+# ── [ADR-041] 비주얼라이저 모드 콤보 항목 (AudioPanel과 동일) ──
+_VISUALIZER_MODE_ITEMS = [
+    "Bass 반응 — 저음 기반 전체 밝기",
+    "Spectrum — 16밴드 주파수 매핑",
+    "Bass Detail — 저역 세밀 16밴드",
+]
+
 
 class HybridPanel(QWidget):
     hybrid_params_changed = Signal(dict)
@@ -28,17 +46,30 @@ class HybridPanel(QWidget):
         self._build_ui(); self.load_from_config()
 
     def _build_ui(self):
-        layout = QVBoxLayout(self); layout.setContentsMargins(0, 2, 0, 2); layout.setSpacing(4)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(*_PANEL_MARGINS)
+        layout.setSpacing(_PANEL_SPACING)
 
-        eg = QGroupBox("에너지 레벨"); hel = QVBoxLayout(eg); hel.setSpacing(3); hel.setContentsMargins(6, 16, 6, 4)
+        # ── 에너지 레벨 — AudioPanel과 동일한 구성 ──
+        eg = QGroupBox("에너지 레벨")
+        hel = QVBoxLayout(eg)
+        hel.setSpacing(_GROUP_SPACING)
+        hel.setContentsMargins(*_GROUP_MARGINS)
         heg = QGridLayout()
         self.bar_bass = self._make_bar(heg, 0, "Bass", "#e74c3c")
         self.bar_mid = self._make_bar(heg, 1, "Mid", "#27ae60")
         self.bar_high = self._make_bar(heg, 2, "High", "#3498db")
-        hel.addLayout(heg); hel.addWidget(QLabel("스펙트럼 (16밴드)"))
-        self.spectrum_widget = SpectrumWidget(16); hel.addWidget(self.spectrum_widget); layout.addWidget(eg)
+        hel.addLayout(heg)
+        hel.addWidget(QLabel("스펙트럼 (16밴드)"))
+        self.spectrum_widget = SpectrumWidget(16)
+        hel.addWidget(self.spectrum_widget)
+        layout.addWidget(eg)
 
-        sg = QGroupBox("화면 연동"); scl = QVBoxLayout(sg); scl.setSpacing(3); scl.setContentsMargins(6, 16, 6, 4)
+        # ── 화면 연동 ──
+        sg = QGroupBox("화면 연동")
+        scl = QVBoxLayout(sg)
+        scl.setSpacing(_GROUP_SPACING)
+        scl.setContentsMargins(*_GROUP_MARGINS)
         zcr = QHBoxLayout(); zcr.addWidget(QLabel("구역 수:"))
         self.combo_zone_count = QComboBox()
         for n, label in _ZONE_OPTIONS: self.combo_zone_count.addItem(label, n)
@@ -50,12 +81,34 @@ class HybridPanel(QWidget):
         self.lbl_min_brightness.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); mbr.addWidget(self.lbl_min_brightness)
         scl.addLayout(mbr); layout.addWidget(sg)
 
-        mg = QGroupBox("비주얼라이저 모드"); hml = QVBoxLayout(mg); hml.setContentsMargins(6, 16, 6, 4)
-        self.combo_mode = QComboBox(); self.combo_mode.addItems(["Bass 반응", "Spectrum", "Bass Detail"])
-        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed); hml.addWidget(self.combo_mode); layout.addWidget(mg)
+        # ── 오디오 반응 (비주얼라이저 모드 + 파라미터 통합) ──
+        ag = QGroupBox("오디오 반응")
+        al = QVBoxLayout(ag)
+        al.setSpacing(_GROUP_SPACING)
+        al.setContentsMargins(*_GROUP_MARGINS)
 
-        pg = QGroupBox("파라미터"); hpl = QVBoxLayout(pg); hpl.setSpacing(3); hpl.setContentsMargins(6, 16, 6, 4)
-        self.param_widget = AudioParamWidget(); self.param_widget.params_changed.connect(self._on_changed); hpl.addWidget(self.param_widget); layout.addWidget(pg)
+        # 비주얼라이저 모드
+        mr = QHBoxLayout()
+        mr.addWidget(QLabel("모드:"))
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(_VISUALIZER_MODE_ITEMS)
+        self.combo_mode.currentIndexChanged.connect(self._on_mode_changed)
+        mr.addWidget(self.combo_mode)
+        mr.addStretch()
+        al.addLayout(mr)
+
+        # 파라미터
+        self.param_widget = AudioParamWidget()
+        self.param_widget.params_changed.connect(self._on_changed)
+        al.addWidget(self.param_widget)
+
+        # 힌트 (AudioPanel과 동일)
+        ht = QLabel("Attack ↑ = 빠르게 반응  |  Release ↑ = 긴 잔향")
+        ht.setStyleSheet("color:#888;font-size:10px;")
+        ht.setWordWrap(True)
+        al.addWidget(ht)
+
+        layout.addWidget(ag)
 
     @staticmethod
     def _make_bar(grid, row, name, color):

@@ -1,8 +1,12 @@
-"""미러링 모드 패널 — 구역 수, 밝기/스무딩, 감쇠/페널티."""
+"""미러링 모드 패널 — 구역 수, 밝기/스무딩, 감쇠/페널티를 단일 그룹으로 통합.
+
+[ADR-040] 공통 레이아웃 상수 통일.
+[ADR-041] 구역 수 + 밝기/스무딩 + 감쇠/페널티를 "미러링 설정" 하나로 통합.
+"""
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
-    QComboBox, QSlider, QDoubleSpinBox, QCheckBox, QGridLayout,
+    QComboBox, QSlider, QDoubleSpinBox, QCheckBox, QGridLayout, QFrame,
 )
 from PySide6.QtCore import Qt, Signal
 from core.engine_utils import N_ZONES_PER_LED
@@ -13,6 +17,12 @@ _ZONE_OPTIONS = [
     (16, "16구역"), (32, "32구역"),
     (N_ZONES_PER_LED, "LED별 개별 (미러링)"),
 ]
+
+# ── [ADR-040] 공통 레이아웃 상수 ──
+_PANEL_MARGINS = (0, 2, 0, 2)
+_PANEL_SPACING = 4
+_GROUP_MARGINS = (6, 16, 6, 4)
+_GROUP_SPACING = 3
 
 
 class MirrorPanel(QWidget):
@@ -31,8 +41,14 @@ class MirrorPanel(QWidget):
     def _build_ui(self):
         mirror_cfg = self._config.get("mirror", {})
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(2)
+        layout.setContentsMargins(*_PANEL_MARGINS)
+        layout.setSpacing(_PANEL_SPACING)
+
+        # ── 미러링 설정 (단일 그룹) ──
+        grp = QGroupBox("미러링 설정")
+        gl = QVBoxLayout(grp)
+        gl.setSpacing(_GROUP_SPACING)
+        gl.setContentsMargins(*_GROUP_MARGINS)
 
         # 구역 수
         zone_row = QHBoxLayout()
@@ -45,14 +61,15 @@ class MirrorPanel(QWidget):
         self.combo_zone_count.currentIndexChanged.connect(self._on_zone_count_changed)
         zone_row.addWidget(self.combo_zone_count)
         zone_row.addStretch()
-        layout.addLayout(zone_row)
+        gl.addLayout(zone_row)
 
-        # 밝기 + 스무딩
-        ctrl_group = QGroupBox("밝기 / 스무딩")
-        cl = QVBoxLayout(ctrl_group)
-        cl.setSpacing(2)
-        cl.setContentsMargins(6, 14, 6, 2)
+        # ── 구분선 ──
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
+        gl.addWidget(sep1)
 
+        # 밝기
         bright_row = QHBoxLayout()
         bright_row.addWidget(QLabel("밝기:"))
         self.brightness_slider = QSlider(Qt.Orientation.Horizontal)
@@ -64,8 +81,9 @@ class MirrorPanel(QWidget):
         self.brightness_label.setMinimumWidth(35)
         self.brightness_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         bright_row.addWidget(self.brightness_label)
-        cl.addLayout(bright_row)
+        gl.addLayout(bright_row)
 
+        # 스무딩
         smooth_row = QHBoxLayout()
         self.chk_smoothing = QCheckBox("스무딩")
         self.chk_smoothing.setChecked(True)
@@ -79,15 +97,15 @@ class MirrorPanel(QWidget):
         self.spin_smoothing.valueChanged.connect(self.smoothing_factor_changed.emit)
         smooth_row.addWidget(self.spin_smoothing)
         smooth_row.addStretch()
-        cl.addLayout(smooth_row)
-        layout.addWidget(ctrl_group)
+        gl.addLayout(smooth_row)
+
+        # ── 구분선 ──
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setFrameShadow(QFrame.Shadow.Sunken)
+        gl.addWidget(sep2)
 
         # 감쇠 / 페널티
-        decay_group = QGroupBox("감쇠 / 타원 페널티")
-        dl = QVBoxLayout(decay_group)
-        dl.setSpacing(3)
-        dl.setContentsMargins(6, 16, 6, 4)
-
         global_row = QHBoxLayout()
         global_row.addWidget(QLabel("감쇠 반경:"))
         self.spin_decay = QDoubleSpinBox()
@@ -102,7 +120,7 @@ class MirrorPanel(QWidget):
         self.spin_penalty.valueChanged.connect(lambda _: self.layout_params_changed.emit())
         global_row.addWidget(self.spin_penalty)
         global_row.addStretch()
-        dl.addLayout(global_row)
+        gl.addLayout(global_row)
 
         per_decay = mirror_cfg.get("decay_radius_per_side", {})
         per_penalty = mirror_cfg.get("parallel_penalty_per_side", {})
@@ -110,7 +128,7 @@ class MirrorPanel(QWidget):
         self.chk_per_side = QCheckBox("변별 값 사용")
         self.chk_per_side.setChecked(has_per_side)
         self.chk_per_side.stateChanged.connect(lambda _: self.layout_params_changed.emit())
-        dl.addWidget(self.chk_per_side)
+        gl.addWidget(self.chk_per_side)
 
         per_side_grid = QGridLayout(); per_side_grid.setSpacing(2)
         sides = ["top", "bottom", "left", "right"]
@@ -132,8 +150,9 @@ class MirrorPanel(QWidget):
         self.per_side_widget = QWidget(); self.per_side_widget.setLayout(per_side_grid)
         self.per_side_widget.setVisible(has_per_side)
         self.chk_per_side.stateChanged.connect(lambda s: self.per_side_widget.setVisible(bool(s)))
-        dl.addWidget(self.per_side_widget)
-        layout.addWidget(decay_group)
+        gl.addWidget(self.per_side_widget)
+
+        layout.addWidget(grp)
 
     def _on_brightness_changed(self, value):
         self.brightness_label.setText(f"{value}%")

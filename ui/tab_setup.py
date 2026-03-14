@@ -165,7 +165,7 @@ class SetupTab(QWidget):
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
     def _set_connected_ui(self):
-        self.conn_label.setText("연결됨 ✅"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
+        self.conn_label.setText("연결됨"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
     def _set_disconnected_ui(self):
         self.conn_label.setText("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); self.btn_connect.setText("LED 연결")
 

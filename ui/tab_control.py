@@ -2,6 +2,7 @@
 
 [ADR-019] EngineController를 통한 파라미터 전달.
 [ADR-021] MirrorParams/AudioParams typed dataclass로 통일.
+[ADR-040] 모드 전환 시 공통 섹션(상태, 모드, 프리뷰) 크기 고정 — 통일성 확보.
 """
 
 import os
@@ -39,7 +40,7 @@ class _NoScrollFilter(QObject):
 class _ModeButton(QPushButton):
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
-        self.setCheckable(True); self.setMinimumHeight(30)
+        self.setCheckable(True); self.setMinimumHeight(32)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet("""
             QPushButton { background:#2b2b2b;color:#aaa;border:1px solid #444;border-radius:6px;font-size:13px;font-weight:bold;padding:6px 12px; }
@@ -96,7 +97,7 @@ class ControlTab(QWidget):
         container.setStyleSheet("QGroupBox{padding-top:14px;margin-top:4px;}QGroupBox::title{subcontrol-position:top left;padding:0 4px;}")
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.addWidget(scroll); scroll.setWidget(container)
 
-        self._build_status(layout); self._build_controls(layout); self._build_mode_selector(layout)
+        self._build_status(layout); self._build_mode_selector(layout)
         self._build_preview(layout); self._build_panels(layout); self._build_common(layout); self._build_actions(layout)
         layout.addStretch()
         self._no_scroll_filter = _NoScrollFilter(self)
@@ -105,14 +106,20 @@ class ControlTab(QWidget):
                 w.setFocusPolicy(Qt.FocusPolicy.StrongFocus); w.installEventFilter(self._no_scroll_filter)
 
     def _build_status(self, parent):
-        sg = QGroupBox("상태"); sl = QHBoxLayout(sg); sl.setContentsMargins(6, 16, 6, 4)
-        self.status_label = QLabel("대기 중"); self.status_label.setStyleSheet("font-size:13px;font-weight:bold;"); sl.addWidget(self.status_label); sl.addStretch()
-        self.cpu_label = QLabel("CPU: —%"); self.cpu_label.setStyleSheet("font-size:12px;color:#d35400;margin-right:6px;"); sl.addWidget(self.cpu_label)
-        self.ram_label = QLabel("RAM: — MB"); self.ram_label.setStyleSheet("font-size:12px;color:#27ae60;margin-right:10px;"); sl.addWidget(self.ram_label)
-        self.fps_label = QLabel("— fps"); self.fps_label.setStyleSheet("font-size:14px;color:#888;"); sl.addWidget(self.fps_label)
-        parent.addWidget(sg)
+        sg = QGroupBox("상태")
+        sl = QVBoxLayout(sg)
+        sl.setContentsMargins(6, 16, 6, 6)
+        sl.setSpacing(6)
 
-    def _build_controls(self, parent):
+        # 상태 표시 행
+        info_row = QHBoxLayout()
+        self.status_label = QLabel("대기 중"); self.status_label.setStyleSheet("font-size:13px;font-weight:bold;"); info_row.addWidget(self.status_label); info_row.addStretch()
+        self.cpu_label = QLabel("CPU: —%"); self.cpu_label.setStyleSheet("font-size:12px;color:#d35400;margin-right:6px;"); info_row.addWidget(self.cpu_label)
+        self.ram_label = QLabel("RAM: — MB"); self.ram_label.setStyleSheet("font-size:12px;color:#27ae60;margin-right:10px;"); info_row.addWidget(self.ram_label)
+        self.fps_label = QLabel("— fps"); self.fps_label.setStyleSheet("font-size:14px;color:#888;"); info_row.addWidget(self.fps_label)
+        sl.addLayout(info_row)
+
+        # 시작/일시정지/중지 버튼 행
         bl = QHBoxLayout()
         self.btn_start = QPushButton("▶ 시작"); self.btn_start.setMinimumHeight(32)
         self.btn_start.setStyleSheet("QPushButton{background:#2d8c46;color:white;font-size:14px;font-weight:bold;border-radius:6px;}QPushButton:hover{background:#35a352;}QPushButton:disabled{background:#555;color:#999;}")
@@ -123,10 +130,12 @@ class ControlTab(QWidget):
         self.btn_stop = QPushButton("⏹ 중지"); self.btn_stop.setMinimumHeight(32); self.btn_stop.setEnabled(False)
         self.btn_stop.setStyleSheet("QPushButton{background:#c0392b;color:white;font-size:14px;font-weight:bold;border-radius:6px;}QPushButton:hover{background:#e74c3c;}QPushButton:disabled{background:#555;color:#999;}")
         self.btn_stop.clicked.connect(lambda: self.request_engine_stop.emit()); bl.addWidget(self.btn_stop)
-        parent.addLayout(bl)
+        sl.addLayout(bl)
+
+        parent.addWidget(sg)
 
     def _build_mode_selector(self, parent):
-        mg = QGroupBox("모드"); ml = QVBoxLayout(mg); ml.setSpacing(6)
+        mg = QGroupBox("모드"); ml = QVBoxLayout(mg); ml.setSpacing(8); ml.setContentsMargins(6, 16, 6, 6)
         btn_row = QHBoxLayout()
         self._mode_buttons = QButtonGroup(self); self._mode_buttons.setExclusive(True)
         for mode_key, label in [(MODE_MIRROR, "🖥  미러링"), (MODE_HYBRID, "하이브리드"), (MODE_AUDIO, "🎵  오디오")]:
@@ -149,7 +158,9 @@ class ControlTab(QWidget):
         parent.addWidget(pg)
 
     def _build_panels(self, parent):
-        self.mode_stack = QStackedWidget(); self.mode_stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        self.mode_stack = QStackedWidget()
+        self.mode_stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+
         self.panel_mirror = MirrorPanel(self.config)
         self.panel_mirror.brightness_changed.connect(self._on_mirror_brightness)
         self.panel_mirror.smoothing_changed.connect(self._on_mirror_smoothing)
@@ -209,9 +220,29 @@ class ControlTab(QWidget):
             self._apply_all_settings(); self.config_applied.emit(); self.request_mode_switch.emit(self._current_mode)
 
     def _adjust_stack(self, idx):
+        """[ADR-040] QStackedWidget 높이를 현재 패널에 맞추되,
+        오디오/하이브리드 간 전환 시 크기 변동을 방지.
+
+        - 미러링(0)이 현재: 미러링만 Preferred, 나머지 Ignored
+        - 오디오(2)/하이브리드(1)가 현재: 둘 다 Preferred 유지 →
+          QStackedWidget가 둘 중 큰 sizeHint를 사용하여 크기 고정
+        """
+        # 미러링 패널 인덱스
+        IDX_MIRROR = 0
+        # 오디오/하이브리드 패널 인덱스들
+        IDX_AUDIO_GROUP = {1, 2}
+
         for i in range(self.mode_stack.count()):
             w = self.mode_stack.widget(i)
-            w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred if i == idx else QSizePolicy.Policy.Ignored)
+            if i == idx:
+                # 현재 패널은 항상 Preferred
+                w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            elif idx in IDX_AUDIO_GROUP and i in IDX_AUDIO_GROUP:
+                # 오디오/하이브리드 간 전환: 상대 패널도 Preferred 유지
+                w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            else:
+                # 그 외(미러링 ↔ 오디오/하이브리드): 숨겨진 패널 Ignored
+                w.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
         self.mode_stack.adjustSize()
 
     def _on_preview_toggled(self, checked):
@@ -221,8 +252,8 @@ class ControlTab(QWidget):
     def _on_set_default(self):
         self.config.setdefault("options", {})["default_mode"] = self._current_mode; self.config_applied.emit()
         name = _MODE_NAMES.get(self._current_mode, self._current_mode)
-        self.btn_set_default.setText(f"✅ {name}이(가) 기본 모드로 설정됨")
-        QTimer.singleShot(2000, lambda: self.btn_set_default.setText("⭐ 현재 모드를 기본값으로 설정"))
+        self.btn_set_default.setText(f"{name}이(가) 기본 모드로 설정됨")
+        QTimer.singleShot(2000, lambda: self.btn_set_default.setText("현재 모드를 기본값으로 설정"))
 
     # ── ADR-019/021: 패널 → EngineController 전달 ────────────────
 
@@ -267,7 +298,6 @@ class ControlTab(QWidget):
 
     def _on_audio_params(self, params_dict):
         if self._is_running and self._engine_ctrl:
-            # collect_params()의 키를 AudioParams 필드에 매핑
             filtered = {k: v for k, v in params_dict.items()
                         if k in AudioParams.__dataclass_fields__}
             ap = AudioParams(**filtered)
@@ -370,7 +400,6 @@ class ControlTab(QWidget):
     def _update_resource_usage(self):
         try:
             cpu = self._process.cpu_percent() / psutil.cpu_count()
-            # Private working set (작업관리자와 일치)
             mem_info = self._process.memory_full_info()
             ram = getattr(mem_info, 'uss', mem_info.rss) / (1024 * 1024)
             self.cpu_label.setText(f"CPU: {cpu:.1f}%"); self.ram_label.setText(f"RAM: {ram:.0f} MB")
