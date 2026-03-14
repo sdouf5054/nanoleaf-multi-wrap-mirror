@@ -138,7 +138,7 @@ class AudioPanel(QWidget):
     def collect_params(self):
         p = self.param_widget.get_params()
         return {"audio_mode": _INDEX_AUDIO_MODE.get(self.combo_mode.currentIndex(), "pulse"),
-                "brightness": p["brightness"] / 100.0, "audio_min_brightness": self.slider_min_brightness.value() / 100.0,
+                "brightness": p["brightness"] / 100.0, "min_brightness": self.slider_min_brightness.value() / 100.0,
                 "bass_sensitivity": p["bass_sens"] / 100.0, "mid_sensitivity": p["mid_sens"] / 100.0,
                 "high_sensitivity": p["high_sens"] / 100.0, "attack": p["attack"] / 100.0, "release": p["release"] / 100.0,
                 "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"]),

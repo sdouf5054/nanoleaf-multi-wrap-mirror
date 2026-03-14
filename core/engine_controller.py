@@ -96,8 +96,14 @@ class EngineController(QObject):
     def set_audio_device_index(self, index):
         self._audio_device_index = index
 
-    def start_engine(self, mode=None):
-        """엔진 시작 (기존 엔진이 있으면 먼저 정리)."""
+    def start_engine(self, mode=None, initial_audio_params=None,
+                     initial_mirror_params=None):
+        """엔진 시작 (기존 엔진이 있으면 먼저 정리).
+
+        initial_audio_params/initial_mirror_params: UI에서 수집한
+        초기 파라미터. 엔진 시작 전에 pending으로 설정되어
+        첫 프레임부터 적용됩니다.
+        """
         self.stop_engine_sync()
 
         if mode is not None:
@@ -112,6 +118,12 @@ class EngineController(QObject):
             self.config,
             audio_device_index=self._audio_device_index,
         )
+
+        # 초기 파라미터 적용 (첫 프레임의 _swap_params에서 반영됨)
+        if initial_mirror_params is not None:
+            engine.update_mirror_params(initial_mirror_params)
+        if initial_audio_params is not None:
+            engine.update_audio_params(initial_audio_params)
 
         self._engine = engine
         self._connect_signals(engine)

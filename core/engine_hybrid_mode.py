@@ -118,22 +118,37 @@ class HybridEngine(BaseEngine):
     # ── 색상 배열 캐시 ───────────────────────────────────────────
 
     def _rebuild_base_colors(self):
+        """하이브리드 기본 색상 배열 재빌드.
+
+        Fix #4: n_zones != per-LED일 때 구역 평균을 적용.
+        Fix #5: 화면 색상은 weight_matrix 결과를 직접 사용 (미러링과 동일 품질).
+        """
         ap = self._current_audio_params
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
 
-        # 하이브리드: 화면 색상 소스면 per_led_colors를 사용
-        screen = (self._per_led_colors
-                  if ap.color_source == COLOR_SOURCE_SCREEN
-                  and self._per_led_colors is not None
-                  and self._per_led_colors.sum() > 0
-                  else None)
+        if (ap.color_source == COLOR_SOURCE_SCREEN
+                and self._per_led_colors is not None
+                and self._per_led_colors.sum() > 0):
 
-        self._cached_base_colors = build_base_color_array(
-            self._led_band_indices, n_bands,
-            rainbow=ap.rainbow,
-            solid_color=np.array(ap.base_color, dtype=np.float32),
-            screen_colors=screen,
-        )
+            if (ap.n_zones != N_ZONES_PER_LED
+                    and self._hybrid_zone_map is not None):
+                # N구역: 구역별 평균 → zone_map으로 LED에 재할당
+                zone_avg = per_led_to_zone_colors(
+                    self._per_led_colors, self._hybrid_zone_map, ap.n_zones
+                )
+                screen = zone_avg[self._hybrid_zone_map]
+            else:
+                # per-LED: weight_matrix 결과를 직접 사용
+                screen = self._per_led_colors.copy()
+
+            self._cached_base_colors = screen
+        else:
+            self._cached_base_colors = build_base_color_array(
+                self._led_band_indices, n_bands,
+                rainbow=ap.rainbow,
+                solid_color=np.array(ap.base_color, dtype=np.float32),
+            )
+
         self._cached_rainbow = ap.rainbow
         self._cached_base_color_tuple = ap.base_color
 
@@ -147,6 +162,7 @@ class HybridEngine(BaseEngine):
         fps_display = fps_start
         stop_wait = self._stop_event.wait
         prev_zone_weights = ap.zone_weights
+        prev_n_zones = ap.n_zones
 
         self.status_changed.emit("하이브리드 비주얼라이저 실행 중")
         self._start_monitor_watcher()
@@ -165,6 +181,17 @@ class HybridEngine(BaseEngine):
             # 디스플레이 변경
             if self._display_change_flag.is_set():
                 self._handle_display_change()
+
+            # n_zones 런타임 변경 감지 → zone_map 재빌드
+            if ap.n_zones != prev_n_zones:
+                prev_n_zones = ap.n_zones
+                if ap.n_zones != N_ZONES_PER_LED:
+                    self._hybrid_zone_map = _build_led_zone_map_by_side(
+                        self.config, ap.n_zones
+                    )
+                else:
+                    self._hybrid_zone_map = None
+                self._rebuild_base_colors()
 
             # 대역 비율 변경
             if ap.zone_weights != prev_zone_weights:

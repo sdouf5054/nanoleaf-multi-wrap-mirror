@@ -259,20 +259,34 @@ class ControlTab(QWidget):
             self._engine_ctrl.update_layout_params(**params)
 
     def _on_zone_count(self, n):
+        """미러링 구역 수 변경 → config 갱신 후 엔진 재시작 (즉시 적용)."""
         if self._is_running:
-            self.request_mode_switch.emit(self._current_mode)  # 구역 변경은 엔진 재시작 필요
+            self._apply_all_settings()
+            self.config_applied.emit()
+            self.request_mode_switch.emit(self._current_mode)
 
     def _on_audio_params(self, params_dict):
         if self._is_running and self._engine_ctrl:
-            ap = AudioParams(**{k: v for k, v in params_dict.items() if k in AudioParams.__dataclass_fields__})
+            # collect_params()의 키를 AudioParams 필드에 매핑
+            filtered = {k: v for k, v in params_dict.items()
+                        if k in AudioParams.__dataclass_fields__}
+            ap = AudioParams(**filtered)
             self._engine_ctrl.set_audio_params(ap)
 
     def _on_audio_min_brightness(self, value):
-        pass  # AudioParams 스냅샷에 포함되어 _on_audio_params에서 처리됨
+        """오디오 최소 밝기 변경 → AudioParams 전체 스냅샷으로 전달."""
+        if self._is_running and self._engine_ctrl:
+            params_dict = self.panel_audio.collect_params()
+            filtered = {k: v for k, v in params_dict.items()
+                        if k in AudioParams.__dataclass_fields__}
+            ap = AudioParams(**filtered)
+            self._engine_ctrl.set_audio_params(ap)
 
     def _on_hybrid_params(self, params_dict):
         if self._is_running and self._engine_ctrl:
-            ap = AudioParams(**{k: v for k, v in params_dict.items() if k in AudioParams.__dataclass_fields__})
+            filtered = {k: v for k, v in params_dict.items()
+                        if k in AudioParams.__dataclass_fields__}
+            ap = AudioParams(**filtered)
             self._engine_ctrl.set_audio_params(ap)
 
     # ── Apply / Revert ───────────────────────────────────────────
@@ -356,7 +370,9 @@ class ControlTab(QWidget):
     def _update_resource_usage(self):
         try:
             cpu = self._process.cpu_percent() / psutil.cpu_count()
-            ram = self._process.memory_info().rss / (1024 * 1024)
+            # Private working set (작업관리자와 일치)
+            mem_info = self._process.memory_full_info()
+            ram = getattr(mem_info, 'uss', mem_info.rss) / (1024 * 1024)
             self.cpu_label.setText(f"CPU: {cpu:.1f}%"); self.ram_label.setText(f"RAM: {ram:.0f} MB")
             color = "#c0392b" if cpu >= 20 else "#e67e22" if cpu >= 10 else "#d35400"
             self.cpu_label.setStyleSheet(f"font-size:12px;color:{color};margin-right:6px;")

@@ -21,14 +21,10 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
 
-# === 2) Windows Per-Monitor DPI Aware ===
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+# === 2) DPI: PySide6가 자체 처리 (ADR-029) ===
+# PySide6는 PER_MONITOR_AWARE_V2를 자동 설정.
+# 중복 호출 경고를 억제하기 위해 환경 변수로 Qt 측 호출을 비활성화.
+os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
 # === 3) 작업 디렉토리 설정 ===
 if getattr(sys, 'frozen', False):
@@ -45,12 +41,23 @@ except Exception:
     pass
 
 # === 5) PySide6 High DPI (ADR-029: 빌트인 스케일링 사용) ===
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, qInstallMessageHandler, QtMsgType
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
-# PySide6는 기본적으로 High DPI를 잘 지원함.
-# PassThrough로 설정하면 OS DPI 설정을 그대로 반영.
+def _qt_message_handler(mode, context, message):
+    """DPI 관련 무해한 경고를 필터링."""
+    if "SetProcessDpiAwarenessContext" in message:
+        return  # 무시 — PySide6 기본 DPI가 정상 작동 중
+    # 나머지 메시지는 stderr로 출력
+    import sys as _sys
+    if mode == QtMsgType.QtWarningMsg:
+        print(f"Qt Warning: {message}", file=_sys.stderr)
+    elif mode == QtMsgType.QtCriticalMsg:
+        print(f"Qt Critical: {message}", file=_sys.stderr)
+
+qInstallMessageHandler(_qt_message_handler)
+
 QApplication.setHighDpiScaleFactorRoundingPolicy(
     Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
 )
@@ -86,6 +93,11 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
+
+    # Ctrl+C 터미널 종료 지원
+    # Qt 이벤트 루프가 Python SIGINT를 삼키므로, 명시적 핸들러 등록
+    import signal
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
 
     # === 7) 아이콘 ===
     if getattr(sys, 'frozen', False):

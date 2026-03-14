@@ -19,7 +19,7 @@ from PySide6.QtGui import QIcon
 from core.config import save_config
 from core.device_manager import DeviceManager
 from core.engine_controller import EngineController
-from core.engine_params import MirrorParams
+from core.engine_params import MirrorParams, AudioParams
 from core.engine_utils import MODE_MIRROR
 from ui.tray import SystemTray
 from ui.tab_control import ControlTab
@@ -107,6 +107,13 @@ class MainWindow(QMainWindow):
         self.tab_control.request_mode_switch.connect(self._switch_mode)
         self.tab_control.config_applied.connect(self._save_config)
 
+        # ── EngineController → ControlTab 데이터 시그널 ──
+        self.engine_ctrl.fps_updated.connect(self.tab_control.update_fps)
+        self.engine_ctrl.energy_updated.connect(self.tab_control.update_energy)
+        self.engine_ctrl.spectrum_updated.connect(self.tab_control.update_spectrum)
+        self.engine_ctrl.screen_colors_updated.connect(self.tab_control.update_preview_colors)
+        self.engine_ctrl.status_changed.connect(self.tab_control.update_status)
+
         # ── 상태바 ──
         self.statusBar().showMessage("준비")
 
@@ -148,16 +155,6 @@ class MainWindow(QMainWindow):
         ctrl.running_changed.connect(self._on_running_changed)
         ctrl.engine_stopped.connect(self._on_engine_stopped)
 
-        # EngineController → ControlTab (데이터 시그널)
-        ctrl.fps_updated.connect(lambda fps: self.tab_control.update_fps(fps)
-                                 if hasattr(self, 'tab_control') else None)
-        ctrl.energy_updated.connect(lambda b, m, h: self.tab_control.update_energy(b, m, h)
-                                    if hasattr(self, 'tab_control') else None)
-        ctrl.spectrum_updated.connect(lambda s: self.tab_control.update_spectrum(s)
-                                      if hasattr(self, 'tab_control') else None)
-        ctrl.screen_colors_updated.connect(lambda c: self.tab_control.update_preview_colors(c)
-                                           if hasattr(self, 'tab_control') else None)
-
     def _connect_tray_signals(self):
         """[ADR-039] 트레이 시그널 → MainWindow 슬롯."""
         self.tray.toggle_requested.connect(self._toggle_engine)
@@ -173,7 +170,33 @@ class MainWindow(QMainWindow):
     def start_engine(self, mode=None):
         """엔진 시작 — 외부(main.py 자동시작, 트레이)에서 호출 가능."""
         self.device_manager.force_release()
-        self.engine_ctrl.start_engine(mode)
+
+        # UI에서 현재 파라미터 수집
+        initial_mirror = None
+        initial_audio = None
+        if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'collect_engine_init_params'):
+            params = self.tab_control.collect_engine_init_params()
+            effective_mode = mode or self.tab_control.current_mode
+
+            if effective_mode == MODE_MIRROR:
+                initial_mirror = MirrorParams(
+                    brightness=params.get("brightness", 1.0),
+                    smoothing_enabled=params.get("smoothing_enabled", True),
+                    smoothing_factor=params.get("smoothing_factor", 0.5),
+                    mirror_n_zones=params.get("mirror_n_zones", -1),
+                )
+            else:
+                # audio/hybrid 공통
+                filtered = {k: v for k, v in params.items()
+                            if k in AudioParams.__dataclass_fields__}
+                if filtered:
+                    initial_audio = AudioParams(**filtered)
+
+        self.engine_ctrl.start_engine(
+            mode=mode,
+            initial_mirror_params=initial_mirror,
+            initial_audio_params=initial_audio,
+        )
 
     def stop_engine(self):
         self.engine_ctrl.stop_engine()
@@ -197,25 +220,101 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _on_tray_brightness_delta(self, delta):
-        """트레이 밝기 +/- 시그널 → EngineController로 전달."""
+        """트레이 밝기 +/- → 모드별 적절한 밝기 조절.
+
+        미러링: brightness 조절
+        오디오/하이브리드: min_brightness 조절
+        """
         if not self.engine_ctrl.is_running:
             return
         engine = self.engine_ctrl.engine
         if engine is None:
             return
-        current = engine._current_mirror_params.brightness
-        new_val = max(0.0, min(1.0, current + delta / 100.0))
-        self.engine_ctrl.set_mirror_params(
-            MirrorParams(brightness=new_val)
-        )
+
+        mode = self.engine_ctrl.current_mode
+        if mode == MODE_MIRROR:
+            current = engine._current_mirror_params.brightness
+            new_val = max(0.0, min(1.0, current + delta / 100.0))
+            # 엔진 파라미터 갱신
+            mp = engine._current_mirror_params
+            self.engine_ctrl.set_mirror_params(MirrorParams(
+                brightness=new_val,
+                smoothing_enabled=mp.smoothing_enabled,
+                smoothing_factor=mp.smoothing_factor,
+                mirror_n_zones=mp.mirror_n_zones,
+            ))
+            # UI 슬라이더 동기화
+            self.tab_control.panel_mirror.brightness_slider.blockSignals(True)
+            self.tab_control.panel_mirror.brightness_slider.setValue(int(new_val * 100))
+            self.tab_control.panel_mirror.brightness_slider.blockSignals(False)
+            self.tab_control.panel_mirror.brightness_label.setText(f"{int(new_val * 100)}%")
+        else:
+            # 오디오/하이브리드: min_brightness 조절
+            current = engine._current_audio_params.min_brightness
+            new_val = max(0.0, min(1.0, current + delta / 100.0))
+            ap = engine._current_audio_params
+            self.engine_ctrl.set_audio_params(AudioParams(
+                audio_mode=ap.audio_mode, brightness=ap.brightness,
+                min_brightness=new_val,
+                bass_sensitivity=ap.bass_sensitivity,
+                mid_sensitivity=ap.mid_sensitivity,
+                high_sensitivity=ap.high_sensitivity,
+                attack=ap.attack, release=ap.release,
+                input_smoothing=ap.input_smoothing,
+                zone_weights=ap.zone_weights, rainbow=ap.rainbow,
+                base_color=ap.base_color, color_source=ap.color_source,
+                n_zones=ap.n_zones,
+            ))
+            # UI 슬라이더 + 라벨 동기화
+            pct = int(new_val * 100)
+            if mode == "hybrid":
+                panel = self.tab_control.panel_hybrid
+            else:
+                panel = self.tab_control.panel_audio
+            panel.slider_min_brightness.blockSignals(True)
+            panel.slider_min_brightness.setValue(pct)
+            panel.slider_min_brightness.blockSignals(False)
+            panel.lbl_min_brightness.setText(f"{pct}%")
 
     def _on_tray_brightness_set(self, pct):
         """트레이 밝기 절대값 시그널."""
         if not self.engine_ctrl.is_running:
             return
-        self.engine_ctrl.set_mirror_params(
-            MirrorParams(brightness=pct / 100.0)
-        )
+        mode = self.engine_ctrl.current_mode
+        if mode == MODE_MIRROR:
+            self.engine_ctrl.set_mirror_params(
+                MirrorParams(brightness=pct / 100.0)
+            )
+            self.tab_control.panel_mirror.brightness_slider.blockSignals(True)
+            self.tab_control.panel_mirror.brightness_slider.setValue(pct)
+            self.tab_control.panel_mirror.brightness_slider.blockSignals(False)
+            self.tab_control.panel_mirror.brightness_label.setText(f"{pct}%")
+        else:
+            engine = self.engine_ctrl.engine
+            if engine is None:
+                return
+            ap = engine._current_audio_params
+            self.engine_ctrl.set_audio_params(AudioParams(
+                audio_mode=ap.audio_mode, brightness=ap.brightness,
+                min_brightness=pct / 100.0,
+                bass_sensitivity=ap.bass_sensitivity,
+                mid_sensitivity=ap.mid_sensitivity,
+                high_sensitivity=ap.high_sensitivity,
+                attack=ap.attack, release=ap.release,
+                input_smoothing=ap.input_smoothing,
+                zone_weights=ap.zone_weights, rainbow=ap.rainbow,
+                base_color=ap.base_color, color_source=ap.color_source,
+                n_zones=ap.n_zones,
+            ))
+            # UI 슬라이더 + 라벨 동기화
+            if mode == "hybrid":
+                panel = self.tab_control.panel_hybrid
+            else:
+                panel = self.tab_control.panel_audio
+            panel.slider_min_brightness.blockSignals(True)
+            panel.slider_min_brightness.setValue(pct)
+            panel.slider_min_brightness.blockSignals(False)
+            panel.lbl_min_brightness.setText(f"{pct}%")
 
     # ══════════════════════════════════════════════════════════════
     #  엔진 상태 콜백
@@ -253,10 +352,35 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'set_switching'):
             self.tab_control.set_switching(True)
         try:
-            self.engine_ctrl.switch_mode(new_mode)
+            self.device_manager.force_release()
+            # 초기 파라미터 수집
+            initial_mirror = None
+            initial_audio = None
+            if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'collect_engine_init_params'):
+                params = self.tab_control.collect_engine_init_params()
+                if new_mode == MODE_MIRROR:
+                    initial_mirror = MirrorParams(
+                        brightness=params.get("brightness", 1.0),
+                        smoothing_enabled=params.get("smoothing_enabled", True),
+                        smoothing_factor=params.get("smoothing_factor", 0.5),
+                        mirror_n_zones=params.get("mirror_n_zones", -1),
+                    )
+                else:
+                    filtered = {k: v for k, v in params.items()
+                                if k in AudioParams.__dataclass_fields__}
+                    if filtered:
+                        initial_audio = AudioParams(**filtered)
+
+            self.engine_ctrl.start_engine(
+                mode=new_mode,
+                initial_mirror_params=initial_mirror,
+                initial_audio_params=initial_audio,
+            )
         finally:
             if hasattr(self, 'tab_control') and hasattr(self.tab_control, 'set_switching'):
                 self.tab_control.set_switching(False)
+                if self.engine_ctrl.is_running:
+                    self.tab_control.set_running_state(True)
 
     def _save_config(self):
         save_config(self.config)

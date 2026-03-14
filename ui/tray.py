@@ -112,13 +112,14 @@ class SystemTray(QSystemTrayIcon):
                 return
             try:
                 handle = keyboard.add_hotkey(
-                    hotkey_str.strip(),
-                    lambda: QTimer.singleShot(0, callback)
+                    hotkey_str.strip(), callback, suppress=False
                 )
                 self._hotkey_handles.append(handle)
             except Exception as e:
                 print(f"[핫키 등록 실패] '{hotkey_str}': {e}")
 
+        # Qt Signal.emit()은 cross-thread safe (queued connection 자동 적용).
+        # keyboard 스레드에서 직접 emit해도 안전.
         _safe_add(hk_toggle, self.toggle_requested.emit)
         _safe_add(hk_up, lambda: self.brightness_delta.emit(10))
         _safe_add(hk_down, lambda: self.brightness_delta.emit(-10))

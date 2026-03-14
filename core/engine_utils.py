@@ -336,7 +336,11 @@ def vectorized_render_pulse(base_colors, bass, mid, high,
                             min_brightness, audio_brightness):
     """[ADR-014] 벡터화된 Pulse 렌더링.
 
-    Python 루프 없이 전체 LED를 한 번에 계산.
+    밝기 모델:
+    - bass → 전체 밝기 (intensity)
+    - mid → 채도 부스트 (1.0~1.3배, 중역 강할수록 색이 선명)
+    - high → 화이트 틴트 (고역 강할수록 밝은 반짝임)
+    - min_brightness=1.0이면 미러링 brightness=100%와 동일한 밝기
 
     Args:
         base_colors: (n_leds, 3) float32
@@ -348,12 +352,15 @@ def vectorized_render_pulse(base_colors, bass, mid, high,
     """
     intensity = max(min_brightness, bass) * audio_brightness
 
-    # 색상 변조: mid로 밝기 미세 조절, high로 화이트 믹싱
-    leds = base_colors * (0.7 + mid * 0.3)
-    white_mix = high * 0.3
-    leds = leds * (1.0 - white_mix) + 255.0 * white_mix
-    leds *= intensity
+    # mid → 채도 부스트: 보컬/기타가 들릴 때 색이 풍부해짐
+    saturation_boost = 1.0 + mid * 0.3
+    leds = np.clip(base_colors * saturation_boost, 0, 255)
 
+    # high → 화이트 틴트: 하이햇/심벌에 반짝임
+    white_mix = high * 0.15
+    leds = leds * (1.0 - white_mix) + 255.0 * white_mix
+
+    leds *= intensity
     return leds
 
 
