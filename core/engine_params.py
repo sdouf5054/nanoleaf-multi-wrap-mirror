@@ -45,6 +45,9 @@ class AudioParams:
     color_source: str = "screen"
     n_zones: int = 4
 
+    # ★ Wave 모드 전용
+    wave_speed: float = 1.4  # 초당 위치 진행 (0→1). UI 슬라이더 50% = 1.4
+
 
 @dataclass
 class LayoutParams:

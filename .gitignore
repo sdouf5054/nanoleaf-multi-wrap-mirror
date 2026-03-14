@@ -13,3 +13,4 @@ personal_config.json
 .pytest_cache/
 *.egg-info/
 config.json
+tree_nopycache.txt

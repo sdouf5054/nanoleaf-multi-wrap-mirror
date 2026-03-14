@@ -17,6 +17,7 @@ from core.audio_engine import AudioEngine as AudioCapture, _build_log_bands
 from core.constants import HW_ERRORS
 from core.engine_utils import (
     MODE_HYBRID, AUDIO_PULSE, AUDIO_SPECTRUM, AUDIO_BASS_DETAIL,
+    AUDIO_WAVE, AUDIO_DYNAMIC,
     COLOR_SOURCE_SOLID, COLOR_SOURCE_SCREEN, N_ZONES_PER_LED,
     SCREEN_UPDATE_INTERVAL,
     BASS_DETAIL_FREQ_MIN, BASS_DETAIL_FREQ_MAX, BASS_DETAIL_N_BANDS,
@@ -24,7 +25,11 @@ from core.engine_utils import (
     _build_led_order_from_segments, _build_led_zone_map_by_side,
     per_led_to_zone_colors,
     build_base_color_array, vectorized_render_pulse,
-    vectorized_render_spectrum, leds_to_grb,
+    vectorized_render_spectrum, vectorized_render_wave,
+    vectorized_render_dynamic, leds_to_grb,
+    compute_led_normalized_y,
+    WavePulse, wave_tick_pulses,
+    DynamicRipple, dynamic_tick_ripples,
 )
 from core.engine_audio_mode import _ar
 
@@ -61,6 +66,16 @@ class HybridEngine(BaseEngine):
         self._cached_base_colors = None
         self._cached_rainbow = None
         self._cached_base_color_tuple = None
+
+        # Wave 모드 상태
+        self._wave_pulses = []
+        self._wave_last_spawn = 0.0
+        self._wave_prev_bass = 0.0
+        self._led_norm_y = None
+
+        # Dynamic 모드 상태
+        self._dyn_ripples = []
+        self._dyn_last_spawn = 0.0
 
     # ── 서브클래스 인터페이스 ─────────────────────────────────────
 
@@ -113,6 +128,9 @@ class HybridEngine(BaseEngine):
         self._bd_smooth = np.zeros(BASS_DETAIL_N_BANDS, dtype=np.float64)
 
         self._rebuild_base_colors()
+
+        # Wave 모드용 정규화 y좌표
+        self._led_norm_y = compute_led_normalized_y(self.config)
 
     def _cleanup_mode(self):
         if self._audio_engine:
@@ -264,7 +282,33 @@ class HybridEngine(BaseEngine):
             audio_mode = ap.audio_mode
             bd_spec = None
 
-            if audio_mode == AUDIO_BASS_DETAIL:
+            if audio_mode == AUDIO_WAVE:
+                self._wave_last_spawn = wave_tick_pulses(
+                    self._wave_pulses, frame_interval,
+                    bass, self._wave_prev_bass,
+                    self._wave_last_spawn, loop_start,
+                    speed=ap.wave_speed,
+                )
+                self._wave_prev_bass = bass
+                raw_rgb = vectorized_render_wave(
+                    self._cached_base_colors, self._led_norm_y,
+                    self._wave_pulses,
+                    ap.min_brightness, ap.brightness,
+                    speed=ap.wave_speed,
+                )
+            elif audio_mode == AUDIO_DYNAMIC:
+                self._dyn_last_spawn = dynamic_tick_ripples(
+                    self._dyn_ripples, frame_interval,
+                    bass, mid, high,
+                    self._perimeter_t,
+                    self._dyn_last_spawn, loop_start,
+                )
+                raw_rgb = vectorized_render_dynamic(
+                    self._cached_base_colors, self._perimeter_t,
+                    self._dyn_ripples, high,
+                    ap.min_brightness, ap.brightness,
+                )
+            elif audio_mode == AUDIO_BASS_DETAIL:
                 bd_spec = self._process_bass_detail(eng, atk, rel, ap)
                 raw_rgb = vectorized_render_spectrum(
                     self._cached_base_colors, self._led_band_indices,

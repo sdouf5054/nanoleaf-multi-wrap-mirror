@@ -22,6 +22,8 @@ MODE_HYBRID = "hybrid"
 AUDIO_PULSE = "pulse"
 AUDIO_SPECTRUM = "spectrum"
 AUDIO_BASS_DETAIL = "bass_detail"
+AUDIO_WAVE = "wave"
+AUDIO_DYNAMIC = "dynamic"
 
 COLOR_SOURCE_SOLID = "solid"
 COLOR_SOURCE_SCREEN = "screen"
@@ -415,3 +417,242 @@ def leds_to_grb(leds):
     grb[:, 1] = u8[:, 0]  # R
     grb[:, 2] = u8[:, 2]  # B
     return grb.tobytes()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LED 정규화 y좌표 (Wave/Dynamic용)
+# ══════════════════════════════════════════════════════════════════
+
+def compute_led_normalized_y(config):
+    """Wave 모드용 LED 전파 위치 — 둘레 경로 기반.
+
+    하단 중앙(0.0) → 좌측은 시계방향 / 우측은 반시계방향으로
+    모니터 둘레를 타고 올라가서 → 상단 중앙(1.0)에서 합류.
+
+    Returns:
+        (n_leds,) float64 — 0(하단 중앙) ~ 1(상단 중앙)
+    """
+    return _compute_led_perimeter_t(config)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  [Wave 모드] 펄스 큐 + 렌더링
+# ══════════════════════════════════════════════════════════════════
+
+# Wave 파라미터 상수
+WAVE_SPEED_DEFAULT = 1.4   # 기본 속도 (UI 슬라이더 50%)
+WAVE_SPEED_MIN = 0.4       # 슬라이더 0%
+WAVE_SPEED_MAX = 8.0       # 슬라이더 100%
+WAVE_WIDTH_FRONT = 0.07    # 펄스 앞쪽 폭
+WAVE_WIDTH_TRAIL = 0.15    # 펄스 뒤쪽 잔상 폭
+WAVE_DECAY = 0.45          # 초당 밝기 감쇠
+WAVE_COOLDOWN = 0.06       # 펄스 간 최소 간격 — 짧게 (Pulse 반응성 매칭)
+WAVE_MAX_PULSES = 8        # 동시 최대 펄스 수
+WAVE_ENERGY_BOOST = 1.8    # 초기 에너지 배수
+WAVE_TILT_COMP = 0.5       # 상단 밝기 보정
+WAVE_ONSET_DELTA = 0.02    # bass 상승 감지 최소 변화량 — 거의 모든 비트에 반응
+
+
+def wave_speed_from_slider(slider_pct):
+    """슬라이더 값(0~100) → 실제 wave speed 변환.
+
+    0%   → 0.4  (느림)
+    50%  → 1.4  (기본)
+    100% → 3.0  (빠름)
+    """
+    t = slider_pct / 100.0
+    return WAVE_SPEED_MIN + t * (WAVE_SPEED_MAX - WAVE_SPEED_MIN)
+
+
+class WavePulse:
+    """하나의 Wave 펄스 상태."""
+    __slots__ = ("position", "energy", "age", "color_t")
+
+    def __init__(self, energy, color_t=0.0):
+        self.position = 0.0
+        self.energy = min(energy * WAVE_ENERGY_BOOST, 2.5)
+        self.age = 0.0
+        self.color_t = color_t
+
+
+def wave_tick_pulses(pulses, dt, bass, prev_bass, last_spawn_time,
+                     current_time, speed=WAVE_SPEED_DEFAULT):
+    """펄스 큐 업데이트 — Pulse 모드와 동일한 반응성.
+
+    Pulse 모드: intensity = max(min_brightness, bass) → bass가 곧 밝기.
+    Wave 모드: bass가 상승하는 순간(onset) 펄스 생성, bass 값이 곧 에너지.
+
+    onset 감지: 현재 bass > 이전 bass + WAVE_ONSET_DELTA
+    → Pulse 모드에서 밝아지는 모든 순간에 Wave 펄스도 생성됨.
+    threshold를 제거하고 bass 값 자체가 에너지이므로,
+    bass=0.1이면 어두운 펄스, bass=0.9이면 밝은 펄스.
+
+    Args:
+        pulses: list[WavePulse] — in-place 변경
+        dt: 프레임 시간 (초)
+        bass: 현재 bass 에너지 (0~1, Attack/Release 스무딩 적용 후)
+        prev_bass: 이전 프레임의 bass 값 (onset 감지용)
+        last_spawn_time: 마지막 펄스 생성 시각
+        current_time: 현재 monotonic 시각
+        speed: 펄스 이동 속도
+
+    Returns:
+        last_spawn_time (갱신된)
+    """
+    # 기존 펄스 진행
+    for p in pulses:
+        p.position += speed * dt
+        p.age += dt
+        p.energy *= (1.0 - WAVE_DECAY * dt)
+
+    pulses[:] = [p for p in pulses
+                 if p.position < 1.6 and p.energy > 0.02]
+
+    # onset 감지: bass가 상승 중이면 펄스 생성
+    bass_delta = bass - prev_bass
+
+    if (bass_delta > WAVE_ONSET_DELTA
+            and bass > 0.02
+            and (current_time - last_spawn_time) > WAVE_COOLDOWN
+            and len(pulses) < WAVE_MAX_PULSES):
+        color_t = (current_time * 0.15) % 1.0
+        pulses.append(WavePulse(energy=bass, color_t=color_t))
+        last_spawn_time = current_time
+
+    return last_spawn_time
+
+
+def vectorized_render_wave(base_colors, led_norm_y, pulses,
+                           min_brightness, audio_brightness,
+                           speed=WAVE_SPEED_DEFAULT):
+    """[Wave 모드] 비대칭 가우시안 + additive blending + 기울기 보정.
+
+    속도 적응형 펄스 폭: speed가 높을수록 σ를 넓혀서
+    빠른 이동 시 motion blur 효과를 내고 점멸을 방지.
+
+    Args:
+        base_colors: (n_leds, 3) float32
+        led_norm_y: (n_leds,) float64 — 0(하단 중앙)~1(상단 중앙), 둘레 경로
+        pulses: list[WavePulse]
+        min_brightness, audio_brightness: float
+        speed: 현재 wave 속도 (폭 스케일링에 사용)
+
+    Returns:
+        (n_leds, 3) float32
+    """
+    n_leds = len(led_norm_y)
+    intensity = np.full(n_leds, min_brightness, dtype=np.float64)
+
+    # 속도 적응형 폭: 기준 속도(1.4) 대비 비율로 σ를 스케일
+    # speed=1.4 → 1.0배, speed=3.0 → ~1.6배, speed=5.0 → ~2.3배
+    speed_ratio = max(speed / WAVE_SPEED_DEFAULT, 1.0)
+    width_scale = speed_ratio ** 0.7  # 제곱근 비례 — 너무 급격히 넓어지지 않게
+
+    sf = WAVE_WIDTH_FRONT * width_scale
+    st = WAVE_WIDTH_TRAIL * width_scale
+    two_sf_sq = 2.0 * sf * sf
+    two_st_sq = 2.0 * st * st
+
+    for p in pulses:
+        dist = led_norm_y - p.position
+        # 비대칭: 앞쪽(위) 좁고 뒤쪽(아래) trail
+        two_sigma_sq = np.where(dist >= 0, two_sf_sq, two_st_sq)
+        contribution = p.energy * np.exp(-(dist * dist) / two_sigma_sq)
+        intensity += contribution  # additive
+
+    # 기울기 보정
+    tilt_factor = 1.0 + led_norm_y * WAVE_TILT_COMP
+    intensity *= tilt_factor
+
+    intensity *= audio_brightness
+    leds = base_colors * intensity[:, np.newaxis]
+
+    return leds.astype(np.float32)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  [Dynamic 모드] 파원(ripple) 스폰 + 렌더링
+# ══════════════════════════════════════════════════════════════════
+
+# Dynamic 파라미터 상수
+DYN_BASS_THRESHOLD = 0.28    # 파원 생성 bass 임계값
+DYN_MID_THRESHOLD = 0.35     # mid 파원 생성 임계값
+DYN_COOLDOWN = 0.07          # 파원 간 최소 간격 (초)
+DYN_MAX_RIPPLES = 14         # 동시 최대 파원 수
+DYN_RIPPLE_SPEED = 1.8       # 파원 확산 속도
+DYN_RIPPLE_WIDTH = 0.10      # 파원 코어 폭 (σ)
+DYN_RIPPLE_HALO = 0.22       # 파원 halo 폭
+DYN_FADE_RATE = 1.4          # 초당 에너지 감쇠율
+DYN_SPARKLE_PROB = 0.20      # 프레임당 sparkle 확률
+DYN_ENERGY_BOOST = 1.6       # 초기 에너지 배수
+
+
+class DynamicRipple:
+    """하나의 Dynamic 파원 상태."""
+    __slots__ = ("center_t", "radius", "energy", "age", "color_offset")
+
+    def __init__(self, center_t, energy, color_offset=0.0):
+        self.center_t = center_t
+        self.radius = 0.0
+        self.energy = min(energy * DYN_ENERGY_BOOST, 2.5)
+        self.age = 0.0
+        self.color_offset = color_offset
+
+
+def dynamic_tick_ripples(ripples, dt, bass, mid, high,
+                         perimeter_t, last_spawn_time, current_time):
+    """파원 큐 업데이트: 확산, 감쇠, 새 파원 생성."""
+    for r in ripples:
+        r.radius += DYN_RIPPLE_SPEED * dt
+        r.age += dt
+        r.energy *= (1.0 - DYN_FADE_RATE * dt)
+
+    ripples[:] = [r for r in ripples
+                  if r.energy > 0.02 and r.radius < 1.5]
+
+    if (bass > DYN_BASS_THRESHOLD
+            and (current_time - last_spawn_time) > DYN_COOLDOWN
+            and len(ripples) < DYN_MAX_RIPPLES):
+        center = np.random.random()
+        color_off = (current_time * 0.2) % 1.0
+        ripples.append(DynamicRipple(center, bass, color_off))
+        last_spawn_time = current_time
+
+    if (mid > DYN_MID_THRESHOLD
+            and (current_time - last_spawn_time) > DYN_COOLDOWN * 1.5
+            and len(ripples) < DYN_MAX_RIPPLES):
+        center = np.random.random()
+        color_off = (current_time * 0.3 + 0.5) % 1.0
+        ripples.append(DynamicRipple(center, mid * 0.8, color_off))
+        last_spawn_time = current_time
+
+    return last_spawn_time
+
+
+def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
+                              high, min_brightness, audio_brightness):
+    """[Dynamic 모드] filled disc + core/halo + additive blending."""
+    n_leds = len(perimeter_t)
+    intensity = np.full(n_leds, min_brightness, dtype=np.float64)
+
+    for r in ripples:
+        delta = np.abs(perimeter_t - r.center_t)
+        delta = np.minimum(delta, 1.0 - delta)
+
+        esc = DYN_RIPPLE_WIDTH + r.radius * 0.3
+        esh = DYN_RIPPLE_HALO + r.radius * 0.5
+        esc_sq = 2.0 * esc * esc
+        esh_sq = 2.0 * esh * esh
+
+        core = r.energy * np.exp(-(delta * delta) / esc_sq)
+        halo = r.energy * 0.4 * np.exp(-(delta * delta) / esh_sq)
+        intensity += core + halo
+
+    if high > 0.15:
+        sparkle_mask = np.random.random(n_leds) < (DYN_SPARKLE_PROB * high)
+        intensity[sparkle_mask] += high * 0.8
+
+    intensity *= audio_brightness
+    leds = base_colors * intensity[:, np.newaxis]
+
+    return leds.astype(np.float32)

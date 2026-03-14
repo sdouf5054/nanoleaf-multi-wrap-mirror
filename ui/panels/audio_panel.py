@@ -15,9 +15,10 @@ from PySide6.QtGui import QColor
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
+from core.engine_utils import wave_speed_from_slider
 
-_INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail"}
-_MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2}
+_INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail", 3: "wave", 4: "dynamic"}
+_MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2, "wave": 3, "dynamic": 4}
 _COLOR_PRESETS = [
     ("무지개", None, None, None), ("핑크/마젠타", 255, 0, 80), ("빨강", 255, 30, 0),
     ("주황", 255, 120, 0), ("노랑", 255, 220, 0), ("초록", 0, 255, 80),
@@ -35,6 +36,8 @@ _VISUALIZER_MODE_ITEMS = [
     "Bass 반응 — 저음 기반 전체 밝기",
     "Spectrum — 16밴드 주파수 매핑",
     "Bass Detail — 저역 세밀 16밴드",
+    "Wave — 베이스 펄스 아래→위",
+    "Dynamic — 비트 반응 파원 효과",
 ]
 
 
@@ -188,6 +191,7 @@ class AudioPanel(QWidget):
                 "bass_sensitivity": p["bass_sens"] / 100.0, "mid_sensitivity": p["mid_sens"] / 100.0,
                 "high_sensitivity": p["high_sens"] / 100.0, "attack": p["attack"] / 100.0, "release": p["release"] / 100.0,
                 "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"]),
+                "wave_speed": wave_speed_from_slider(p["wave_speed"]),
                 "rainbow": self._is_rainbow, "base_color": self._current_color}
 
     def update_energy(self, bass, mid, high):

@@ -1,4 +1,7 @@
-"""오디오 파라미터 위젯 — 감도/밝기/Attack/Release/대역 비율 공용."""
+"""오디오 파라미터 위젯 — 감도/밝기/Attack/Release/Wave속도/대역 비율 공용.
+
+[NEW] Wave 모드 전용 wave_speed 슬라이더 추가.
+"""
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 from PySide6.QtCore import Qt, Signal
@@ -10,6 +13,8 @@ AUDIO_DEFAULTS = {
     "pulse": {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
     "spectrum": {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
     "bass_detail": {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 10, "release": 70, "zone_bass": 48, "zone_mid": 26, "zone_high": 26},
+    "wave": {"bass_sens": 120, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 60, "release": 40, "wave_speed": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    "dynamic": {"bass_sens": 110, "mid_sens": 110, "high_sens": 120, "brightness": 100, "attack": 55, "release": 45, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
 }
 
 
@@ -26,6 +31,7 @@ class AudioParamWidget(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
 
+        # ── 감도 ──
         self.label_sens = QLabel("감도 (Bass)")
         layout.addWidget(self.label_sens)
         self.slider_bass_sens, self.lbl_bass_sens = self._add_slider(layout, "Bass:", 10, 300, 100)
@@ -62,13 +68,44 @@ class AudioParamWidget(QWidget):
 
         ln = QFrame(); ln.setFrameShape(QFrame.Shape.HLine); ln.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(ln)
+
+        # ── 밝기 ──
         self.slider_brightness, self.lbl_brightness = self._add_slider(layout, "밝기:", 0, 100, 100, suffix="%")
 
+        # ── 반응 특성 ──
         layout.addWidget(QLabel("반응 특성"))
         self.slider_attack, self.lbl_attack = self._add_slider(layout, "Attack:", 0, 100, 50)
         self.slider_release, self.lbl_release = self._add_slider(layout, "Release:", 0, 100, 50)
 
-        self.zone_line = QFrame(); self.zone_line.setFrameShape(QFrame.Shape.HLine); self.zone_line.setFrameShadow(QFrame.Shadow.Sunken)
+        # ── Wave 속도 (wave 모드 전용) ──
+        self.wave_speed_line = QFrame()
+        self.wave_speed_line.setFrameShape(QFrame.Shape.HLine)
+        self.wave_speed_line.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(self.wave_speed_line)
+
+        self.row_wave_speed = QWidget()
+        ws = QHBoxLayout(self.row_wave_speed)
+        ws.setContentsMargins(0, 0, 0, 0)
+        ws.addWidget(QLabel("Wave 속도:"))
+        self.slider_wave_speed = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_wave_speed.setRange(0, 100)
+        self.slider_wave_speed.setValue(50)
+        self.slider_wave_speed.valueChanged.connect(self._on_wave_speed_changed)
+        ws.addWidget(self.slider_wave_speed)
+        self.lbl_wave_speed = QLabel("50%")
+        self.lbl_wave_speed.setMinimumWidth(40)
+        self.lbl_wave_speed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        ws.addWidget(self.lbl_wave_speed)
+        layout.addWidget(self.row_wave_speed)
+
+        self.wave_speed_hint = QLabel("0% = 느린 연출  |  100% = 빠른 비트")
+        self.wave_speed_hint.setStyleSheet("color:#888;font-size:10px;")
+        layout.addWidget(self.wave_speed_hint)
+
+        # ── 대역 비율 (spectrum/bass_detail 전용) ──
+        self.zone_line = QFrame()
+        self.zone_line.setFrameShape(QFrame.Shape.HLine)
+        self.zone_line.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(self.zone_line)
         self.zone_label = QLabel("대역 비율 (주파수 분배)")
         self.zone_label.setStyleSheet("font-weight:bold;")
@@ -77,7 +114,10 @@ class AudioParamWidget(QWidget):
         self.zone_balance.zone_changed.connect(lambda *_: self._on_changed())
         layout.addWidget(self.zone_balance)
 
-        self._spectrum_only = [self.row_mid_sens, self.row_high_sens, self.zone_line, self.zone_label, self.zone_balance]
+        # ── 모드별 가시성 그룹 ──
+        self._spectrum_only = [self.row_mid_sens, self.row_high_sens,
+                               self.zone_line, self.zone_label, self.zone_balance]
+        self._wave_only = [self.wave_speed_line, self.row_wave_speed, self.wave_speed_hint]
 
     def _add_slider(self, parent_layout, label_text, min_v, max_v, default, suffix=""):
         row = QHBoxLayout()
@@ -100,6 +140,11 @@ class AudioParamWidget(QWidget):
         self._update_labels()
         self.params_changed.emit()
 
+    def _on_wave_speed_changed(self, value):
+        self.lbl_wave_speed.setText(f"{value}%")
+        if not self._updating:
+            self.params_changed.emit()
+
     def _update_labels(self):
         self.lbl_bass_sens.setText(f"{self.slider_bass_sens.value() / 100:.2f}")
         self.lbl_mid_sens.setText(f"{self.slider_mid_sens.value() / 100:.2f}")
@@ -107,24 +152,40 @@ class AudioParamWidget(QWidget):
         self.lbl_brightness.setText(f"{self.slider_brightness.value()}%")
         self.lbl_attack.setText(f"{self.slider_attack.value() / 100:.2f}")
         self.lbl_release.setText(f"{self.slider_release.value() / 100:.2f}")
+        self.lbl_wave_speed.setText(f"{self.slider_wave_speed.value()}%")
 
     def set_audio_mode(self, mode_name):
         is_banded = mode_name in ("spectrum", "bass_detail")
+        is_wave = mode_name == "wave"
+
         for w in self._spectrum_only:
             w.setVisible(is_banded)
+        for w in self._wave_only:
+            w.setVisible(is_wave)
+
         if mode_name == "bass_detail":
             self.label_sens.setText("감도 (Bass Detail)")
         elif mode_name == "spectrum":
             self.label_sens.setText("감도 (대역별)")
+        elif mode_name == "wave":
+            self.label_sens.setText("감도 (Bass → Wave)")
+        elif mode_name == "dynamic":
+            self.label_sens.setText("감도 (Dynamic)")
         else:
             self.label_sens.setText("감도 (Bass)")
 
     def get_params(self):
         zb, zm, zh = self.zone_balance.get_values()
-        return {"bass_sens": self.slider_bass_sens.value(), "mid_sens": self.slider_mid_sens.value(),
-                "high_sens": self.slider_high_sens.value(), "brightness": self.slider_brightness.value(),
-                "attack": self.slider_attack.value(), "release": self.slider_release.value(),
-                "zone_bass": zb, "zone_mid": zm, "zone_high": zh}
+        return {
+            "bass_sens": self.slider_bass_sens.value(),
+            "mid_sens": self.slider_mid_sens.value(),
+            "high_sens": self.slider_high_sens.value(),
+            "brightness": self.slider_brightness.value(),
+            "attack": self.slider_attack.value(),
+            "release": self.slider_release.value(),
+            "wave_speed": self.slider_wave_speed.value(),
+            "zone_bass": zb, "zone_mid": zm, "zone_high": zh,
+        }
 
     def set_params(self, d, defaults=None):
         self._updating = True
@@ -135,7 +196,12 @@ class AudioParamWidget(QWidget):
         self.slider_brightness.setValue(d.get("brightness", df["brightness"]))
         self.slider_attack.setValue(d.get("attack", df["attack"]))
         self.slider_release.setValue(d.get("release", df["release"]))
-        self.zone_balance.set_values(d.get("zone_bass", df["zone_bass"]), d.get("zone_mid", df["zone_mid"]), d.get("zone_high", df["zone_high"]))
+        self.slider_wave_speed.setValue(d.get("wave_speed", df.get("wave_speed", 50)))
+        self.zone_balance.set_values(
+            d.get("zone_bass", df["zone_bass"]),
+            d.get("zone_mid", df["zone_mid"]),
+            d.get("zone_high", df["zone_high"]),
+        )
         self._update_labels()
         self._updating = False
 
