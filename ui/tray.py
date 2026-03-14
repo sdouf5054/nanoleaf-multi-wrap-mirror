@@ -3,6 +3,11 @@
 [ADR-033] keyboard 라이브러리 유지 — QTimer.singleShot(0)으로 스레드 마샬링
 [ADR-039] 트레이 밝기 조절을 시그널로 분리 — tab 내부 위젯 직접 접근 제거
 
+[FIX] 우클릭 시 간헐적 크래시 수정:
+- QMenu를 인스턴스 변수(_menu)로 명시 보관 → GC 방지
+- QAction들도 menu의 child로 생성 → 소유권 체인 확보
+- cleanup()에서 menu를 명시적으로 정리
+
 Signals:
     toggle_requested(): 엔진 on/off 토글 요청
     brightness_delta(int): 밝기 변경 요청 (+10 또는 -10)
@@ -52,12 +57,16 @@ class SystemTray(QSystemTrayIcon):
         self.setToolTip("Nanoleaf Screen Mirror")
 
         self._hotkey_handles = []
+        self._menu = None  # ★ 인스턴스 변수로 선언 — GC 방지
         self._build_menu()
         self.setup_hotkeys()
         self.activated.connect(self._on_activated)
 
     def _build_menu(self):
+        # ★ QMenu를 인스턴스 변수로 유지 — setContextMenu()만으로는
+        #    Python 측 참조가 사라질 수 있어 GC 대상이 됨
         menu = QMenu()
+        self._menu = menu
 
         self.status_action = QAction("대기 중", menu)
         self.status_action.setEnabled(False)
@@ -154,3 +163,7 @@ class SystemTray(QSystemTrayIcon):
 
     def cleanup(self):
         self._clear_hotkeys()
+        # ★ 메뉴 명시적 정리 — deleteLater()로 안전하게 해제
+        if self._menu is not None:
+            self._menu.deleteLater()
+            self._menu = None

@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
 
         # ── 시스템 트레이 (ADR-033, ADR-039) ──
         opts = config.get("options", {})
-        self.tray = SystemTray(config, parent=None)
+        self.tray = SystemTray(config, parent=self)
         self._connect_tray_signals()
 
         if (QSystemTrayIcon.isSystemTrayAvailable()
