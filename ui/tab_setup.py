@@ -1,4 +1,7 @@
-"""LED 캘리브레이션 탭 — 코너 찾기 + 세그먼트 자동 생성 (PySide6)"""
+"""LED 캘리브레이션 탭 — 코너 찾기 + 세그먼트 자동 생성 (PySide6)
+
+[ADR-040] 공통 레이아웃 상수 적용 — 색상 보정 탭과 여백/버튼 위치 통일.
+"""
 
 import time
 import copy
@@ -12,6 +15,10 @@ from PySide6.QtCore import Qt, QThread, Signal
 from core.config import save_config
 
 _OWNER = "setup_tab"
+
+# ── [ADR-040] 공통 레이아웃 상수 ──
+_GROUP_MARGINS = (6, 16, 6, 4)
+_GROUP_SPACING = 3
 
 
 class LedScanThread(QThread):
@@ -87,18 +94,33 @@ class SetupTab(QWidget):
         self._load_from_config()
 
     def _build_ui(self):
-        scroll = QScrollArea(self); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
-        container = QWidget(); layout = QVBoxLayout(container); layout.setSpacing(14)
-        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.addWidget(scroll); scroll.setWidget(container)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 6, 10, 6)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+        scroll.setWidget(container)
 
         # 연결
         conn_layout = QHBoxLayout()
-        self.btn_connect = QPushButton("LED 연결"); self.btn_connect.clicked.connect(self._toggle_connection); conn_layout.addWidget(self.btn_connect)
-        self.conn_label = QLabel("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); conn_layout.addWidget(self.conn_label); conn_layout.addStretch()
+        self.btn_connect = QPushButton("LED 연결")
+        self.btn_connect.clicked.connect(self._toggle_connection)
+        conn_layout.addWidget(self.btn_connect)
+        self.conn_label = QLabel("연결 안 됨")
+        self.conn_label.setStyleSheet("color:#c0392b;")
+        conn_layout.addWidget(self.conn_label)
+        conn_layout.addStretch()
         layout.addLayout(conn_layout)
 
         # 기본 설정
-        basic_group = QGroupBox("기본 설정"); basic_layout = QHBoxLayout(basic_group)
+        basic_group = QGroupBox("기본 설정")
+        basic_layout = QHBoxLayout(basic_group)
+        basic_layout.setContentsMargins(*_GROUP_MARGINS)
         basic_layout.addWidget(QLabel("LED 수:"))
         self.spin_led_count = QSpinBox(); self.spin_led_count.setRange(1, 300); self.spin_led_count.setValue(self.config["device"]["led_count"])
         basic_layout.addWidget(self.spin_led_count)
@@ -108,11 +130,14 @@ class SetupTab(QWidget):
         layout.addWidget(basic_group)
 
         # LED 스캔
-        scan_group = QGroupBox("LED 코너 찾기"); scan_layout = QVBoxLayout(scan_group)
+        scan_group = QGroupBox("LED 코너 찾기")
+        scan_layout = QVBoxLayout(scan_group)
+        scan_layout.setSpacing(_GROUP_SPACING)
+        scan_layout.setContentsMargins(*_GROUP_MARGINS)
         scan_desc = QLabel("LED를 순차 점등하면서 각 코너의 LED 번호를 기록합니다."); scan_desc.setWordWrap(True); scan_layout.addWidget(scan_desc)
         ctrl_layout = QHBoxLayout()
         self.btn_scan_start = QPushButton("▶ 자동 스캔"); self.btn_scan_start.clicked.connect(self._start_auto_scan); ctrl_layout.addWidget(self.btn_scan_start)
-        self.btn_manual = QPushButton("수동 모드"); self.btn_manual.clicked.connect(self._start_manual_mode); ctrl_layout.addWidget(self.btn_manual)
+        self.btn_manual = QPushButton("🖐 수동 모드"); self.btn_manual.clicked.connect(self._start_manual_mode); ctrl_layout.addWidget(self.btn_manual)
         self.btn_prev = QPushButton("◀"); self.btn_prev.setFixedWidth(50); self.btn_prev.clicked.connect(self._step_backward); self.btn_prev.setEnabled(False); ctrl_layout.addWidget(self.btn_prev)
         self.btn_next = QPushButton("▶"); self.btn_next.setFixedWidth(50); self.btn_next.clicked.connect(self._step_forward); self.btn_next.setEnabled(False); ctrl_layout.addWidget(self.btn_next)
         self.btn_scan_stop = QPushButton("⏹ 중지"); self.btn_scan_stop.clicked.connect(self._stop_scan); self.btn_scan_stop.setEnabled(False); ctrl_layout.addWidget(self.btn_scan_stop)
@@ -128,7 +153,10 @@ class SetupTab(QWidget):
         scan_layout.addLayout(led_display); layout.addWidget(scan_group)
 
         # 코너 테이블
-        corner_group = QGroupBox("코너 데이터 (2바퀴)"); corner_layout = QVBoxLayout(corner_group)
+        corner_group = QGroupBox("코너 데이터 (2바퀴)")
+        corner_layout = QVBoxLayout(corner_group)
+        corner_layout.setSpacing(_GROUP_SPACING)
+        corner_layout.setContentsMargins(*_GROUP_MARGINS)
         corner_desc = QLabel("각 바퀴에서 변이 바뀌는 코너 LED 번호를 입력합니다."); corner_desc.setWordWrap(True); corner_layout.addWidget(corner_desc)
         self.corner_table = QTableWidget(); self.corner_table.setRowCount(self.N_WRAPS); self.corner_table.setColumnCount(5)
         self.corner_table.setHorizontalHeaderLabels(["시작(좌하)", "좌상", "우상", "우하", "끝점"])
@@ -137,9 +165,15 @@ class SetupTab(QWidget):
         self.corner_table.setFixedHeight(90); corner_layout.addWidget(self.corner_table); layout.addWidget(corner_group)
 
         # 세그먼트 미리보기
-        seg_group = QGroupBox("세그먼트 (자동 생성)"); seg_layout = QVBoxLayout(seg_group)
+        seg_group = QGroupBox("세그먼트 (자동 생성)")
+        seg_layout = QVBoxLayout(seg_group)
+        seg_layout.setSpacing(_GROUP_SPACING)
+        seg_layout.setContentsMargins(*_GROUP_MARGINS)
         self.seg_preview = QTextEdit(); self.seg_preview.setReadOnly(True); self.seg_preview.setMaximumHeight(160)
         self.seg_preview.setStyleSheet("font-family:Consolas,monospace;"); seg_layout.addWidget(self.seg_preview); layout.addWidget(seg_group)
+
+        # 나머지 공간 흡수 — 버튼을 하단에 고정
+        layout.addStretch()
 
         # 버튼
         btn_layout = QHBoxLayout()
@@ -165,7 +199,7 @@ class SetupTab(QWidget):
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
     def _set_connected_ui(self):
-        self.conn_label.setText("연결됨"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
+        self.conn_label.setText("연결됨 ✅"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
     def _set_disconnected_ui(self):
         self.conn_label.setText("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); self.btn_connect.setText("LED 연결")
 

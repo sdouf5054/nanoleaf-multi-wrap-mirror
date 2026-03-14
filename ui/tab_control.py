@@ -340,6 +340,9 @@ class ControlTab(QWidget):
         self._sync_config_from_ui()
         self._applied_snapshot = copy.deepcopy(self.config)
         self.config_applied.emit()
+        # 저장 확인 피드백
+        self.btn_apply.setText("✅ 저장됨")
+        QTimer.singleShot(2000, lambda: self.btn_apply.setText("💾 저장"))
 
     def _on_revert(self):
         for key in self._applied_snapshot: self.config[key] = copy.deepcopy(self._applied_snapshot[key])

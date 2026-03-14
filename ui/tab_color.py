@@ -1,4 +1,7 @@
-"""색상 보정 탭 — 화이트밸런스, 감마, 채널 믹싱 + 실시간 LED 프리뷰 (PySide6)"""
+"""색상 보정 탭 — 화이트밸런스, 감마, 채널 믹싱 + 실시간 LED 프리뷰 (PySide6)
+
+[ADR-040] 공통 레이아웃 상수 적용 — 다른 탭과 여백 통일.
+"""
 
 import numpy as np
 from PySide6.QtWidgets import (
@@ -16,6 +19,10 @@ TEST_COLORS = [
     ("따뜻한 백", 255, 220, 180),
 ]
 _OWNER = "color_tab"
+
+# ── [ADR-040] 공통 레이아웃 상수 ──
+_GROUP_MARGINS = (6, 16, 6, 4)
+_GROUP_SPACING = 3
 
 
 class ColorSliderRow(QWidget):
@@ -67,7 +74,8 @@ class ColorTab(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 6, 10, 6)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
@@ -87,6 +95,8 @@ class ColorTab(QWidget):
         # 화이트밸런스
         wb_group = QGroupBox("화이트밸런스")
         wb_layout = QVBoxLayout(wb_group)
+        wb_layout.setSpacing(_GROUP_SPACING)
+        wb_layout.setContentsMargins(*_GROUP_MARGINS)
         self.wb_r = ColorSliderRow("Red", 0.5, 1.5, self.color_cfg["wb_r"])
         self.wb_g = ColorSliderRow("Green", 0.5, 1.5, self.color_cfg["wb_g"])
         self.wb_b = ColorSliderRow("Blue", 0.5, 1.5, self.color_cfg["wb_b"])
@@ -98,6 +108,8 @@ class ColorTab(QWidget):
         # 감마
         gamma_group = QGroupBox("감마")
         gamma_layout = QVBoxLayout(gamma_group)
+        gamma_layout.setSpacing(_GROUP_SPACING)
+        gamma_layout.setContentsMargins(*_GROUP_MARGINS)
         self.gamma_r = ColorSliderRow("Red", 0.5, 3.0, self.color_cfg["gamma_r"])
         self.gamma_g = ColorSliderRow("Green", 0.5, 3.0, self.color_cfg["gamma_g"])
         self.gamma_b = ColorSliderRow("Blue", 0.5, 3.0, self.color_cfg["gamma_b"])
@@ -109,6 +121,8 @@ class ColorTab(QWidget):
         # 채널 믹싱
         mix_group = QGroupBox("채널 믹싱 (비선형)")
         mix_layout = QVBoxLayout(mix_group)
+        mix_layout.setSpacing(_GROUP_SPACING)
+        mix_layout.setContentsMargins(*_GROUP_MARGINS)
         self.bleed = ColorSliderRow("Green→Red", 0.0, 1.5, self.color_cfg["green_red_bleed"])
         self.bleed.slider.valueChanged.connect(self._on_value_changed)
         mix_layout.addWidget(self.bleed)
@@ -117,6 +131,7 @@ class ColorTab(QWidget):
         # 테스트 색상
         test_group = QGroupBox("테스트 색상 (클릭하여 LED에 전송)")
         test_layout = QGridLayout(test_group)
+        test_layout.setContentsMargins(*_GROUP_MARGINS)
         for i, (name, r, g, b) in enumerate(TEST_COLORS):
             btn = QPushButton(name)
             btn.setMinimumHeight(32)
@@ -143,6 +158,9 @@ class ColorTab(QWidget):
         preview_layout.addStretch()
         layout.addLayout(preview_layout)
 
+        # 나머지 공간을 미리보기와 버튼 사이에 흡수
+        layout.addStretch()
+
         # 버튼
         btn_layout = QHBoxLayout()
         btn_save = QPushButton("💾 설정 저장")
@@ -157,7 +175,7 @@ class ColorTab(QWidget):
         layout.addLayout(btn_layout)
 
     def _set_connected_ui(self):
-        self.conn_label.setText("연결됨")
+        self.conn_label.setText("연결됨 ✅")
         self.conn_label.setStyleSheet("color: #2d8c46;")
         self.btn_connect.setText("연결 해제")
 
