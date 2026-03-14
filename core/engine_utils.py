@@ -188,9 +188,13 @@ def _build_led_zone_map_by_side(config, n_zones):
                 mapping[i] = 0
 
     elif n_zones == 4:
-        side_to_zone = {"top": 0, "right": 1, "bottom": 2, "left": 3}
+        cx, cy = screen_w / 2.0, screen_h / 2.0
         for i in range(led_count):
-            mapping[i] = side_to_zone.get(sides[i], 0)
+            x, y = positions[i]
+            if x <= cx:
+                mapping[i] = 0 if y <= cy else 3  # 좌상=0, 좌하=3
+            else:
+                mapping[i] = 1 if y <= cy else 2  # 우상=1, 우하=2
 
     elif n_zones == 8:
         cx, cy = screen_w / 2.0, screen_h / 2.0
