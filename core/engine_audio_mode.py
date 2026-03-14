@@ -2,6 +2,10 @@
 
 BaseEngine을 상속하여 오디오 비주얼라이저 전용 메인 루프를 구현합니다.
 ADR-014 벡터화 렌더링 함수를 사용하여 per-LED Python 루프를 제거.
+
+[변경] 절전 복귀 대응:
+- _run_loop에서 _check_and_handle_session_resume() 호출
+- USB 끊김 시 force_reconnect() 시도
 """
 
 import time
@@ -147,6 +151,9 @@ class AudioModeEngine(BaseEngine):
                     break
                 continue
 
+            # ★ 세션 복귀 (절전모드)
+            self._check_and_handle_session_resume()
+
             # 대역 비율 변경 → 밴드 매핑 재계산
             if ap.zone_weights != prev_zone_weights:
                 n_bands = self._audio_engine.n_bands
@@ -220,9 +227,14 @@ class AudioModeEngine(BaseEngine):
                 pass
 
             if not self._device.connected:
-                self.status_changed.emit("USB 연결 끊김")
-                if stop_wait(timeout=1.0):
-                    break
+                self.status_changed.emit("USB 연결 끊김 — 재연결 시도 중...")
+                # ★ 즉시 재연결 시도
+                self._device.force_reconnect()
+                if self._device.connected:
+                    self.status_changed.emit("USB 재연결 성공 — 오디오 실행 중")
+                else:
+                    if stop_wait(timeout=2.0):
+                        break
                 continue
 
             # 시그널 (3프레임마다)

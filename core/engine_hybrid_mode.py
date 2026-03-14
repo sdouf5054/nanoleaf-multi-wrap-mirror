@@ -2,6 +2,10 @@
 
 오디오 + 화면 캡처를 결합. AudioModeEngine과 유사하나,
 화면 캡처에서 얻은 per-LED 색상을 base_color로 사용합니다.
+
+[변경] 절전 복귀 대응:
+- _run_loop에서 _check_and_handle_session_resume() 호출
+- USB 끊김 시 force_reconnect() 시도
 """
 
 import time
@@ -178,6 +182,9 @@ class HybridEngine(BaseEngine):
                     break
                 continue
 
+            # ★ 세션 복귀 (절전모드)
+            self._check_and_handle_session_resume()
+
             # 디스플레이 변경
             if self._display_change_flag.is_set():
                 self._handle_display_change()
@@ -284,9 +291,14 @@ class HybridEngine(BaseEngine):
                 pass
 
             if not self._device.connected:
-                self.status_changed.emit("USB 연결 끊김")
-                if stop_wait(timeout=1.0):
-                    break
+                self.status_changed.emit("USB 연결 끊김 — 재연결 시도 중...")
+                # ★ 즉시 재연결 시도
+                self._device.force_reconnect()
+                if self._device.connected:
+                    self.status_changed.emit("USB 재연결 성공 — 하이브리드 실행 중")
+                else:
+                    if stop_wait(timeout=2.0):
+                        break
                 continue
 
             if frame_count % 3 == 0:

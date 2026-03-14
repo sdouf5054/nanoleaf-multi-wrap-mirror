@@ -3,6 +3,8 @@
 [ADR-019] MainWindow의 13+ 릴레이 슬롯을 제거하고,
 UI와 엔진 사이의 파라미터 전달을 단일 객체로 집중합니다.
 
+[변경] on_session_resume() 추가 — 절전 복귀 시 엔진에 전달
+
 사용 패턴:
     controller = EngineController(config)
 
@@ -168,6 +170,11 @@ class EngineController(QObject):
     def on_display_changed(self):
         if self._engine and self._engine.isRunning():
             self._engine.on_display_changed()
+
+    def on_session_resume(self):
+        """★ 절전모드 복귀 시 호출 — 엔진에 세션 복귀 플래그 전달."""
+        if self._engine and self._engine.isRunning():
+            self._engine.on_session_resume()
 
     # ══════════════════════════════════════════════════════════════
     #  파라미터 전달 (ADR-003 + ADR-019)

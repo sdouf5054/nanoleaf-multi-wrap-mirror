@@ -6,6 +6,12 @@
 [ADR-031] Display change debouncing 1500ms (KEEP)
 [ADR-039] 트레이 밝기를 시그널로 분리 — 위젯 직접 접근 제거
 [ADR-042] 종료 시 saved_config(💾 스냅샷)을 디스크에 기록 — 미저장 변경 유실
+
+[변경] 절전모드 복귀 대응:
+- WM_POWERBROADCAST + PBT_APMRESUMEAUTOMATIC 감지
+- SessionEventFilter에서 "session_resume" 이벤트 발생
+- _on_session_event에서 engine_ctrl.on_session_resume() 호출
+- 3초 디바운스로 중복 복귀 이벤트 방지
 """
 
 import ctypes
@@ -34,9 +40,14 @@ WM_DISPLAYCHANGE = 0x007E
 WTS_SESSION_LOCK = 0x7
 WTS_SESSION_UNLOCK = 0x8
 
+# ★ 절전모드 복귀 상수
+WM_POWERBROADCAST = 0x0218
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_APMRESUMESUSPEND = 0x0007
+
 
 class SessionEventFilter(QAbstractNativeEventFilter):
-    """Windows 잠금/해제 + 디스플레이 변경 이벤트 감지."""
+    """Windows 잠금/해제 + 디스플레이 변경 + 절전 복귀 이벤트 감지."""
 
     def __init__(self, callback):
         super().__init__()
@@ -53,6 +64,10 @@ class SessionEventFilter(QAbstractNativeEventFilter):
                         self._callback("unlock")
                 elif msg.message == WM_DISPLAYCHANGE:
                     self._callback("display_change")
+                # ★ 절전모드 복귀 감지
+                elif msg.message == WM_POWERBROADCAST:
+                    if msg.wParam in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
+                        self._callback("session_resume")
             except Exception:
                 pass
         return False, 0
@@ -127,7 +142,7 @@ class MainWindow(QMainWindow):
                 and opts.get("tray_enabled", True)):
             self.tray.show()
 
-        # ── 잠금 감지 + 디스플레이 변경 (ADR-030, ADR-031) ──
+        # ── 잠금 감지 + 디스플레이 변경 + 절전 복귀 (ADR-030, ADR-031) ──
         self._was_running_before_lock = False
         self._lock_restart_mode = None
         self._session_filter = SessionEventFilter(self._on_session_event)
@@ -144,6 +159,12 @@ class MainWindow(QMainWindow):
         self._display_change_timer.setSingleShot(True)
         self._display_change_timer.setInterval(1500)
         self._display_change_timer.timeout.connect(self._on_display_change_settled)
+
+        # ★ 절전 복귀 디바운스 3000ms — 중복 이벤트 방지
+        self._session_resume_timer = QTimer(self)
+        self._session_resume_timer.setSingleShot(True)
+        self._session_resume_timer.setInterval(3000)
+        self._session_resume_timer.timeout.connect(self._on_session_resume_settled)
 
     # ══════════════════════════════════════════════════════════════
     #  시그널 연결
@@ -395,12 +416,18 @@ class MainWindow(QMainWindow):
         self.tray.update_status(text)
 
     # ══════════════════════════════════════════════════════════════
-    #  ADR-030: 잠금 감지 + ADR-031: 디스플레이 변경
+    #  ADR-030: 잠금 감지 + ADR-031: 디스플레이 변경 + 절전 복귀
     # ══════════════════════════════════════════════════════════════
 
     def _on_session_event(self, event):
         if event == "display_change":
             self._display_change_timer.start()
+            return
+
+        # ★ 절전모드 복귀 — 디바운스 후 엔진에 전달
+        if event == "session_resume":
+            if not self._session_resume_timer.isActive():
+                self._session_resume_timer.start()
             return
 
         opts = self.config.get("options", {})
@@ -426,6 +453,18 @@ class MainWindow(QMainWindow):
         """ADR-031: 1500ms 디바운스 후 디스플레이 변경 처리."""
         self.engine_ctrl.on_display_changed()
         self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")
+
+    def _on_session_resume_settled(self):
+        """★ 3000ms 디바운스 후 절전 복귀 처리.
+
+        엔진이 실행 중이면 세션 복귀 플래그를 전달하여
+        USB 강제 재연결 + 캡처 재초기화를 트리거합니다.
+        잠금으로 인해 엔진이 중지된 상태라면 unlock 이벤트가
+        별도로 재시작을 처리하므로 여기서는 무시합니다.
+        """
+        if self.engine_ctrl.is_running:
+            self.engine_ctrl.on_session_resume()
+            self.statusBar().showMessage("절전 복귀 — USB 재연결 중...")
 
     # ══════════════════════════════════════════════════════════════
     #  ADR-028: 단일 인스턴스 — 기존 창 복원

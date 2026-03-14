@@ -2,9 +2,13 @@
 
 BaseEngine을 상속하여 미러링 전용 메인 루프와 리소스를 구현합니다.
 
+[변경] 절전 복귀 대응:
+- _run_loop에서 _check_and_handle_session_resume() 호출
+- USB 끊김 시 재연결 시도 후 continue (기존: 1초 대기만)
+
 프레임별 처리:
 1. 파라미터 스냅샷 교체 (ADR-003)
-2. 디스플레이 변경 / 레이아웃 dirty 처리
+2. 세션 복귀 / 디스플레이 변경 / 레이아웃 dirty 처리
 3. 화면 캡처
 4. 색상 파이프라인 (per-LED 또는 N구역)
 5. USB 전송
@@ -122,6 +126,9 @@ class MirrorEngine(BaseEngine):
                 if stop_wait(timeout=0.5):
                     break
                 continue
+
+            # ── ★ 세션 복귀 (절전모드) ──
+            self._check_and_handle_session_resume()
 
             # ── 디스플레이 변경 ──
             if self._display_change_flag.is_set():
@@ -273,9 +280,14 @@ class MirrorEngine(BaseEngine):
                 pass
 
             if not self._device.connected:
-                self.status_changed.emit("USB 연결 끊김 — 재연결 대기 중...")
-                if stop_wait(timeout=1.0):
-                    break
+                self.status_changed.emit("USB 연결 끊김 — 재연결 시도 중...")
+                # ★ 즉시 재연결 시도 (기존: 1초 대기만 하고 넘어감)
+                self._device.force_reconnect()
+                if self._device.connected:
+                    self.status_changed.emit("USB 재연결 성공 — 미러링 실행 중")
+                else:
+                    if stop_wait(timeout=2.0):
+                        break
                 continue
 
             if debug:

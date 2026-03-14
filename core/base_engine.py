@@ -12,6 +12,11 @@
 공유 리소스(USB device, config, signals)는 BaseEngine에,
 모드별 로직(_init_mode_resources, _run_loop, _cleanup_mode)은 서브클래스에.
 
+[변경] 절전모드 복귀 대응:
+- _session_resume_flag: 세션 복귀 감지 플래그
+- on_session_resume(): 외부(MainWindow)에서 호출
+- _handle_session_resume(): USB 강제 재연결
+
 Signals:
     fps_updated(float), error(str, str), status_changed(str),
     energy_updated(float, float, float), spectrum_updated(object),
@@ -90,6 +95,9 @@ class BaseEngine(QThread):
         # ── 디스플레이 변경 ──
         self._display_change_flag = threading.Event()
 
+        # ── ★ 세션 복귀 (절전모드) ──
+        self._session_resume_flag = threading.Event()
+
         # ── 공유 리소스 (서브클래스에서도 사용) ──
         self._device: NanoleafDevice | None = None
         self._capture = None
@@ -155,7 +163,7 @@ class BaseEngine(QThread):
             self._current_audio_params = a
 
     # ══════════════════════════════════════════════════════════════
-    #  일시정지 / 중지
+    #  일시정지 / 중지 / 세션 복귀
     # ══════════════════════════════════════════════════════════════
 
     def pause(self):
@@ -175,6 +183,38 @@ class BaseEngine(QThread):
 
     def on_display_changed(self):
         self._display_change_flag.set()
+
+    def on_session_resume(self):
+        """★ 절전모드 복귀 시 UI(MainWindow)에서 호출.
+
+        엔진 루프가 다음 프레임에서 USB 재연결을 시도합니다.
+        """
+        self._session_resume_flag.set()
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★ 세션 복귀 처리 — USB 강제 재연결
+    # ══════════════════════════════════════════════════════════════
+
+    def _handle_session_resume(self):
+        """절전모드 복귀 후 USB 디바이스 강제 재연결."""
+        self._session_resume_flag.clear()
+        self.status_changed.emit("절전 복귀 — USB 재연결 중...")
+
+        if self._device is not None:
+            self._device.force_reconnect()
+
+            if self._device.connected:
+                self.status_changed.emit("USB 재연결 성공")
+            else:
+                self.error.emit("절전 복귀 후 USB 재연결 실패", "warning")
+
+        # 캡처도 복구 필요할 수 있음
+        self._display_change_flag.set()
+
+    def _check_and_handle_session_resume(self):
+        """프레임 루프에서 호출 — 세션 복귀 플래그 확인."""
+        if self._session_resume_flag.is_set():
+            self._handle_session_resume()
 
     # ══════════════════════════════════════════════════════════════
     #  Grid 크기 결정 — 세로 모드에서 swap
