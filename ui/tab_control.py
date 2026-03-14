@@ -194,7 +194,14 @@ class ControlTab(QWidget):
         self.spin_target_fps = QSpinBox(); self.spin_target_fps.setRange(10, 60)
         self.spin_target_fps.setValue(self.config.get("mirror", {}).get("target_fps", 60)); fr.addWidget(self.spin_target_fps); fr.addStretch(); cl.addLayout(fr)
         ar = QHBoxLayout(); ar.addWidget(QLabel("오디오 디바이스:"))
-        self.combo_audio_device = QComboBox(); self._refresh_audio_devices(); ar.addWidget(self.combo_audio_device)
+        self.combo_audio_device = QComboBox(); self._refresh_audio_devices()
+        # 저장된 오디오 디바이스 복원
+        saved_dev = self.config.get("options", {}).get("audio_device_index")
+        if saved_dev is not None:
+            for i in range(self.combo_audio_device.count()):
+                if self.combo_audio_device.itemData(i) == saved_dev:
+                    self.combo_audio_device.setCurrentIndex(i); break
+        ar.addWidget(self.combo_audio_device)
         btn_ref = QPushButton("🔄"); btn_ref.setFixedWidth(36); btn_ref.clicked.connect(self._refresh_audio_devices); ar.addWidget(btn_ref); ar.addStretch(); cl.addLayout(ar)
         parent.addWidget(cg)
 
@@ -212,12 +219,12 @@ class ControlTab(QWidget):
     # ── 이벤트 ───────────────────────────────────────────────────
 
     def _on_start_clicked(self):
-        self._apply_all_settings(); self.config_applied.emit(); self.request_engine_start.emit(self._current_mode)
+        self._sync_config_from_ui(); self.request_engine_start.emit(self._current_mode)
 
     def _on_mode_changed(self, idx):
         self._current_mode = _INDEX_MODE.get(idx, MODE_MIRROR); self.mode_stack.setCurrentIndex(idx)
         if self._is_running:
-            self._apply_all_settings(); self.config_applied.emit(); self.request_mode_switch.emit(self._current_mode)
+            self._sync_config_from_ui(); self.request_mode_switch.emit(self._current_mode)
 
     def _adjust_stack(self, idx):
         """[ADR-040] QStackedWidget 높이를 현재 패널에 맞추되,
@@ -250,7 +257,9 @@ class ControlTab(QWidget):
         self.btn_preview_toggle.setText("👁 프리뷰 숨기기" if checked else "👁 프리뷰 보기")
 
     def _on_set_default(self):
-        self.config.setdefault("options", {})["default_mode"] = self._current_mode; self.config_applied.emit()
+        self.config.setdefault("options", {})["default_mode"] = self._current_mode
+        self._applied_snapshot.setdefault("options", {})["default_mode"] = self._current_mode
+        self.config_applied.emit()
         name = _MODE_NAMES.get(self._current_mode, self._current_mode)
         self.btn_set_default.setText(f"{name}이(가) 기본 모드로 설정됨")
         QTimer.singleShot(2000, lambda: self.btn_set_default.setText("현재 모드를 기본값으로 설정"))
@@ -292,8 +301,7 @@ class ControlTab(QWidget):
     def _on_zone_count(self, n):
         """미러링 구역 수 변경 → config 갱신 후 엔진 재시작 (즉시 적용)."""
         if self._is_running:
-            self._apply_all_settings()
-            self.config_applied.emit()
+            self._sync_config_from_ui()
             self.request_mode_switch.emit(self._current_mode)
 
     def _on_audio_params(self, params_dict):
@@ -321,13 +329,17 @@ class ControlTab(QWidget):
 
     # ── Apply / Revert ───────────────────────────────────────────
 
-    def _apply_all_settings(self):
+    def _sync_config_from_ui(self):
+        """UI 위젯 값을 config dict에 반영 (디스크 저장·스냅샷 갱신 없음).
+        엔진 시작, 모드 전환 등에서 호출."""
         self._apply_common(); self.panel_mirror.apply_to_config(self.config)
         self.panel_audio.apply_to_config(); self.panel_hybrid.apply_to_config()
-        self._applied_snapshot = copy.deepcopy(self.config)
 
     def _on_apply(self):
-        self._apply_all_settings(); self.config_applied.emit()
+        """💾 저장 — UI→dict 반영 + 스냅샷 갱신 + 디스크 기록."""
+        self._sync_config_from_ui()
+        self._applied_snapshot = copy.deepcopy(self.config)
+        self.config_applied.emit()
 
     def _on_revert(self):
         for key in self._applied_snapshot: self.config[key] = copy.deepcopy(self._applied_snapshot[key])
@@ -339,12 +351,21 @@ class ControlTab(QWidget):
         m["orientation"] = {0: "auto", 1: "landscape", 2: "portrait"}.get(self.combo_orientation.currentIndex(), "auto")
         m["portrait_rotation"] = "cw" if self.combo_rotation.currentIndex() == 0 else "ccw"
         m["target_fps"] = self.spin_target_fps.value()
+        # 오디오 디바이스 선택 저장
+        self.config.setdefault("options", {})["audio_device_index"] = self.combo_audio_device.currentData()
 
     def _load_common(self, cfg):
         m = cfg.get("mirror", {})
         self.combo_orientation.setCurrentIndex({"auto": 0, "landscape": 1, "portrait": 2}.get(m.get("orientation", "auto"), 0))
         self.combo_rotation.setCurrentIndex(0 if m.get("portrait_rotation", "cw") == "cw" else 1)
         self.spin_target_fps.setValue(m.get("target_fps", 60))
+        # 오디오 디바이스 선택 복원
+        saved_dev = cfg.get("options", {}).get("audio_device_index")
+        if saved_dev is not None:
+            for i in range(self.combo_audio_device.count()):
+                if self.combo_audio_device.itemData(i) == saved_dev:
+                    self.combo_audio_device.setCurrentIndex(i)
+                    break
 
     def _refresh_audio_devices(self):
         self.combo_audio_device.clear(); self.combo_audio_device.addItem("자동 (기본 출력 디바이스)", None)
@@ -356,6 +377,11 @@ class ControlTab(QWidget):
 
     @property
     def current_mode(self): return self._current_mode
+
+    @property
+    def saved_config(self):
+        """💾 저장 버튼으로 확정된 config 스냅샷. 종료 시 이 값을 디스크에 기록."""
+        return self._applied_snapshot
 
     def set_engine_ctrl(self, ctrl):
         """EngineController 참조 설정 (MainWindow에서 호출)."""

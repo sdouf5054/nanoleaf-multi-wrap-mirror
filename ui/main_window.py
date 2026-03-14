@@ -5,6 +5,7 @@
 [ADR-030] WTSRegisterSessionNotification + NativeEventFilter (KEEP)
 [ADR-031] Display change debouncing 1500ms (KEEP)
 [ADR-039] 트레이 밝기를 시그널로 분리 — 위젯 직접 접근 제거
+[ADR-042] 종료 시 saved_config(💾 스냅샷)을 디스크에 기록 — 미저장 변경 유실
 """
 
 import ctypes
@@ -490,5 +491,29 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        save_config(self.config)
+        # [ADR-042] 컨트롤 탭의 💾 스냅샷에서 해당 키만 복원하여 저장.
+        # 다른 탭(옵션, 색상 보정, LED 설정)이 자체 저장한 값은 유지.
+        import copy
+        saved = self.tab_control.saved_config
+        final = copy.deepcopy(self.config)
+
+        # 컨트롤 탭이 관리하는 키만 스냅샷으로 덮어쓰기
+        _CONTROL_TAB_KEYS = ("mirror", "audio_pulse", "audio_spectrum", "audio_bass_detail")
+        for key in _CONTROL_TAB_KEYS:
+            if key in saved:
+                final[key] = copy.deepcopy(saved[key])
+
+        # options 내 컨트롤 탭 관련 항목만 스냅샷으로 복원
+        _CONTROL_OPTION_KEYS = (
+            "audio_state", "hybrid_state", "audio_device_index", "default_mode",
+        )
+        saved_opts = saved.get("options", {})
+        final_opts = final.setdefault("options", {})
+        for key in _CONTROL_OPTION_KEYS:
+            if key in saved_opts:
+                final_opts[key] = copy.deepcopy(saved_opts[key])
+            elif key in final_opts:
+                del final_opts[key]
+
+        save_config(final)
         QApplication.instance().quit()

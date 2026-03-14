@@ -174,6 +174,7 @@ class MirrorPanel(QWidget):
     def apply_to_config(self, config):
         m = config.setdefault("mirror", {})
         m["brightness"] = self.brightness_slider.value() / 100.0
+        m["smoothing_enabled"] = self.chk_smoothing.isChecked()
         m["smoothing_factor"] = self.spin_smoothing.value()
         m["decay_radius"] = self.spin_decay.value()
         m["parallel_penalty"] = self.spin_penalty.value()
@@ -187,6 +188,7 @@ class MirrorPanel(QWidget):
     def load_from_config(self, config):
         m = config.get("mirror", {})
         self.brightness_slider.setValue(int(m.get("brightness", 1.0) * 100))
+        self.chk_smoothing.setChecked(m.get("smoothing_enabled", True))
         self.spin_smoothing.setValue(m.get("smoothing_factor", 0.5))
         self.spin_decay.setValue(m.get("decay_radius", 0.3))
         self.spin_penalty.setValue(m.get("parallel_penalty", 5.0))
