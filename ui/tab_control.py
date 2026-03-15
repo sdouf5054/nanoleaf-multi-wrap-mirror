@@ -71,7 +71,7 @@ class ControlTab(QWidget):
         self._applied_snapshot = copy.deepcopy(config)
 
         from ui.widgets.audio_param_widget import AUDIO_DEFAULTS
-        for key in ("audio_pulse", "audio_spectrum", "audio_bass_detail"):
+        for key in ("audio_pulse", "audio_spectrum", "audio_bass_detail", "audio_wave", "audio_dynamic"):
             if key not in self.config:
                 mode_name = key.replace("audio_", "")
                 self.config[key] = dict(AUDIO_DEFAULTS.get(mode_name, AUDIO_DEFAULTS["pulse"]))
@@ -332,8 +332,12 @@ class ControlTab(QWidget):
     def _sync_config_from_ui(self):
         """UI 위젯 값을 config dict에 반영 (디스크 저장·스냅샷 갱신 없음).
         엔진 시작, 모드 전환 등에서 호출."""
-        self._apply_common(); self.panel_mirror.apply_to_config(self.config)
-        self.panel_audio.apply_to_config(); self.panel_hybrid.apply_to_config()
+        self._apply_common()
+        self.panel_mirror.apply_to_config(self.config)
+        if self._current_mode == MODE_AUDIO:
+            self.panel_audio.apply_to_config()
+        elif self._current_mode == MODE_HYBRID:
+            self.panel_hybrid.apply_to_config()
 
     def _on_apply(self):
         """💾 저장 — UI→dict 반영 + 스냅샷 갱신 + 디스크 기록."""

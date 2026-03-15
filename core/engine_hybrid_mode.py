@@ -6,6 +6,10 @@
 [변경] 절전 복귀 대응:
 - _run_loop에서 _check_and_handle_session_resume() 호출
 - USB 끊김 시 force_reconnect() 시도
+
+[변경] Dynamic v2:
+- onset 기반 spawn (prev_bass 추적)
+- 면 균등 위치 (side_t_ranges 초기화)
 """
 
 import time
@@ -22,8 +26,9 @@ from core.engine_utils import (
     SCREEN_UPDATE_INTERVAL,
     BASS_DETAIL_FREQ_MIN, BASS_DETAIL_FREQ_MAX, BASS_DETAIL_N_BANDS,
     _compute_led_perimeter_t, _compute_led_band_mapping,
+    _compute_led_clockwise_t,
     _build_led_order_from_segments, _build_led_zone_map_by_side,
-    per_led_to_zone_colors,
+    per_led_to_zone_colors, compute_side_t_ranges,
     build_base_color_array, vectorized_render_pulse,
     vectorized_render_spectrum, vectorized_render_wave,
     vectorized_render_dynamic, leds_to_grb,
@@ -76,6 +81,10 @@ class HybridEngine(BaseEngine):
         # Dynamic 모드 상태
         self._dyn_ripples = []
         self._dyn_last_spawn = 0.0
+        self._dyn_prev_bass = 0.0          # ★ Dynamic onset용 prev_bass
+        self._dyn_prev_raw_bass = 0.0      # ★ raw_bass onset용
+        self._dyn_side_t_ranges = None     # ★ 면별 t 범위
+        self._dyn_clockwise_t = None       # ★ Dynamic 전용 비대칭 둘레 좌표
 
     # ── 서브클래스 인터페이스 ─────────────────────────────────────
 
@@ -131,6 +140,10 @@ class HybridEngine(BaseEngine):
 
         # Wave 모드용 정규화 y좌표
         self._led_norm_y = compute_led_normalized_y(self.config)
+
+        # ★ Dynamic v3.1: clockwise 둘레 좌표 + 면별 t 범위
+        self._dyn_clockwise_t = _compute_led_clockwise_t(self.config)
+        self._dyn_side_t_ranges = compute_side_t_ranges(self.config)
 
     def _cleanup_mode(self):
         if self._audio_engine:
@@ -297,14 +310,24 @@ class HybridEngine(BaseEngine):
                     speed=ap.wave_speed,
                 )
             elif audio_mode == AUDIO_DYNAMIC:
+                # ★ Dynamic v3.2: raw_bass로 onset 감지, smooth bass로 energy
                 self._dyn_last_spawn = dynamic_tick_ripples(
                     self._dyn_ripples, frame_interval,
                     bass, mid, high,
-                    self._perimeter_t,
+                    self._dyn_clockwise_t,
                     self._dyn_last_spawn, loop_start,
+                    prev_bass=self._dyn_prev_bass,
+                    side_t_ranges=self._dyn_side_t_ranges,
+                    attack=ap.attack,
+                    release=ap.release,
+                    sensitivity=ap.bass_sensitivity,
+                    raw_bass=raw_bass,
+                    prev_raw_bass=self._dyn_prev_raw_bass,
                 )
+                self._dyn_prev_bass = bass
+                self._dyn_prev_raw_bass = raw_bass
                 raw_rgb = vectorized_render_dynamic(
-                    self._cached_base_colors, self._perimeter_t,
+                    self._cached_base_colors, self._dyn_clockwise_t,
                     self._dyn_ripples, high,
                     ap.min_brightness, ap.brightness,
                 )

@@ -571,67 +571,331 @@ def vectorized_render_wave(base_colors, led_norm_y, pulses,
 
 
 # ══════════════════════════════════════════════════════════════════
-#  [Dynamic 모드] 파원(ripple) 스폰 + 렌더링
+#  [Dynamic 모드] v4 — Slot + Envelope Follower
+#
+#  핵심 컨셉 변경:
+#  - 기존: onset → spawn ripple → ripple 자체가 attack/release로 밝아졌다 꺼짐
+#  - 신규: onset → slot(위치)을 할당 → slot의 밝기는 매 프레임 bass envelope을 따라감
+#
+#  Pulse 모드와의 유사성:
+#  - Pulse: 매 프레임 intensity = bass → 전체 LED가 bass를 따라감
+#  - Dynamic v4: 매 프레임 각 slot의 intensity가 bass를 따라감, 위치만 onset 시 결정
+#
+#  같은 비트의 연속 onset:
+#  - 새 ripple을 만들지 않고, 가장 최근 slot의 energy를 boost
+#  - "refractory period" — onset 후 일정 시간은 같은 slot에 축적
+#
+#  자연스러운 소멸:
+#  - slot의 envelope이 threshold 이하로 내려가면 자연 소멸
+#  - 교체/즉사 없음 → 시각적 불연속 제거
 # ══════════════════════════════════════════════════════════════════
 
-# Dynamic 파라미터 상수
-DYN_BASS_THRESHOLD = 0.28    # 파원 생성 bass 임계값
-DYN_MID_THRESHOLD = 0.35     # mid 파원 생성 임계값
-DYN_COOLDOWN = 0.07          # 파원 간 최소 간격 (초)
-DYN_MAX_RIPPLES = 14         # 동시 최대 파원 수
-DYN_RIPPLE_SPEED = 1.8       # 파원 확산 속도
-DYN_RIPPLE_WIDTH = 0.10      # 파원 코어 폭 (σ)
-DYN_RIPPLE_HALO = 0.22       # 파원 halo 폭
-DYN_FADE_RATE = 1.4          # 초당 에너지 감쇠율
-DYN_SPARKLE_PROB = 0.20      # 프레임당 sparkle 확률
-DYN_ENERGY_BOOST = 1.6       # 초기 에너지 배수
+# ── Dynamic 파라미터 상수 ──
+DYN_ONSET_DELTA_BASE = 0.012   # 기본 onset 감지 최소 변화량
+DYN_ONSET_BASS_MIN = 0.12     # ★ onset_bass 절대값 최소 (AGC 노이즈 필터)
+DYN_REFRACTORY = 0.10          # onset 후 이 시간 내 재onset → 기존 slot boost (초)
+DYN_COOLDOWN = 0.03            # 새 slot 생성 최소 간격 (boost는 이 제한 없음)
+DYN_MAX_SLOTS = 8              # 동시 최대 slot 수
+DYN_MIN_DISTANCE = 0.18        # 새 slot과 기존 slot 간 최소 거리
+
+# 파원 크기 — 에너지에 따라 스케일링
+DYN_RIPPLE_WIDTH_MIN = 0.03    # 약한 비트: core σ  LED
+DYN_RIPPLE_WIDTH_MAX = 0.06    # 강한 비트: core σ  LED
+DYN_RIPPLE_HALO_MIN = 0.08     # 약한 비트: halo σ  LED
+DYN_RIPPLE_HALO_MAX = 0.12     # 강한 비트: halo σ  LED
+
+DYN_RIPPLE_SPEED = 0.2         # 미세 확산 (제자리 느낌)
+DYN_RIPPLE_EXPAND_CORE = 0.02
+DYN_RIPPLE_EXPAND_HALO = 0.04
+
+# Envelope follower — asymmetric IIR (fast attack / slow release)
+# UI attack/release 슬라이더가 이 값을 스케일링
+DYN_ENV_ATTACK_MIN = 3.0       # attack=0: 보통 속도로 밝아짐
+DYN_ENV_ATTACK_MAX = 25.0      # attack=1: 즉시 밝아짐
+DYN_ENV_RELEASE_MIN = 0.5      # release=0: 빨리 꺼짐 (초당 감쇠율)
+DYN_ENV_RELEASE_MAX = 4.0      # release=1: 아주 천천히 꺼짐
+
+DYN_ENERGY_BOOST = 1.4         # 초기 에너지 배수
+DYN_SPARKLE_PROB = 0.10        # sparkle 확률
+DYN_SLOT_DEATH_THRESHOLD = 0.015  # 이 이하면 slot 소멸
+
+_SIDES = ("bottom", "left", "top", "right")
+
+
+def _compute_led_clockwise_t(config):
+    """[Dynamic 전용] 시계방향 한 바퀴 둘레 좌표 — 모든 LED가 고유 위치.
+
+    상단 좌측 코너(0.0) → 상단(→) → 우측(↓) → 하단(←) → 좌측(↑) → (1.0)
+    """
+    layout_cfg = config["layout"]
+    mirror_cfg = config.get("mirror", {})
+    dev_cfg = config["device"]
+    led_count = dev_cfg["led_count"]
+
+    screen_w = mirror_cfg.get("grid_cols", 64) * 40
+    screen_h = mirror_cfg.get("grid_rows", 32) * 40
+
+    positions, sides = get_led_positions(
+        screen_w, screen_h,
+        layout_cfg["segments"], led_count,
+        orientation=mirror_cfg.get("orientation", "auto"),
+        portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
+    )
+
+    full_perimeter = 2.0 * (screen_w + screen_h)
+    if full_perimeter <= 0:
+        return np.linspace(0, 1, led_count)
+
+    clockwise_t = np.zeros(led_count, dtype=np.float64)
+
+    for i in range(led_count):
+        x, y = positions[i, 0], positions[i, 1]
+        side = sides[i]
+
+        if side == "top":
+            dist = x
+        elif side == "right":
+            dist = screen_w + y
+        elif side == "bottom":
+            dist = screen_w + screen_h + (screen_w - x)
+        elif side == "left":
+            dist = 2.0 * screen_w + screen_h + (screen_h - y)
+        else:
+            dist = 0.0
+
+        clockwise_t[i] = max(0.0, min(dist / full_perimeter, 0.9999))
+
+    return clockwise_t
+
+
+def compute_side_t_ranges(config):
+    """각 면의 clockwise_t 범위를 계산."""
+    layout_cfg = config["layout"]
+    mirror_cfg = config.get("mirror", {})
+    dev_cfg = config["device"]
+    led_count = dev_cfg["led_count"]
+
+    screen_w = mirror_cfg.get("grid_cols", 64) * 40
+    screen_h = mirror_cfg.get("grid_rows", 32) * 40
+
+    positions, sides = get_led_positions(
+        screen_w, screen_h,
+        layout_cfg["segments"], led_count,
+        orientation=mirror_cfg.get("orientation", "auto"),
+        portrait_rotation=mirror_cfg.get("portrait_rotation", "cw"),
+    )
+
+    cw_t = _compute_led_clockwise_t(config)
+
+    side_ranges = {}
+    for side in _SIDES:
+        t_vals = [cw_t[i] for i in range(led_count) if sides[i] == side]
+        if t_vals:
+            side_ranges[side] = (min(t_vals), max(t_vals))
+        else:
+            side_ranges[side] = (0.0, 0.0)
+
+    return side_ranges
 
 
 class DynamicRipple:
-    """하나의 Dynamic 파원 상태."""
-    __slots__ = ("center_t", "radius", "energy", "age", "color_offset")
+    """하나의 Dynamic slot.
 
-    def __init__(self, center_t, energy, color_offset=0.0):
+    v4: envelope follower 패턴.
+    - target_energy: onset 시 설정되는 "이 slot이 도달해야 할 밝기"
+    - envelope: 매 프레임 attack/release로 target을 추적하는 현재 밝기
+    - onset이 반복되면 target이 갱신(boost)될 뿐, slot이 새로 생기지 않음
+    """
+    __slots__ = ("center_t", "radius", "target_energy", "envelope",
+                 "age", "last_onset_time", "color_offset",
+                 "width_core", "width_halo")
+
+    def __init__(self, center_t, energy, current_time, color_offset=0.0):
         self.center_t = center_t
         self.radius = 0.0
-        self.energy = min(energy * DYN_ENERGY_BOOST, 2.5)
+        self.target_energy = min(energy * DYN_ENERGY_BOOST, 1.8)
+        self.envelope = 0.0  # envelope follower — attack rate로 target 추적
         self.age = 0.0
+        self.last_onset_time = current_time
         self.color_offset = color_offset
+
+        # 에너지 비례 파원 크기
+        e_frac = min(energy, 1.0)
+        self.width_core = DYN_RIPPLE_WIDTH_MIN + e_frac * (DYN_RIPPLE_WIDTH_MAX - DYN_RIPPLE_WIDTH_MIN)
+        self.width_halo = DYN_RIPPLE_HALO_MIN + e_frac * (DYN_RIPPLE_HALO_MAX - DYN_RIPPLE_HALO_MIN)
+
+    def boost(self, energy, current_time):
+        """같은 비트의 연속 onset — 기존 slot의 target을 갱신."""
+        new_target = min(energy * DYN_ENERGY_BOOST, 1.8)
+        # target은 현재보다 높을 때만 갱신 (이미 밝으면 유지)
+        if new_target > self.target_energy:
+            self.target_energy = new_target
+            # 크기도 갱신 (더 강한 비트 → 더 큰 파원)
+            e_frac = min(energy, 1.0)
+            self.width_core = max(self.width_core,
+                                  DYN_RIPPLE_WIDTH_MIN + e_frac * (DYN_RIPPLE_WIDTH_MAX - DYN_RIPPLE_WIDTH_MIN))
+            self.width_halo = max(self.width_halo,
+                                  DYN_RIPPLE_HALO_MIN + e_frac * (DYN_RIPPLE_HALO_MAX - DYN_RIPPLE_HALO_MIN))
+        self.last_onset_time = current_time
 
 
 def dynamic_tick_ripples(ripples, dt, bass, mid, high,
-                         perimeter_t, last_spawn_time, current_time):
-    """파원 큐 업데이트: 확산, 감쇠, 새 파원 생성."""
+                         perimeter_t, last_spawn_time, current_time,
+                         prev_bass=0.0, side_t_ranges=None,
+                         attack=0.5, release=0.5, sensitivity=1.0,
+                         raw_bass=None, prev_raw_bass=0.0):
+    """v4: Slot + Envelope Follower.
+
+    매 프레임:
+    1. 모든 slot의 envelope을 bass 기반으로 업데이트 (attack/release)
+    2. onset 감지 시:
+       a. refractory 기간 내 → 가장 최근 slot을 boost
+       b. refractory 지남 → 새 slot 생성 (spacing 적용)
+    3. envelope이 threshold 이하인 slot은 자연 소멸
+    """
+    # attack/release → envelope follower rate
+    env_attack = DYN_ENV_ATTACK_MIN + attack * (DYN_ENV_ATTACK_MAX - DYN_ENV_ATTACK_MIN)
+    env_release = DYN_ENV_RELEASE_MAX - release * (DYN_ENV_RELEASE_MAX - DYN_ENV_RELEASE_MIN)
+    # release=0 → 4.0 (빨리 꺼짐), release=1 → 0.5 (천천히 꺼짐)
+
+    # ── 1. 모든 slot의 envelope 업데이트 ──
     for r in ripples:
         r.radius += DYN_RIPPLE_SPEED * dt
         r.age += dt
-        r.energy *= (1.0 - DYN_FADE_RATE * dt)
 
-    ripples[:] = [r for r in ripples
-                  if r.energy > 0.02 and r.radius < 1.5]
+        # target은 release rate로 자연 감쇠
+        r.target_energy *= (1.0 - env_release * dt)
 
-    if (bass > DYN_BASS_THRESHOLD
-            and (current_time - last_spawn_time) > DYN_COOLDOWN
-            and len(ripples) < DYN_MAX_RIPPLES):
-        center = np.random.random()
-        color_off = (current_time * 0.2) % 1.0
-        ripples.append(DynamicRipple(center, bass, color_off))
-        last_spawn_time = current_time
+        # envelope은 target을 향해 asymmetric하게 추적
+        if r.envelope < r.target_energy:
+            # attack: 빠르게 따라 올라감
+            r.envelope += env_attack * dt
+            r.envelope = min(r.envelope, r.target_energy)
+        else:
+            # release: 천천히 따라 내려감
+            r.envelope *= (1.0 - env_release * dt)
 
-    if (mid > DYN_MID_THRESHOLD
-            and (current_time - last_spawn_time) > DYN_COOLDOWN * 1.5
-            and len(ripples) < DYN_MAX_RIPPLES):
-        center = np.random.random()
-        color_off = (current_time * 0.3 + 0.5) % 1.0
-        ripples.append(DynamicRipple(center, mid * 0.8, color_off))
-        last_spawn_time = current_time
+    # ── 2. 자연 소멸 ──
+    ripples[:] = [r for r in ripples if r.envelope > DYN_SLOT_DEATH_THRESHOLD]
+
+    # ── 3. onset 감지 ──
+    onset_bass = raw_bass if raw_bass is not None else bass
+    onset_prev = prev_raw_bass if raw_bass is not None else prev_bass
+
+    onset_threshold = DYN_ONSET_DELTA_BASE / max(sensitivity, 0.1)
+    bass_delta = onset_bass - onset_prev
+
+    # ★ onset 조건:
+    # 1. delta가 threshold 초과 — sensitivity가 threshold만 조절
+    # 2. onset_bass가 고정 최소값(0.20) 이상 — AGC 노이즈 필터
+    if (bass_delta > onset_threshold
+            and onset_bass > DYN_ONSET_BASS_MIN):
+
+        energy = max(bass, onset_bass * 0.7)
+
+        # refractory 확인: 최근 onset이 있었으면 그 slot을 boost
+        most_recent = None
+        if ripples:
+            most_recent = max(ripples, key=lambda r: r.last_onset_time)
+
+        if (most_recent is not None
+                and (current_time - most_recent.last_onset_time) < DYN_REFRACTORY):
+            # ★ 같은 비트 → 기존 slot boost (새 ripple 안 만듦)
+            most_recent.boost(energy, current_time)
+        elif (current_time - last_spawn_time) > DYN_COOLDOWN:
+            # 새 slot 생성
+            center = _pick_position_with_spacing(side_t_ranges, ripples)
+            if center is not None and len(ripples) < DYN_MAX_SLOTS:
+                color_off = (current_time * 0.2) % 1.0
+                ripples.append(DynamicRipple(center, energy, current_time, color_off))
+                last_spawn_time = current_time
+            elif center is None and len(ripples) < DYN_MAX_SLOTS:
+                # spacing 실패 → 랜덤 위치로 완화 (비트를 놓치지 않기 위해)
+                fallback = _pick_position_proportional(side_t_ranges)
+                color_off = (current_time * 0.2) % 1.0
+                ripples.append(DynamicRipple(fallback, energy, current_time, color_off))
+                last_spawn_time = current_time
+            elif ripples:
+                # slot 꽉 참 → 가장 어두운 slot을 boost (교체 아님!)
+                weakest = min(ripples, key=lambda r: r.envelope)
+                if energy * DYN_ENERGY_BOOST > weakest.envelope * 2.0:
+                    weakest.boost(energy, current_time)
+                    last_spawn_time = current_time
 
     return last_spawn_time
 
 
+def _circular_distance(a, b):
+    """둘레 좌표 0~1에서의 circular 거리 (최대 0.5)."""
+    d = abs(a - b)
+    return min(d, 1.0 - d)
+
+
+def _pick_position_with_spacing(side_t_ranges, ripples, max_attempts=5):
+    """면 길이 비례 위치 + 기존 slot과 최소 거리 유지."""
+    if side_t_ranges is None:
+        return np.random.random()
+
+    valid = []
+    weights = []
+    for side, (t_min, t_max) in side_t_ranges.items():
+        length = t_max - t_min
+        if length > 0:
+            valid.append((t_min, t_max))
+            weights.append(length)
+
+    if not valid:
+        return np.random.random()
+
+    total = sum(weights)
+    probs = [w / total for w in weights]
+
+    for _ in range(max_attempts):
+        idx = np.random.choice(len(valid), p=probs)
+        t_min, t_max = valid[idx]
+        candidate = np.random.uniform(t_min, t_max)
+
+        too_close = False
+        for r in ripples:
+            if _circular_distance(candidate, r.center_t) < DYN_MIN_DISTANCE:
+                too_close = True
+                break
+
+        if not too_close:
+            return candidate
+
+    return None
+
+
+def _pick_position_proportional(side_t_ranges):
+    """면 길이 비례 위치 (spacing 없이)."""
+    if side_t_ranges is None:
+        return np.random.random()
+
+    valid = []
+    weights = []
+    for side, (t_min, t_max) in side_t_ranges.items():
+        length = t_max - t_min
+        if length > 0:
+            valid.append((t_min, t_max))
+            weights.append(length)
+
+    if not valid:
+        return np.random.random()
+
+    total = sum(weights)
+    probs = [w / total for w in weights]
+    idx = np.random.choice(len(valid), p=probs)
+    t_min, t_max = valid[idx]
+    return np.random.uniform(t_min, t_max)
+
+
 def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
                               high, min_brightness, audio_brightness):
-    """[Dynamic 모드] filled disc + core/halo + additive blending."""
+    """v4: envelope follower 기반 렌더링.
+
+    각 slot의 envelope 값이 곧 밝기 — Pulse처럼 부드러운 밝기 변화.
+    """
     n_leds = len(perimeter_t)
     intensity = np.full(n_leds, min_brightness, dtype=np.float64)
 
@@ -639,18 +903,19 @@ def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
         delta = np.abs(perimeter_t - r.center_t)
         delta = np.minimum(delta, 1.0 - delta)
 
-        esc = DYN_RIPPLE_WIDTH + r.radius * 0.3
-        esh = DYN_RIPPLE_HALO + r.radius * 0.5
+        esc = r.width_core + r.radius * DYN_RIPPLE_EXPAND_CORE
+        esh = r.width_halo + r.radius * DYN_RIPPLE_EXPAND_HALO
         esc_sq = 2.0 * esc * esc
         esh_sq = 2.0 * esh * esh
 
-        core = r.energy * np.exp(-(delta * delta) / esc_sq)
-        halo = r.energy * 0.4 * np.exp(-(delta * delta) / esh_sq)
+        # ★ envelope 사용 — attack/release가 반영된 부드러운 밝기
+        e = r.envelope
+        core = e * np.exp(-(delta * delta) / esc_sq)
+        halo = e * 0.35 * np.exp(-(delta * delta) / esh_sq)
         intensity += core + halo
 
-    if high > 0.15:
-        sparkle_mask = np.random.random(n_leds) < (DYN_SPARKLE_PROB * high)
-        intensity[sparkle_mask] += high * 0.8
+    # per-LED soft clamp
+    np.minimum(intensity, 1.0, out=intensity)
 
     intensity *= audio_brightness
     leds = base_colors * intensity[:, np.newaxis]
