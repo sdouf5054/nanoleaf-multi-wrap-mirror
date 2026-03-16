@@ -21,7 +21,7 @@ from core.engine_utils import (
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
-from core.engine_utils import wave_speed_from_slider
+from core.engine_utils import wave_speed_from_slider, gradient_speed_from_slider
 
 _INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail", 3: "wave", 4: "dynamic", 5: "flowing"}
 _MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2, "wave": 3, "dynamic": 4, "flowing": 5}
@@ -119,6 +119,58 @@ class HybridPanel(QWidget):
         effect_row.addWidget(self.combo_color_effect)
         effect_row.addStretch()
         scl.addLayout(effect_row)
+
+        # ★ 효과 속도 슬라이더
+        self._effect_speed_row = QWidget()
+        esr = QHBoxLayout(self._effect_speed_row)
+        esr.setContentsMargins(0, 0, 0, 0)
+        esr.addWidget(QLabel("효과 속도:"))
+        self.slider_gradient_speed = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_gradient_speed.setRange(0, 100)
+        self.slider_gradient_speed.setValue(50)
+        self.slider_gradient_speed.valueChanged.connect(self._on_gradient_param_changed)
+        esr.addWidget(self.slider_gradient_speed)
+        self.lbl_gradient_speed = QLabel("50%")
+        self.lbl_gradient_speed.setMinimumWidth(35)
+        self.lbl_gradient_speed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        esr.addWidget(self.lbl_gradient_speed)
+        scl.addWidget(self._effect_speed_row)
+        self._effect_speed_row.setVisible(False)
+
+        # ★ Hue shift 슬라이더
+        self._effect_hue_row = QWidget()
+        ehr = QHBoxLayout(self._effect_hue_row)
+        ehr.setContentsMargins(0, 0, 0, 0)
+        ehr.addWidget(QLabel("색조 변동:"))
+        self.slider_gradient_hue = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_gradient_hue.setRange(0, 100)
+        self.slider_gradient_hue.setValue(40)
+        self.slider_gradient_hue.valueChanged.connect(self._on_gradient_param_changed)
+        ehr.addWidget(self.slider_gradient_hue)
+        self.lbl_gradient_hue = QLabel("40%")
+        self.lbl_gradient_hue.setMinimumWidth(35)
+        self.lbl_gradient_hue.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        ehr.addWidget(self.lbl_gradient_hue)
+        scl.addWidget(self._effect_hue_row)
+        self._effect_hue_row.setVisible(False)
+
+        # ★ S/V 변동 범위 슬라이더
+        self._effect_sv_row = QWidget()
+        svr = QHBoxLayout(self._effect_sv_row)
+        svr.setContentsMargins(0, 0, 0, 0)
+        svr.addWidget(QLabel("밝기 변동:"))
+        self.slider_gradient_sv = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_gradient_sv.setRange(0, 100)
+        self.slider_gradient_sv.setValue(50)
+        self.slider_gradient_sv.valueChanged.connect(self._on_gradient_param_changed)
+        svr.addWidget(self.slider_gradient_sv)
+        self.lbl_gradient_sv = QLabel("50%")
+        self.lbl_gradient_sv.setMinimumWidth(35)
+        self.lbl_gradient_sv.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        svr.addWidget(self.lbl_gradient_sv)
+        scl.addWidget(self._effect_sv_row)
+        self._effect_sv_row.setVisible(False)
+
         self.lbl_effect_note = QLabel("화면 색 사용 시 색상 효과가 무시됩니다")
         self.lbl_effect_note.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
         scl.addWidget(self.lbl_effect_note)
@@ -162,6 +214,14 @@ class HybridPanel(QWidget):
         self._flowing_lbl.setStyleSheet("font-weight:bold;")
         al.addWidget(self._flowing_lbl)
 
+        # ★ Palette 프리뷰
+        from ui.widgets.flow_palette_preview import FlowPalettePreview
+        palette_row = QHBoxLayout()
+        palette_row.addWidget(QLabel("현재 팔레트:"))
+        self.flow_palette_preview = FlowPalettePreview(n_swatches=5)
+        palette_row.addWidget(self.flow_palette_preview)
+        al.addLayout(palette_row)
+
         # palette 갱신 주기
         fi_row = QHBoxLayout()
         fi_row.addWidget(QLabel("색상 갱신 주기:"))
@@ -198,6 +258,7 @@ class HybridPanel(QWidget):
         self._flowing_widgets = [
             self._flowing_sep, self._flowing_lbl,
             self._flowing_hint,
+            self.flow_palette_preview,
         ]
         # 슬라이더 행은 layout에 포함되어 개별 hide 불가 → 위젯 단위 관리
         # 대신 전체 flowing 영역을 컨테이너로 감쌈
@@ -232,6 +293,20 @@ class HybridPanel(QWidget):
     # ★ Phase 2
     def _on_color_effect_changed(self, idx):
         self._color_effect = _INDEX_COLOR_EFFECT.get(idx, COLOR_EFFECT_STATIC)
+        self._update_effect_sliders_visibility()
+        if self._is_running: self.hybrid_params_changed.emit(self.collect_params())
+
+    def _update_effect_sliders_visibility(self):
+        is_static = self._color_effect == COLOR_EFFECT_STATIC
+        is_gradient = self._color_effect in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW)
+        self._effect_speed_row.setVisible(not is_static)
+        self._effect_hue_row.setVisible(is_gradient)
+        self._effect_sv_row.setVisible(is_gradient)
+
+    def _on_gradient_param_changed(self, value=None):
+        self.lbl_gradient_speed.setText(f"{self.slider_gradient_speed.value()}%")
+        self.lbl_gradient_hue.setText(f"{self.slider_gradient_hue.value()}%")
+        self.lbl_gradient_sv.setText(f"{self.slider_gradient_sv.value()}%")
         if self._is_running: self.hybrid_params_changed.emit(self.collect_params())
 
     # ★ Phase 3: 구역 수 또는 추출 방식 변경
@@ -324,7 +399,9 @@ class HybridPanel(QWidget):
             "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"]),
             # ★ Phase 2
             "color_effect": self._color_effect,
-            "gradient_speed": 1.0,
+            "gradient_speed": gradient_speed_from_slider(self.slider_gradient_speed.value()),
+            "gradient_hue_range": self.slider_gradient_hue.value() / 100.0 * 0.20,
+            "gradient_sv_range": self.slider_gradient_sv.value() / 100.0,
             # ★ Phase 3
             "color_extract_mode": self.combo_extract_mode.currentData() or "average",
             # ★ Phase 4: flowing 파라미터
@@ -336,6 +413,16 @@ class HybridPanel(QWidget):
         self.bar_bass.setValue(int(bass * 100)); self.bar_mid.setValue(int(mid * 100)); self.bar_high.setValue(int(high * 100))
     def update_spectrum(self, spec): self.spectrum_widget.set_values(spec)
 
+    def update_flow_palette(self, colors, ratios=None):
+        """Flowing palette 프리뷰 갱신 — 엔진에서 호출.
+
+        Args:
+            colors: list/array of (R, G, B) — 현재 blob 색상들
+            ratios: list of float — 면적 비율 (선택)
+        """
+        if self.flow_palette_preview.isVisible():
+            self.flow_palette_preview.set_colors(colors, ratios)
+
     def apply_to_config(self):
         self._save_mode_params(self._mode_key)
         opts = self._config.setdefault("options", {})
@@ -344,6 +431,9 @@ class HybridPanel(QWidget):
             "zone_count": self.combo_zone_count.currentData() or 4,
             "min_brightness": self.slider_min_brightness.value(),
             "color_effect": self._color_effect,  # ★ Phase 2
+            "gradient_speed": self.slider_gradient_speed.value(),  # ★ 속도 슬라이더
+            "gradient_hue": self.slider_gradient_hue.value(),      # ★ hue shift
+            "gradient_sv": self.slider_gradient_sv.value(),        # ★ S/V 범위
             "color_extract_mode": self.combo_extract_mode.currentData() or "average",  # ★ Phase 3
             "flowing_interval": self.slider_flowing_interval.value(),  # ★ Phase 4
             "flowing_speed": self.slider_flowing_speed.value(),        # ★ Phase 4
@@ -369,6 +459,28 @@ class HybridPanel(QWidget):
         self.combo_color_effect.blockSignals(True)
         self.combo_color_effect.setCurrentIndex(effect_idx)
         self.combo_color_effect.blockSignals(False)
+
+        # ★ 속도 슬라이더 복원
+        saved_speed = state.get("gradient_speed", 50)
+        self.slider_gradient_speed.blockSignals(True)
+        self.slider_gradient_speed.setValue(saved_speed)
+        self.slider_gradient_speed.blockSignals(False)
+        self.lbl_gradient_speed.setText(f"{saved_speed}%")
+
+        # ★ hue/sv 슬라이더 복원
+        saved_hue = state.get("gradient_hue", 40)
+        self.slider_gradient_hue.blockSignals(True)
+        self.slider_gradient_hue.setValue(saved_hue)
+        self.slider_gradient_hue.blockSignals(False)
+        self.lbl_gradient_hue.setText(f"{saved_hue}%")
+
+        saved_sv = state.get("gradient_sv", 50)
+        self.slider_gradient_sv.blockSignals(True)
+        self.slider_gradient_sv.setValue(saved_sv)
+        self.slider_gradient_sv.blockSignals(False)
+        self.lbl_gradient_sv.setText(f"{saved_sv}%")
+
+        self._update_effect_sliders_visibility()
 
         # ★ Phase 3: 추출 방식 복원
         saved_extract = state.get("color_extract_mode", "average")

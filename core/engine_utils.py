@@ -878,14 +878,30 @@ def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
 # ══════════════════════════════════════════════════════════════════
 
 # 그라데이션 물결 파라미터
-_GRADIENT_S_MIN = 0.4     # 채도 최소 배율
-_GRADIENT_S_RANGE = 0.6   # 채도 변동폭
-_GRADIENT_V_MIN = 0.55    # 밝기 최소 배율
-_GRADIENT_V_RANGE = 0.45  # 밝기 변동폭
-_GRADIENT_V_PHASE_OFFSET = np.pi / 3  # V 물결의 위상 오프셋
+_GRADIENT_S_MIN = 0.2     # 채도 최소 배율 (더 탁해지는 구간 허용)
+_GRADIENT_S_RANGE = 0.8   # 채도 변동폭 (0.2 ~ 1.0)
+_GRADIENT_V_MIN = 0.3     # 밝기 최소 배율 (더 어두워지는 구간 허용)
+_GRADIENT_V_RANGE = 0.7   # 밝기 변동폭 (0.3 ~ 1.0)
+_GRADIENT_V_PHASE_OFFSET = np.pi / 3  # V 물결의 위상 오프셋 (S와 다른 리듬)
+_GRADIENT_HUE_RANGE = 0.08   # hue shift 범위 (±0.08 = 인접색까지 왕복)
+_GRADIENT_HUE_FREQ = 0.7     # hue 물결 주파수 (S/V와 다른 속도로 → 복합적 변화)
 
 # 무지개 시간 순회 기본 속도
 _RAINBOW_TIME_SPEED = 0.08  # hue 회전 초당 (speed=1.0일 때)
+
+# 무지개+그라데이션에서 무지개 회전 속도
+_RAINBOW_ROTATION_SPEED = 0.03  # 무지개 전체가 둘레를 도는 속도
+
+
+def gradient_speed_from_slider(slider_pct):
+    """효과 속도 슬라이더 값(0~100) → 실제 speed 변환.
+
+    0%   → 0.3  (느림)
+    50%  → 1.0  (기본)
+    100% → 3.0  (빠름)
+    """
+    t = slider_pct / 100.0
+    return 0.3 + t * 2.7
 
 
 def _rgb_to_hsv_single(rgb):
@@ -971,7 +987,7 @@ def build_base_color_array_animated(
     led_band_indices, n_bands, clockwise_t, current_time,
     color_effect="static",
     rainbow=True, solid_color=None, screen_colors=None,
-    gradient_speed=1.0,
+    gradient_speed=1.0, gradient_hue_range=0.08, gradient_sv_range=0.5,
 ):
     """시간 기반 색상 효과가 적용된 base_colors 생성.
 
@@ -988,6 +1004,8 @@ def build_base_color_array_animated(
         solid_color: (3,) float32 — 단색 RGB 0~255
         screen_colors: (n_leds, 3) float32 — 화면 색상 (하이브리드)
         gradient_speed: float — 효과 속도 배수
+        gradient_hue_range: float — hue shift 범위 (0=없음, 0.20=넓음)
+        gradient_sv_range: float — S/V 변동 강도 (0=없음, 1.0=최대)
 
     Returns:
         (n_leds, 3) float32 — LED별 RGB 0~255
@@ -1012,26 +1030,46 @@ def build_base_color_array_animated(
 
     if color_effect in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW):
         direction = 1.0 if color_effect == COLOR_EFFECT_GRADIENT_CW else -1.0
+
+        # ★ S/V 범위를 gradient_sv_range(0~1)로 스케일링
+        # sv_range=0 → S/V 변동 없음 (정적), sv_range=1 → 최대 변동
+        sv = max(0.0, min(1.0, gradient_sv_range))
+        s_min = 1.0 - sv * 0.8       # sv=0→1.0, sv=0.5→0.6, sv=1→0.2
+        s_range = sv * 0.8            # sv=0→0.0, sv=0.5→0.4, sv=1→0.8
+        v_min = 1.0 - sv * 0.7       # sv=0→1.0, sv=0.5→0.65, sv=1→0.3
+        v_range = sv * 0.7            # sv=0→0.0, sv=0.5→0.35, sv=1→0.7
+
+        # ★ hue range를 gradient_hue_range에서 직접 사용
+        hue_range = max(0.0, min(0.25, gradient_hue_range))
+
         if rainbow:
-            # 무지개 + 그라데이션 — 위치별 무지개를 S/V 물결 변조
-            t = led_band_indices / max(1, n_bands - 1)
+            # 무지개 + 그라데이션 — 위치별 무지개 회전 + S/V 물결 변조
+            rainbow_offset = current_time * _RAINBOW_ROTATION_SPEED * gradient_speed * direction
+            t = (led_band_indices / max(1, n_bands - 1) + rainbow_offset) % 1.0
             base_rgb = band_color_vectorized(t)
             h, s, v = _rgb_array_to_hsv(base_rgb)
+
             phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
-            s_mod = _GRADIENT_S_MIN + _GRADIENT_S_RANGE * (0.5 + 0.5 * np.sin(phase))
-            v_mod = _GRADIENT_V_MIN + _GRADIENT_V_RANGE * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
+            s_mod = s_min + s_range * (0.5 + 0.5 * np.sin(phase))
+            v_mod = v_min + v_range * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
             s = np.clip(s * s_mod, 0, 1)
             v = np.clip(v * v_mod, 0, 1)
             return _hsv_to_rgb_array(h, s, v)
         else:
-            # 단색 + 그라데이션 — HSV S/V 물결
+            # 단색 + 그라데이션 — HSV에서 H/S/V 모두 물결
             if solid_color is None:
                 solid_color = np.array([255, 0, 80], dtype=np.float32)
             base_h, base_s, base_v = _rgb_to_hsv_single(solid_color)
+
             phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
-            s_mod = _GRADIENT_S_MIN + _GRADIENT_S_RANGE * (0.5 + 0.5 * np.sin(phase))
-            v_mod = _GRADIENT_V_MIN + _GRADIENT_V_RANGE * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
-            h = np.full(n_leds, base_h)
+            s_mod = s_min + s_range * (0.5 + 0.5 * np.sin(phase))
+            v_mod = v_min + v_range * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
+
+            # hue shift: 인접색으로 왔다갔다 (S/V와 다른 주파수)
+            hue_phase = ct * 2.0 * np.pi * _GRADIENT_HUE_FREQ + current_time * gradient_speed * direction * 0.5
+            h_shift = hue_range * np.sin(hue_phase)
+
+            h = (base_h + h_shift) % 1.0
             s = np.clip(base_s * s_mod, 0, 1)
             v = np.clip(base_v * v_mod, 0, 1)
             return _hsv_to_rgb_array(h, s, v)

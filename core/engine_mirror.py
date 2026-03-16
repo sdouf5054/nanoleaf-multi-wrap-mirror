@@ -28,6 +28,11 @@ from core.engine_utils import (
     leds_to_grb,
 )
 from core.color_extract import extract_zone_dominant  # ★ Phase 3
+from core.vivid_extract import (
+        build_led_region_masks,
+        boost_per_led_vivid,
+        smooth_per_led,
+    )
 
 class _MirrorProfiler:
     PROFILE_INTERVAL = 60
@@ -64,12 +69,24 @@ class MirrorEngine(BaseEngine):
         super().__init__(config, **kwargs)
         self._mirror_zone_map = None
         self._mirror_cc = None
+        self._prev_mirror_zone_dominant = None
         self._last_brightness = self._current_mirror_params.brightness
+
+        # ★ 채도 우선순위 v2: LED별 핵심 영역 마스크 캐시
+        self._vivid_region_masks = None
+        self._prev_ambient_color = None  # 분위기 색 EMA용
+        self._prev_per_led_vivid = None  # per-LED 스무딩 EMA용
 
     # ── 서브클래스 인터페이스 구현 ────────────────────────────────
 
     def _init_mode_resources(self):
         self._init_capture()
+
+        # ★ 채도 우선순위 v2: weight_matrix에서 LED별 핵심 영역 캐시
+        if self._weight_matrix is not None:
+            self._vivid_region_masks = build_led_region_masks(
+                self._weight_matrix, top_pct=0.10
+            )
 
         # N구역 모드 준비
         mp = self._current_mirror_params
@@ -316,13 +333,34 @@ class MirrorEngine(BaseEngine):
     def _compute_zone_colors(self, frame, mp):
         grid_flat = frame.reshape(-1, 3).astype(np.float32)
         per_led_raw = self._weight_matrix @ grid_flat
- 
+
         # ★ Phase 3: distinctive 모드 분기
         extract_mode = self.config.get("mirror", {}).get("color_extract_mode", "average")
+
+        # ★ 채도 우선순위 v2: grid에서 고채도 색 보강
+        #   방법 A: LED 위치 기반 + 방법 B: 전역 분위기
+        if extract_mode == "distinctive":
+            per_led_raw, _, self._prev_ambient_color = boost_per_led_vivid(
+                grid_flat, self._weight_matrix, per_led_raw,
+                region_masks=self._vivid_region_masks,
+                blend=0.4,
+                ambient_blend=0.2,
+                prev_ambient_color=self._prev_ambient_color,
+            )
+            # ★ per-LED 적응형 스무딩: 프레임 간 급변 + 구역 경계 완화
+            per_led_raw = smooth_per_led(
+                per_led_raw, self._prev_per_led_vivid, smoothing=0.5,
+            )
+            self._prev_per_led_vivid = per_led_raw.copy()
+
         if extract_mode == "distinctive":
             zone_colors = extract_zone_dominant(
-                per_led_raw, self._mirror_zone_map, mp.mirror_n_zones
+                per_led_raw, self._mirror_zone_map, mp.mirror_n_zones,
+                prev_zone_colors=self._prev_mirror_zone_dominant,
+                smoothing=0.4,
+                saturation_boost=0.3,
             )
+            self._prev_mirror_zone_dominant = zone_colors.copy()
         else:
             zone_colors = per_led_to_zone_colors(
                 per_led_raw, self._mirror_zone_map, mp.mirror_n_zones

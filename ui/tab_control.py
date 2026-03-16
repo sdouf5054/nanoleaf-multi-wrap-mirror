@@ -411,7 +411,18 @@ class ControlTab(QWidget):
     def update_fps(self, fps): self.fps_label.setText(f"{fps:.1f} fps")
     def update_status(self, text): self.status_label.setText(text)
     def update_preview_colors(self, colors):
-        if self.monitor_preview.isVisible(): self.monitor_preview.set_colors(colors)
+        if self.monitor_preview.isVisible():
+            self.monitor_preview.set_colors(colors)
+        # ★ flowing 프리뷰: 현재 LED 색상에서 대표색 추출
+        if self._current_mode == MODE_HYBRID and hasattr(self, 'panel_hybrid'):
+            import numpy as np
+            arr = np.array(colors, dtype=np.float32)
+            if arr.ndim == 2 and len(arr) > 0:
+                # 간단한 방법: 밝기 상위 5개 LED의 색을 프리뷰에 사용
+                brightness = arr.max(axis=1)
+                top_idx = np.argsort(-brightness)[:5]
+                top_colors = arr[top_idx]
+                self.panel_hybrid.update_flow_palette(top_colors)
     def update_energy(self, bass, mid, high):
         self.panel_audio.update_energy(bass, mid, high); self.panel_hybrid.update_energy(bass, mid, high)
     def update_spectrum(self, spec):

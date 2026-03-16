@@ -40,6 +40,11 @@ from core.engine_utils import (
     AUDIO_FLOWING,
 )
 from core.color_extract import extract_zone_dominant  # ★ Phase 3
+from core.vivid_extract import (
+        build_led_region_masks,
+        boost_per_led_vivid,
+        smooth_per_led,
+    )
 from core.flowing import FlowPalette, render_flowing  # ★ Phase 4
 from core.engine_audio_mode import _ar
 
@@ -71,11 +76,17 @@ class HybridEngine(BaseEngine):
         self._per_led_colors = None
         self._hybrid_zone_map = None
         self._hybrid_zone_colors = None
+        self._prev_zone_dominant = None
 
         # ADR-014: 캐시
         self._cached_base_colors = None
         self._cached_rainbow = None
         self._cached_base_color_tuple = None
+
+        # ★ 채도 우선순위 v2: LED별 핵심 영역 마스크 캐시
+        self._vivid_region_masks = None
+        self._prev_ambient_color = None  # 분위기 색 EMA용
+        self._prev_per_led_vivid = None  # per-LED 스무딩 EMA용
 
         # Wave 모드 상태
         self._wave_pulses = []
@@ -100,6 +111,12 @@ class HybridEngine(BaseEngine):
     def _init_mode_resources(self):
         # 캡처 + 가중치 행렬 (미러링과 동일)
         self._init_capture()
+
+        # ★ 채도 우선순위 v2: weight_matrix에서 LED별 핵심 영역 캐시
+        if self._weight_matrix is not None:
+            self._vivid_region_masks = build_led_region_masks(
+                self._weight_matrix, top_pct=0.10
+            )
 
         # 오디오
         self._cc = ColorCorrection(self.config.get("color", {}))
@@ -186,8 +203,12 @@ class HybridEngine(BaseEngine):
                 # ★ Phase 3: 구역별 추출 방식 분기
                 if ap.color_extract_mode == "distinctive":
                     zone_colors = extract_zone_dominant(
-                        self._per_led_colors, self._hybrid_zone_map, ap.n_zones
+                        self._per_led_colors, self._hybrid_zone_map, ap.n_zones,
+                        prev_zone_colors=self._prev_zone_dominant,
+                        smoothing=0.4,
+                        saturation_boost=0.3,
                     )
+                    self._prev_zone_dominant = zone_colors.copy()
                 else:
                     zone_colors = per_led_to_zone_colors(
                         self._per_led_colors, self._hybrid_zone_map, ap.n_zones
@@ -250,6 +271,7 @@ class HybridEngine(BaseEngine):
                     )
                 else:
                     self._hybrid_zone_map = None
+                self._prev_zone_dominant = None  # ★ 어느 분기든 리셋
                 self._rebuild_base_colors()
 
             # 대역 비율 변경
@@ -299,6 +321,27 @@ class HybridEngine(BaseEngine):
                         grid_flat = screen_frame.reshape(-1, 3).astype(np.float32)
                         self._per_led_colors = self._weight_matrix @ grid_flat
 
+                        # ★ 채도 우선순위 v2: grid에서 고채도 색 보강
+                        #   방법 A: LED 위치 기반 (가장자리 고채도 → 해당 LED)
+                        #   방법 B: 전역 분위기 (중앙 고채도 → 전 LED에 약하게)
+                        #   개별 모드 + 구역 모드 모두 적용
+                        if ap.color_extract_mode == "distinctive":
+                            self._per_led_colors, _, self._prev_ambient_color = boost_per_led_vivid(
+                                grid_flat, self._weight_matrix,
+                                self._per_led_colors,
+                                region_masks=self._vivid_region_masks,
+                                blend=0.4,
+                                ambient_blend=0.2,
+                                prev_ambient_color=self._prev_ambient_color,
+                            )
+                            # ★ per-LED 적응형 스무딩: 프레임 간 급변 + 구역 경계 완화
+                            self._per_led_colors = smooth_per_led(
+                                self._per_led_colors,
+                                self._prev_per_led_vivid,
+                                smoothing=0.5,
+                            )
+                            self._prev_per_led_vivid = self._per_led_colors.copy()
+
                         if (ap.n_zones != N_ZONES_PER_LED
                                 and self._hybrid_zone_map is not None):
                             # ★ Phase 3: distinctive 모드 분기
@@ -307,7 +350,11 @@ class HybridEngine(BaseEngine):
                                     self._per_led_colors,
                                     self._hybrid_zone_map,
                                     ap.n_zones,
+                                    prev_zone_colors=self._prev_zone_dominant,
+                                    smoothing=0.4,
+                                    saturation_boost=0.3,
                                 )
+                                self._prev_zone_dominant = self._hybrid_zone_colors.copy()
                             else:
                                 self._hybrid_zone_colors = per_led_to_zone_colors(
                                     self._per_led_colors,
@@ -322,6 +369,8 @@ class HybridEngine(BaseEngine):
 
             # ── 렌더링 (ADR-014 벡터화) ──
             audio_mode = ap.audio_mode
+            bd_spec = None
+            dt = time.monotonic() - loop_start  # 대략적 dt (이전 프레임 간격)
 
             # ★ Phase 2: animated 색상 효과 (화면 색 사용 시 자동 무시됨)
             if (ap.color_effect != COLOR_EFFECT_STATIC
@@ -335,9 +384,10 @@ class HybridEngine(BaseEngine):
                     rainbow=ap.rainbow,
                     solid_color=np.array(ap.base_color, dtype=np.float32),
                     gradient_speed=ap.gradient_speed,
+                    gradient_hue_range=ap.gradient_hue_range,
+                    gradient_sv_range=ap.gradient_sv_range,
                 )
 
-            bd_spec = None
 
             if audio_mode == AUDIO_WAVE:
                 self._wave_last_spawn = wave_tick_pulses(

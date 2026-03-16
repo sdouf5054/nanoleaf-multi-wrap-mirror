@@ -17,7 +17,7 @@ from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
 from core.engine_utils import (
-    wave_speed_from_slider,
+    wave_speed_from_slider, gradient_speed_from_slider,
     COLOR_EFFECT_STATIC, COLOR_EFFECT_GRADIENT_CW,
     COLOR_EFFECT_GRADIENT_CCW, COLOR_EFFECT_RAINBOW_TIME,
 )
@@ -112,6 +112,57 @@ class AudioPanel(QWidget):
         effect_row.addStretch()
         cl.addLayout(effect_row)
 
+        # ★ 효과 속도 슬라이더 (static이 아닐 때만 표시)
+        self._effect_speed_row = QWidget()
+        esr = QHBoxLayout(self._effect_speed_row)
+        esr.setContentsMargins(0, 0, 0, 0)
+        esr.addWidget(QLabel("효과 속도:"))
+        self.slider_gradient_speed = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_gradient_speed.setRange(0, 100)
+        self.slider_gradient_speed.setValue(50)
+        self.slider_gradient_speed.valueChanged.connect(self._on_gradient_param_changed)
+        esr.addWidget(self.slider_gradient_speed)
+        self.lbl_gradient_speed = QLabel("50%")
+        self.lbl_gradient_speed.setMinimumWidth(35)
+        self.lbl_gradient_speed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        esr.addWidget(self.lbl_gradient_speed)
+        cl.addWidget(self._effect_speed_row)
+        self._effect_speed_row.setVisible(False)
+
+        # ★ Hue shift 슬라이더 (그라데이션 CW/CCW에서만 표시)
+        self._effect_hue_row = QWidget()
+        ehr = QHBoxLayout(self._effect_hue_row)
+        ehr.setContentsMargins(0, 0, 0, 0)
+        ehr.addWidget(QLabel("색조 변동:"))
+        self.slider_gradient_hue = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_gradient_hue.setRange(0, 100)
+        self.slider_gradient_hue.setValue(40)  # 기본 40% ≈ hue_range 0.08
+        self.slider_gradient_hue.valueChanged.connect(self._on_gradient_param_changed)
+        ehr.addWidget(self.slider_gradient_hue)
+        self.lbl_gradient_hue = QLabel("40%")
+        self.lbl_gradient_hue.setMinimumWidth(35)
+        self.lbl_gradient_hue.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        ehr.addWidget(self.lbl_gradient_hue)
+        cl.addWidget(self._effect_hue_row)
+        self._effect_hue_row.setVisible(False)
+
+        # ★ S/V 변동 범위 슬라이더 (그라데이션 CW/CCW에서만 표시)
+        self._effect_sv_row = QWidget()
+        svr = QHBoxLayout(self._effect_sv_row)
+        svr.setContentsMargins(0, 0, 0, 0)
+        svr.addWidget(QLabel("밝기 변동:"))
+        self.slider_gradient_sv = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_gradient_sv.setRange(0, 100)
+        self.slider_gradient_sv.setValue(50)  # 기본 50%
+        self.slider_gradient_sv.valueChanged.connect(self._on_gradient_param_changed)
+        svr.addWidget(self.slider_gradient_sv)
+        self.lbl_gradient_sv = QLabel("50%")
+        self.lbl_gradient_sv.setMinimumWidth(35)
+        self.lbl_gradient_sv.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        svr.addWidget(self.lbl_gradient_sv)
+        cl.addWidget(self._effect_sv_row)
+        self._effect_sv_row.setVisible(False)
+
         # 색상 프리셋 그리드
         pg = QGridLayout()
         self._preset_buttons = []
@@ -183,6 +234,25 @@ class AudioPanel(QWidget):
         self._color_effect = _INDEX_COLOR_EFFECT.get(idx, COLOR_EFFECT_STATIC)
         self._update_preset_enabled()
         self._update_color_preview()
+        self._update_effect_sliders_visibility()
+        if self._is_running:
+            self.audio_params_changed.emit(self.collect_params())
+
+    def _update_effect_sliders_visibility(self):
+        """색상 효과에 따라 관련 슬라이더 표시/숨김."""
+        is_static = self._color_effect == COLOR_EFFECT_STATIC
+        is_gradient = self._color_effect in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW)
+        # 속도: static 외 모든 효과에서 표시
+        self._effect_speed_row.setVisible(not is_static)
+        # hue/sv: 그라데이션에서만 표시
+        self._effect_hue_row.setVisible(is_gradient)
+        self._effect_sv_row.setVisible(is_gradient)
+
+    def _on_gradient_param_changed(self, value=None):
+        """효과 슬라이더 값 변경 → 라벨 갱신 + 파라미터 전달."""
+        self.lbl_gradient_speed.setText(f"{self.slider_gradient_speed.value()}%")
+        self.lbl_gradient_hue.setText(f"{self.slider_gradient_hue.value()}%")
+        self.lbl_gradient_sv.setText(f"{self.slider_gradient_sv.value()}%")
         if self._is_running:
             self.audio_params_changed.emit(self.collect_params())
 
@@ -267,7 +337,9 @@ class AudioPanel(QWidget):
             "base_color": self._current_color,
             # ★ Phase 2
             "color_effect": self._color_effect,
-            "gradient_speed": 1.0,
+            "gradient_speed": gradient_speed_from_slider(self.slider_gradient_speed.value()),
+            "gradient_hue_range": self.slider_gradient_hue.value() / 100.0 * 0.20,  # 0~100% → 0~0.20
+            "gradient_sv_range": self.slider_gradient_sv.value() / 100.0,            # 0~100% → 0~1.0
         }
 
     def update_energy(self, bass, mid, high):
@@ -284,6 +356,9 @@ class AudioPanel(QWidget):
             "color_rgb": list(self._current_color),
             "min_brightness": self.slider_min_brightness.value(),
             "color_effect": self._color_effect,  # ★ Phase 2
+            "gradient_speed": self.slider_gradient_speed.value(),  # ★ 속도 슬라이더
+            "gradient_hue": self.slider_gradient_hue.value(),      # ★ hue shift
+            "gradient_sv": self.slider_gradient_sv.value(),        # ★ S/V 범위
         }
 
     def load_from_config(self):
@@ -301,6 +376,28 @@ class AudioPanel(QWidget):
         self.combo_color_effect.setCurrentIndex(effect_idx)
         self.combo_color_effect.blockSignals(False)
         self._update_preset_enabled()
+
+        # ★ 속도 슬라이더 복원
+        saved_speed = state.get("gradient_speed", 50)
+        self.slider_gradient_speed.blockSignals(True)
+        self.slider_gradient_speed.setValue(saved_speed)
+        self.slider_gradient_speed.blockSignals(False)
+        self.lbl_gradient_speed.setText(f"{saved_speed}%")
+
+        # ★ hue/sv 슬라이더 복원
+        saved_hue = state.get("gradient_hue", 40)
+        self.slider_gradient_hue.blockSignals(True)
+        self.slider_gradient_hue.setValue(saved_hue)
+        self.slider_gradient_hue.blockSignals(False)
+        self.lbl_gradient_hue.setText(f"{saved_hue}%")
+
+        saved_sv = state.get("gradient_sv", 50)
+        self.slider_gradient_sv.blockSignals(True)
+        self.slider_gradient_sv.setValue(saved_sv)
+        self.slider_gradient_sv.blockSignals(False)
+        self.lbl_gradient_sv.setText(f"{saved_sv}%")
+
+        self._update_effect_sliders_visibility()
 
         self._update_color_preview()
         min_b = state.get("min_brightness", 2)

@@ -252,6 +252,8 @@ class AudioModeEngine(BaseEngine):
                     rainbow=ap.rainbow,
                     solid_color=np.array(ap.base_color, dtype=np.float32),
                     gradient_speed=ap.gradient_speed,
+                    gradient_hue_range=ap.gradient_hue_range,   # ★ 추가
+                    gradient_sv_range=ap.gradient_sv_range,     # ★ 추가
                 )
                 
             if audio_mode == AUDIO_WAVE:

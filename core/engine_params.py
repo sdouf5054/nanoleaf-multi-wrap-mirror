@@ -44,6 +44,8 @@ class AudioParams:
     # ★ Phase 2: 색상 효과
     color_effect: str = "static"       # static, gradient_cw, gradient_ccw, rainbow_time
     gradient_speed: float = 1.0        # 효과 속도 배수
+    gradient_hue_range: float = 0.08   # hue shift 범위 (0~0.20)
+    gradient_sv_range: float = 0.5     # S/V 변동 강도 (0~1)
 
     # 하이브리드 전용
     color_source: str = "screen"
