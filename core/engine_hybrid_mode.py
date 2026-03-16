@@ -35,7 +35,12 @@ from core.engine_utils import (
     compute_led_normalized_y,
     WavePulse, wave_tick_pulses,
     DynamicRipple, dynamic_tick_ripples,
+    build_base_color_array_animated,
+    COLOR_EFFECT_STATIC, 
+    AUDIO_FLOWING,
 )
+from core.color_extract import extract_zone_dominant  # ★ Phase 3
+from core.flowing import FlowPalette, render_flowing  # ★ Phase 4
 from core.engine_audio_mode import _ar
 
 
@@ -85,6 +90,10 @@ class HybridEngine(BaseEngine):
         self._dyn_prev_raw_bass = 0.0      # ★ raw_bass onset용
         self._dyn_side_t_ranges = None     # ★ 면별 t 범위
         self._dyn_clockwise_t = None       # ★ Dynamic 전용 비대칭 둘레 좌표
+
+        # ★ Phase 4: Flowing 모드 상태
+        self._flow_palette = None
+        self._flow_last_update = 0.0
 
     # ── 서브클래스 인터페이스 ─────────────────────────────────────
 
@@ -145,6 +154,10 @@ class HybridEngine(BaseEngine):
         self._dyn_clockwise_t = _compute_led_clockwise_t(self.config)
         self._dyn_side_t_ranges = compute_side_t_ranges(self.config)
 
+        # ★ Phase 4: FlowPalette 초기화
+        self._flow_palette = FlowPalette(n_colors=5)
+        self._flow_last_update = 0.0
+
     def _cleanup_mode(self):
         if self._audio_engine:
             self._audio_engine.stop()
@@ -159,6 +172,9 @@ class HybridEngine(BaseEngine):
         Fix #5: 화면 색상은 weight_matrix 결과를 직접 사용 (미러링과 동일 품질).
         """
         ap = self._current_audio_params
+        # ★ Phase 4: flowing은 자체 palette로 RGB 생성 → base_colors 불필요
+        if ap.audio_mode == "flowing":
+            return
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
 
         if (ap.color_source == COLOR_SOURCE_SCREEN
@@ -167,11 +183,16 @@ class HybridEngine(BaseEngine):
 
             if (ap.n_zones != N_ZONES_PER_LED
                     and self._hybrid_zone_map is not None):
-                # N구역: 구역별 평균 → zone_map으로 LED에 재할당
-                zone_avg = per_led_to_zone_colors(
-                    self._per_led_colors, self._hybrid_zone_map, ap.n_zones
-                )
-                screen = zone_avg[self._hybrid_zone_map]
+                # ★ Phase 3: 구역별 추출 방식 분기
+                if ap.color_extract_mode == "distinctive":
+                    zone_colors = extract_zone_dominant(
+                        self._per_led_colors, self._hybrid_zone_map, ap.n_zones
+                    )
+                else:
+                    zone_colors = per_led_to_zone_colors(
+                        self._per_led_colors, self._hybrid_zone_map, ap.n_zones
+                    )
+                screen = zone_colors[self._hybrid_zone_map]
             else:
                 # per-LED: weight_matrix 결과를 직접 사용
                 screen = self._per_led_colors.copy()
@@ -280,11 +301,19 @@ class HybridEngine(BaseEngine):
 
                         if (ap.n_zones != N_ZONES_PER_LED
                                 and self._hybrid_zone_map is not None):
-                            self._hybrid_zone_colors = per_led_to_zone_colors(
-                                self._per_led_colors,
-                                self._hybrid_zone_map,
-                                ap.n_zones,
-                            )
+                            # ★ Phase 3: distinctive 모드 분기
+                            if ap.color_extract_mode == "distinctive":
+                                self._hybrid_zone_colors = extract_zone_dominant(
+                                    self._per_led_colors,
+                                    self._hybrid_zone_map,
+                                    ap.n_zones,
+                                )
+                            else:
+                                self._hybrid_zone_colors = per_led_to_zone_colors(
+                                    self._per_led_colors,
+                                    self._hybrid_zone_map,
+                                    ap.n_zones,
+                                )
 
                         # 화면 색상이 갱신되면 base_colors도 재빌드
                         self._rebuild_base_colors()
@@ -293,6 +322,21 @@ class HybridEngine(BaseEngine):
 
             # ── 렌더링 (ADR-014 벡터화) ──
             audio_mode = ap.audio_mode
+
+            # ★ Phase 2: animated 색상 효과 (화면 색 사용 시 자동 무시됨)
+            if (ap.color_effect != COLOR_EFFECT_STATIC
+                    and ap.color_source != "screen"):
+                self._cached_base_colors = build_base_color_array_animated(
+                    self._led_band_indices,
+                    self._audio_engine.n_bands if self._audio_engine else 16,
+                    self._dyn_clockwise_t,
+                    loop_start,
+                    color_effect=ap.color_effect,
+                    rainbow=ap.rainbow,
+                    solid_color=np.array(ap.base_color, dtype=np.float32),
+                    gradient_speed=ap.gradient_speed,
+                )
+
             bd_spec = None
 
             if audio_mode == AUDIO_WAVE:
@@ -330,6 +374,26 @@ class HybridEngine(BaseEngine):
                     self._cached_base_colors, self._dyn_clockwise_t,
                     self._dyn_ripples, high,
                     ap.min_brightness, ap.brightness,
+                )
+            elif audio_mode == AUDIO_FLOWING:
+                # ★ Phase 4: Flowing 모드
+                # palette 갱신 (N초마다, 화면 캡처 결과 사용)
+                if (self._per_led_colors is not None
+                        and self._per_led_colors.sum() > 0
+                        and (loop_start - self._flow_last_update) > ap.flowing_interval):
+                    self._flow_palette.update_from_screen(self._per_led_colors)
+                    self._flow_last_update = loop_start
+ 
+                # tick (phase 진행 + crossfade + 음악 반응)
+                self._flow_palette.tick(
+                    frame_interval, bass, mid, high,
+                    base_speed=ap.flowing_speed,
+                )
+ 
+                # render
+                raw_rgb = render_flowing(
+                    self._dyn_clockwise_t, self._flow_palette,
+                    bass, ap.brightness,
                 )
             elif audio_mode == AUDIO_BASS_DETAIL:
                 bd_spec = self._process_bass_detail(eng, atk, rel, ap)

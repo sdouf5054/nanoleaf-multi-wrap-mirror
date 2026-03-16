@@ -537,7 +537,7 @@ class MainWindow(QMainWindow):
         final = copy.deepcopy(self.config)
 
         # 컨트롤 탭이 관리하는 키만 스냅샷으로 덮어쓰기
-        _CONTROL_TAB_KEYS = ("mirror", "audio_pulse", "audio_spectrum", "audio_bass_detail", "audio_wave", "audio_dynamic")
+        _CONTROL_TAB_KEYS = ("mirror", "audio_pulse", "audio_spectrum", "audio_bass_detail", "audio_wave", "audio_dynamic", "audio_flowing",)
         for key in _CONTROL_TAB_KEYS:
             if key in saved:
                 final[key] = copy.deepcopy(saved[key])

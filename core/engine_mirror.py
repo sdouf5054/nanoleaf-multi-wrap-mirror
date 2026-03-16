@@ -27,7 +27,7 @@ from core.engine_utils import (
     _build_led_zone_map_by_side, per_led_to_zone_colors,
     leds_to_grb,
 )
-
+from core.color_extract import extract_zone_dominant  # ★ Phase 3
 
 class _MirrorProfiler:
     PROFILE_INTERVAL = 60
@@ -314,13 +314,26 @@ class MirrorEngine(BaseEngine):
     # ── N구역 미러링 ─────────────────────────────────────────────
 
     def _compute_zone_colors(self, frame, mp):
-        """미러링 N구역 모드: frame → 구역별 평균 → zone_map으로 LED 할당."""
         grid_flat = frame.reshape(-1, 3).astype(np.float32)
         per_led_raw = self._weight_matrix @ grid_flat
-
-        zone_colors = per_led_to_zone_colors(
-            per_led_raw, self._mirror_zone_map, mp.mirror_n_zones
-        )
+ 
+        # ★ Phase 3: distinctive 모드 분기
+        extract_mode = self.config.get("mirror", {}).get("color_extract_mode", "average")
+        if extract_mode == "distinctive":
+            zone_colors = extract_zone_dominant(
+                per_led_raw, self._mirror_zone_map, mp.mirror_n_zones
+            )
+        else:
+            zone_colors = per_led_to_zone_colors(
+                per_led_raw, self._mirror_zone_map, mp.mirror_n_zones
+            )
+        '''
+        참고: MirrorEngine은 MirrorParams를 사용하고, MirrorParams에는
+        color_extract_mode 필드가 없음. 대신 config["mirror"]에서 직접 읽음.
+        이는 mirror_panel.apply_to_config()가 config["mirror"]["color_extract_mode"]에 저장하기 때문.
+        UI에서 추출 모드를 변경하면 zone_count_changed 시그널이 발생하고,
+        ControlTab._on_zone_count에서 엔진을 재시작하여 config가 반영됨.
+        '''
         leds = zone_colors[self._mirror_zone_map]
 
         raw_preview = leds.copy()

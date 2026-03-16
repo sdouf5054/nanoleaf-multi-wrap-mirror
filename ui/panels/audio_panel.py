@@ -3,6 +3,7 @@
 [ADR-040] AudioPanel ↔ HybridPanel 공통 섹션 마진/스페이싱 통일.
 [ADR-041] 비주얼라이저 모드 + 파라미터를 "오디오 반응" 하나로 통합.
          콤보 항목·힌트 텍스트를 HybridPanel과 동일하게 유지.
+[Phase 2] 색상 효과 콤보 추가 — 그라데이션 CW/CCW, 무지개 시간 순회.
 """
 
 from PySide6.QtWidgets import (
@@ -15,7 +16,11 @@ from PySide6.QtGui import QColor
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
-from core.engine_utils import wave_speed_from_slider
+from core.engine_utils import (
+    wave_speed_from_slider,
+    COLOR_EFFECT_STATIC, COLOR_EFFECT_GRADIENT_CW,
+    COLOR_EFFECT_GRADIENT_CCW, COLOR_EFFECT_RAINBOW_TIME,
+)
 
 _INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail", 3: "wave", 4: "dynamic"}
 _MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2, "wave": 3, "dynamic": 4}
@@ -40,6 +45,21 @@ _VISUALIZER_MODE_ITEMS = [
     "Dynamic — 비트 반응 파원 효과",
 ]
 
+# ★ Phase 2: 색상 효과 콤보 항목
+_COLOR_EFFECT_ITEMS = [
+    "정적",                    # static
+    "그라데이션 (CW)",          # gradient_cw
+    "그라데이션 (CCW)",         # gradient_ccw
+    "무지개 (시간 순회)",        # rainbow_time
+]
+_INDEX_COLOR_EFFECT = {
+    0: COLOR_EFFECT_STATIC,
+    1: COLOR_EFFECT_GRADIENT_CW,
+    2: COLOR_EFFECT_GRADIENT_CCW,
+    3: COLOR_EFFECT_RAINBOW_TIME,
+}
+_COLOR_EFFECT_TO_INDEX = {v: k for k, v in _INDEX_COLOR_EFFECT.items()}
+
 
 class AudioPanel(QWidget):
     audio_params_changed = Signal(dict)
@@ -52,6 +72,7 @@ class AudioPanel(QWidget):
         self._current_color = (255, 0, 80)
         self._is_rainbow = True
         self._mode_key = "pulse"
+        self._color_effect = COLOR_EFFECT_STATIC  # ★ Phase 2
         self._build_ui()
         self.load_from_config()
 
@@ -80,7 +101,20 @@ class AudioPanel(QWidget):
         cl = QVBoxLayout(cg)
         cl.setSpacing(_GROUP_SPACING)
         cl.setContentsMargins(*_GROUP_MARGINS)
+
+        # ★ Phase 2: 색상 효과 콤보
+        effect_row = QHBoxLayout()
+        effect_row.addWidget(QLabel("색상 효과:"))
+        self.combo_color_effect = QComboBox()
+        self.combo_color_effect.addItems(_COLOR_EFFECT_ITEMS)
+        self.combo_color_effect.currentIndexChanged.connect(self._on_color_effect_changed)
+        effect_row.addWidget(self.combo_color_effect)
+        effect_row.addStretch()
+        cl.addLayout(effect_row)
+
+        # 색상 프리셋 그리드
         pg = QGridLayout()
+        self._preset_buttons = []
         for i, (name, r, g, b) in enumerate(_COLOR_PRESETS):
             btn = QPushButton(name); btn.setMinimumHeight(26)
             if r is None:
@@ -91,11 +125,14 @@ class AudioPanel(QWidget):
                 btn.setStyleSheet(f"background:rgb({r},{g},{b});color:{tc};font-weight:bold;border-radius:4px;font-size:11px;")
                 btn.clicked.connect(lambda _, rgb=(r, g, b): self._set_color(*rgb))
             pg.addWidget(btn, i // 5, i % 5)
+            self._preset_buttons.append(btn)
         cl.addLayout(pg)
+
         cr = QHBoxLayout()
-        btn_custom = QPushButton("커스텀"); btn_custom.clicked.connect(self._pick_custom_color); cr.addWidget(btn_custom)
+        self.btn_custom = QPushButton("커스텀"); self.btn_custom.clicked.connect(self._pick_custom_color); cr.addWidget(self.btn_custom)
         self.color_preview = QFrame(); self.color_preview.setFixedSize(40, 26); self._update_color_preview(); cr.addWidget(self.color_preview); cr.addStretch()
         cl.addLayout(cr)
+
         ambr = QHBoxLayout(); ambr.addWidget(QLabel("최소 밝기:"))
         self.slider_min_brightness = NoScrollSlider(Qt.Orientation.Horizontal)
         self.slider_min_brightness.setRange(0, 100); self.slider_min_brightness.setValue(2)
@@ -140,6 +177,27 @@ class AudioPanel(QWidget):
         bar.setStyleSheet(f"QProgressBar{{background:#2b2b2b;border-radius:3px}}QProgressBar::chunk{{background:{color};border-radius:3px}}")
         grid.addWidget(bar, row, 1); return bar
 
+    # ── ★ Phase 2: 색상 효과 콤보 ↔ 프리셋 상호작용 ──
+
+    def _on_color_effect_changed(self, idx):
+        self._color_effect = _INDEX_COLOR_EFFECT.get(idx, COLOR_EFFECT_STATIC)
+        self._update_preset_enabled()
+        self._update_color_preview()
+        if self._is_running:
+            self.audio_params_changed.emit(self.collect_params())
+
+    def _update_preset_enabled(self):
+        """색상 효과에 따라 프리셋 버튼 활성/비활성화.
+
+        - static: 모든 프리셋 활성
+        - gradient CW/CCW: 단색 프리셋만 활성 (무지개도 활성 — 무지개+물결)
+        - rainbow_time: 모든 프리셋 비활성
+        """
+        is_rainbow_time = self._color_effect == COLOR_EFFECT_RAINBOW_TIME
+        for btn in self._preset_buttons:
+            btn.setEnabled(not is_rainbow_time)
+        self.btn_custom.setEnabled(not is_rainbow_time)
+
     def _set_color(self, r, g, b):
         self._current_color = (r, g, b); self._is_rainbow = False; self._update_color_preview()
         if self._is_running: self.audio_params_changed.emit(self.collect_params())
@@ -154,7 +212,15 @@ class AudioPanel(QWidget):
         if c.isValid(): self._set_color(c.red(), c.green(), c.blue())
 
     def _update_color_preview(self):
-        if self._is_rainbow:
+        if self._color_effect == COLOR_EFFECT_RAINBOW_TIME:
+            # 무지개 시간 순회 — 그라데이션 프리뷰
+            self.color_preview.setStyleSheet(
+                "background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "stop:0 red,stop:0.17 orange,stop:0.33 yellow,"
+                "stop:0.5 lime,stop:0.67 cyan,stop:0.83 blue,stop:1 purple);"
+                "border:1px solid #555;border-radius:4px;"
+            )
+        elif self._is_rainbow:
             self.color_preview.setStyleSheet("background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 red,stop:0.17 orange,stop:0.33 yellow,stop:0.5 lime,stop:0.67 cyan,stop:0.83 blue,stop:1 purple);border:1px solid #555;border-radius:4px;")
         else:
             r, g, b = self._current_color
@@ -186,13 +252,23 @@ class AudioPanel(QWidget):
 
     def collect_params(self):
         p = self.param_widget.get_params()
-        return {"audio_mode": _INDEX_AUDIO_MODE.get(self.combo_mode.currentIndex(), "pulse"),
-                "brightness": p["brightness"] / 100.0, "min_brightness": self.slider_min_brightness.value() / 100.0,
-                "bass_sensitivity": p["bass_sens"] / 100.0, "mid_sensitivity": p["mid_sens"] / 100.0,
-                "high_sensitivity": p["high_sens"] / 100.0, "attack": p["attack"] / 100.0, "release": p["release"] / 100.0,
-                "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"]),
-                "wave_speed": wave_speed_from_slider(p["wave_speed"]),
-                "rainbow": self._is_rainbow, "base_color": self._current_color}
+        return {
+            "audio_mode": _INDEX_AUDIO_MODE.get(self.combo_mode.currentIndex(), "pulse"),
+            "brightness": p["brightness"] / 100.0,
+            "min_brightness": self.slider_min_brightness.value() / 100.0,
+            "bass_sensitivity": p["bass_sens"] / 100.0,
+            "mid_sensitivity": p["mid_sens"] / 100.0,
+            "high_sensitivity": p["high_sens"] / 100.0,
+            "attack": p["attack"] / 100.0,
+            "release": p["release"] / 100.0,
+            "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"]),
+            "wave_speed": wave_speed_from_slider(p["wave_speed"]),
+            "rainbow": self._is_rainbow,
+            "base_color": self._current_color,
+            # ★ Phase 2
+            "color_effect": self._color_effect,
+            "gradient_speed": 1.0,
+        }
 
     def update_energy(self, bass, mid, high):
         self.bar_bass.setValue(int(bass * 100)); self.bar_mid.setValue(int(mid * 100)); self.bar_high.setValue(int(high * 100))
@@ -202,8 +278,13 @@ class AudioPanel(QWidget):
     def apply_to_config(self):
         self._save_mode_params(self._mode_key)
         opts = self._config.setdefault("options", {})
-        opts["audio_state"] = {"sub_mode": self._mode_key, "color_rainbow": self._is_rainbow,
-                               "color_rgb": list(self._current_color), "min_brightness": self.slider_min_brightness.value()}
+        opts["audio_state"] = {
+            "sub_mode": self._mode_key,
+            "color_rainbow": self._is_rainbow,
+            "color_rgb": list(self._current_color),
+            "min_brightness": self.slider_min_brightness.value(),
+            "color_effect": self._color_effect,  # ★ Phase 2
+        }
 
     def load_from_config(self):
         state = self._config.get("options", {}).get("audio_state", {})
@@ -212,6 +293,15 @@ class AudioPanel(QWidget):
         self._mode_key = saved_mode; self.param_widget.set_audio_mode(saved_mode)
         self._is_rainbow = state.get("color_rainbow", True)
         rgb = state.get("color_rgb", [255, 0, 80]); self._current_color = tuple(rgb) if isinstance(rgb, list) else (255, 0, 80)
+
+        # ★ Phase 2: 색상 효과 복원
+        self._color_effect = state.get("color_effect", COLOR_EFFECT_STATIC)
+        effect_idx = _COLOR_EFFECT_TO_INDEX.get(self._color_effect, 0)
+        self.combo_color_effect.blockSignals(True)
+        self.combo_color_effect.setCurrentIndex(effect_idx)
+        self.combo_color_effect.blockSignals(False)
+        self._update_preset_enabled()
+
         self._update_color_preview()
         min_b = state.get("min_brightness", 2)
         self.slider_min_brightness.blockSignals(True); self.slider_min_brightness.setValue(min_b); self.slider_min_brightness.blockSignals(False)

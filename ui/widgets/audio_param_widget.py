@@ -1,6 +1,7 @@
 """오디오 파라미터 위젯 — 감도/밝기/Attack/Release/Wave속도/대역 비율 공용.
 
 [NEW] Wave 모드 전용 wave_speed 슬라이더 추가.
+[Phase 4] Flowing 모드 기본값 추가 + set_audio_mode 대응.
 """
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
@@ -15,6 +16,8 @@ AUDIO_DEFAULTS = {
     "bass_detail": {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 10, "release": 70, "zone_bass": 48, "zone_mid": 26, "zone_high": 26},
     "wave": {"bass_sens": 120, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 60, "release": 40, "wave_speed": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
     "dynamic": {"bass_sens": 110, "mid_sens": 110, "high_sens": 120, "brightness": 100, "attack": 55, "release": 45, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    # ★ Phase 4: Flowing 기본값
+    "flowing": {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "brightness": 100, "attack": 40, "release": 60, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
 }
 
 
@@ -171,6 +174,9 @@ class AudioParamWidget(QWidget):
             self.label_sens.setText("감도 (Bass → Wave)")
         elif mode_name == "dynamic":
             self.label_sens.setText("감도 (Dynamic)")
+        elif mode_name == "flowing":
+            # ★ Phase 4: flowing에서는 bass 감도가 밝기 반응에 영향
+            self.label_sens.setText("감도 (Flowing)")
         else:
             self.label_sens.setText("감도 (Bass)")
 

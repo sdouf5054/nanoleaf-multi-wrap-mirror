@@ -41,12 +41,21 @@ class AudioParams:
     rainbow: bool = True
     base_color: Tuple[int, int, int] = (255, 0, 80)
 
+    # ★ Phase 2: 색상 효과
+    color_effect: str = "static"       # static, gradient_cw, gradient_ccw, rainbow_time
+    gradient_speed: float = 1.0        # 효과 속도 배수
+
     # 하이브리드 전용
     color_source: str = "screen"
     n_zones: int = 4
+    color_extract_mode: str = "average"  # ★ Phase 3: "average" | "distinctive"
 
     # ★ Wave 모드 전용
     wave_speed: float = 1.4  # 초당 위치 진행 (0→1). UI 슬라이더 50% = 1.4
+
+    # ★ Phase 4: Flowing 모드 전용
+    flowing_interval: float = 3.0   # palette 갱신 주기 (초)
+    flowing_speed: float = 0.08     # 기본 회전 속도
 
 
 @dataclass

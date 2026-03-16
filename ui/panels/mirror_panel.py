@@ -2,6 +2,8 @@
 
 [ADR-040] 공통 레이아웃 상수 통일.
 [ADR-041] 구역 수 + 밝기/스무딩 + 감쇠/페널티를 "미러링 설정" 하나로 통합.
+[Phase 3] 추출 방식 콤보 추가 — N구역 모드에서 평균/Distinctive 선택.
+         per-LED 모드에서는 비활성화.
 """
 
 from PySide6.QtWidgets import (
@@ -50,7 +52,7 @@ class MirrorPanel(QWidget):
         gl.setSpacing(_GROUP_SPACING)
         gl.setContentsMargins(*_GROUP_MARGINS)
 
-        # 구역 수
+        # 구역 수 + ★ Phase 3: 추출 방식
         zone_row = QHBoxLayout()
         zone_row.addWidget(QLabel("구역 수:"))
         self.combo_zone_count = QComboBox()
@@ -60,6 +62,19 @@ class MirrorPanel(QWidget):
                 self.combo_zone_count.addItem(label, n)
         self.combo_zone_count.currentIndexChanged.connect(self._on_zone_count_changed)
         zone_row.addWidget(self.combo_zone_count)
+
+        # ★ Phase 3: 추출 방식 콤보
+        zone_row.addWidget(QLabel("  추출:"))
+        self.combo_extract_mode = QComboBox()
+        self.combo_extract_mode.addItem("평균", "average")
+        self.combo_extract_mode.addItem("Distinctive", "distinctive")
+        self.combo_extract_mode.currentIndexChanged.connect(
+            lambda _: self.zone_count_changed.emit(
+                self.combo_zone_count.currentData() or N_ZONES_PER_LED
+            )
+        )
+        zone_row.addWidget(self.combo_extract_mode)
+
         zone_row.addStretch()
         gl.addLayout(zone_row)
 
@@ -160,7 +175,24 @@ class MirrorPanel(QWidget):
 
     def _on_zone_count_changed(self, _idx):
         n = self.combo_zone_count.currentData()
+        # ★ Phase 3: per-LED에서는 distinctive 비활성화
+        self._update_extract_mode_enabled()
         if n is not None: self.zone_count_changed.emit(n)
+
+    # ★ Phase 3
+    def _update_extract_mode_enabled(self):
+        """per-LED 모드에서는 distinctive가 의미 없으므로 콤보 비활성화."""
+        n = self.combo_zone_count.currentData()
+        is_per_led = (n == N_ZONES_PER_LED)
+        self.combo_extract_mode.setEnabled(not is_per_led)
+        if is_per_led:
+            self.combo_extract_mode.blockSignals(True)
+            self.combo_extract_mode.setCurrentIndex(0)  # 평균으로 리셋
+            self.combo_extract_mode.blockSignals(False)
+
+    def get_extract_mode(self):
+        """현재 추출 방식 반환."""
+        return self.combo_extract_mode.currentData() or "average"
 
     def get_layout_params(self):
         params = {"decay_radius": self.spin_decay.value(), "parallel_penalty": self.spin_penalty.value()}
@@ -179,6 +211,7 @@ class MirrorPanel(QWidget):
         m["decay_radius"] = self.spin_decay.value()
         m["parallel_penalty"] = self.spin_penalty.value()
         m["zone_count"] = self.combo_zone_count.currentData() or -1
+        m["color_extract_mode"] = self.get_extract_mode()  # ★ Phase 3
         if self.chk_per_side.isChecked():
             m["decay_radius_per_side"] = {s: self.spin_decay_per[s].value() for s in self.spin_decay_per}
             m["parallel_penalty_per_side"] = {s: self.spin_penalty_per[s].value() for s in self.spin_penalty_per}
@@ -205,3 +238,12 @@ class MirrorPanel(QWidget):
             if self.combo_zone_count.itemData(i) == saved_zone:
                 self.combo_zone_count.setCurrentIndex(i); break
         self.combo_zone_count.blockSignals(False)
+
+        # ★ Phase 3: 추출 방식 복원
+        saved_extract = m.get("color_extract_mode", "average")
+        self.combo_extract_mode.blockSignals(True)
+        for i in range(self.combo_extract_mode.count()):
+            if self.combo_extract_mode.itemData(i) == saved_extract:
+                self.combo_extract_mode.setCurrentIndex(i); break
+        self.combo_extract_mode.blockSignals(False)
+        self._update_extract_mode_enabled()

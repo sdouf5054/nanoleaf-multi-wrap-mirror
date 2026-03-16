@@ -3,6 +3,9 @@
 [ADR-040] AudioPanel ↔ HybridPanel 공통 섹션 마진/스페이싱 통일.
 [ADR-041] 비주얼라이저 모드 + 파라미터를 "오디오 반응" 하나로 통합.
          콤보 항목·힌트 텍스트를 AudioPanel과 동일하게 유지.
+[Phase 2] 색상 효과 콤보 추가 — 화면 연동 시에는 비활성화.
+[Phase 3] 추출 방식 콤보 추가 — 구역 수 옆에 평균/Distinctive 선택.
+         per-LED 모드에서는 Distinctive 비활성화.
 """
 
 from PySide6.QtWidgets import (
@@ -10,14 +13,18 @@ from PySide6.QtWidgets import (
     QComboBox, QProgressBar, QGridLayout,
 )
 from PySide6.QtCore import Qt, Signal
-from core.engine_utils import COLOR_SOURCE_SCREEN, N_ZONES_PER_LED
+from core.engine_utils import (
+    COLOR_SOURCE_SCREEN, N_ZONES_PER_LED,
+    COLOR_EFFECT_STATIC, COLOR_EFFECT_GRADIENT_CW,
+    COLOR_EFFECT_GRADIENT_CCW, COLOR_EFFECT_RAINBOW_TIME,
+)
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.audio_param_widget import AudioParamWidget, AUDIO_DEFAULTS
 from core.engine_utils import wave_speed_from_slider
 
-_INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail", 3: "wave", 4: "dynamic"}
-_MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2, "wave": 3, "dynamic": 4}
+_INDEX_AUDIO_MODE = {0: "pulse", 1: "spectrum", 2: "bass_detail", 3: "wave", 4: "dynamic", 5: "flowing"}
+_MODE_TO_INDEX = {"pulse": 0, "spectrum": 1, "bass_detail": 2, "wave": 3, "dynamic": 4, "flowing": 5}
 _ZONE_OPTIONS = [
     (1, "1구역 (화면 전체 평균)"), (2, "2구역 (상/하)"),
     (4, "4구역 (상하좌우)"), (8, "8구역 (모서리 포함)"),
@@ -37,7 +44,23 @@ _VISUALIZER_MODE_ITEMS = [
     "Bass Detail — 저역 세밀 16밴드",
     "Wave — 베이스 펄스 아래→위",
     "Dynamic — 비트 반응 파원 효과",
+    "Flowing — 화면 색 흐름",          # ★ Phase 4
 ]
+
+# ★ Phase 2: 색상 효과 콤보 (AudioPanel과 동일)
+_COLOR_EFFECT_ITEMS = [
+    "정적",
+    "그라데이션 (CW)",
+    "그라데이션 (CCW)",
+    "무지개 (시간 순회)",
+]
+_INDEX_COLOR_EFFECT = {
+    0: COLOR_EFFECT_STATIC,
+    1: COLOR_EFFECT_GRADIENT_CW,
+    2: COLOR_EFFECT_GRADIENT_CCW,
+    3: COLOR_EFFECT_RAINBOW_TIME,
+}
+_COLOR_EFFECT_TO_INDEX = {v: k for k, v in _INDEX_COLOR_EFFECT.items()}
 
 
 class HybridPanel(QWidget):
@@ -46,6 +69,7 @@ class HybridPanel(QWidget):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self._config = config; self._is_running = False; self._mode_key = "pulse"
+        self._color_effect = COLOR_EFFECT_STATIC  # ★ Phase 2
         self._build_ui(); self.load_from_config()
 
     def _build_ui(self):
@@ -76,7 +100,29 @@ class HybridPanel(QWidget):
         zcr = QHBoxLayout(); zcr.addWidget(QLabel("구역 수:"))
         self.combo_zone_count = QComboBox()
         for n, label in _ZONE_OPTIONS: self.combo_zone_count.addItem(label, n)
-        self.combo_zone_count.currentIndexChanged.connect(self._on_changed); zcr.addWidget(self.combo_zone_count); zcr.addStretch(); scl.addLayout(zcr)
+        self.combo_zone_count.currentIndexChanged.connect(self._on_zone_or_extract_changed); zcr.addWidget(self.combo_zone_count)
+        # ★ Phase 3: 추출 방식 콤보
+        zcr.addWidget(QLabel("  추출:"))
+        self.combo_extract_mode = QComboBox()
+        self.combo_extract_mode.addItem("평균", "average")
+        self.combo_extract_mode.addItem("Distinctive", "distinctive")
+        self.combo_extract_mode.currentIndexChanged.connect(self._on_zone_or_extract_changed)
+        zcr.addWidget(self.combo_extract_mode)
+        zcr.addStretch(); scl.addLayout(zcr)
+
+        # ★ Phase 2: 색상 효과 콤보 (하이브리드에서는 화면 색 사용 시 비활성화 안내)
+        effect_row = QHBoxLayout()
+        effect_row.addWidget(QLabel("색상 효과:"))
+        self.combo_color_effect = QComboBox()
+        self.combo_color_effect.addItems(_COLOR_EFFECT_ITEMS)
+        self.combo_color_effect.currentIndexChanged.connect(self._on_color_effect_changed)
+        effect_row.addWidget(self.combo_color_effect)
+        effect_row.addStretch()
+        scl.addLayout(effect_row)
+        self.lbl_effect_note = QLabel("화면 색 사용 시 색상 효과가 무시됩니다")
+        self.lbl_effect_note.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
+        scl.addWidget(self.lbl_effect_note)
+
         mbr = QHBoxLayout(); mbr.addWidget(QLabel("최소 밝기:"))
         self.slider_min_brightness = NoScrollSlider(Qt.Orientation.Horizontal); self.slider_min_brightness.setRange(0, 100); self.slider_min_brightness.setValue(5)
         self.slider_min_brightness.valueChanged.connect(self._on_min_brightness); mbr.addWidget(self.slider_min_brightness)
@@ -105,6 +151,69 @@ class HybridPanel(QWidget):
         self.param_widget.params_changed.connect(self._on_changed)
         al.addWidget(self.param_widget)
 
+        # ★ Phase 4: Flowing 전용 슬라이더
+        from PySide6.QtWidgets import QFrame as _QFrame
+        self._flowing_sep = _QFrame()
+        self._flowing_sep.setFrameShape(_QFrame.Shape.HLine)
+        self._flowing_sep.setFrameShadow(_QFrame.Shadow.Sunken)
+        al.addWidget(self._flowing_sep)
+
+        self._flowing_lbl = QLabel("Flowing 설정")
+        self._flowing_lbl.setStyleSheet("font-weight:bold;")
+        al.addWidget(self._flowing_lbl)
+
+        # palette 갱신 주기
+        fi_row = QHBoxLayout()
+        fi_row.addWidget(QLabel("색상 갱신 주기:"))
+        self.slider_flowing_interval = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_flowing_interval.setRange(10, 100)  # 1.0~10.0초 (×0.1)
+        self.slider_flowing_interval.setValue(30)  # 3.0초
+        self.slider_flowing_interval.valueChanged.connect(self._on_changed)
+        fi_row.addWidget(self.slider_flowing_interval)
+        self.lbl_flowing_interval = QLabel("3.0초")
+        self.lbl_flowing_interval.setMinimumWidth(40)
+        self.lbl_flowing_interval.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        fi_row.addWidget(self.lbl_flowing_interval)
+        al.addLayout(fi_row)
+
+        # 흐름 속도
+        fs_row = QHBoxLayout()
+        fs_row.addWidget(QLabel("흐름 속도:"))
+        self.slider_flowing_speed = NoScrollSlider(Qt.Orientation.Horizontal)
+        self.slider_flowing_speed.setRange(0, 100)
+        self.slider_flowing_speed.setValue(50)
+        self.slider_flowing_speed.valueChanged.connect(self._on_changed)
+        fs_row.addWidget(self.slider_flowing_speed)
+        self.lbl_flowing_speed = QLabel("50%")
+        self.lbl_flowing_speed.setMinimumWidth(40)
+        self.lbl_flowing_speed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        fs_row.addWidget(self.lbl_flowing_speed)
+        al.addLayout(fs_row)
+
+        self._flowing_hint = QLabel("갱신 주기 ↑ = 안정적  |  속도 ↑ = 빠른 회전")
+        self._flowing_hint.setStyleSheet("color:#888;font-size:10px;")
+        al.addWidget(self._flowing_hint)
+
+        # flowing 위젯 목록 (모드별 가시성 제어용)
+        self._flowing_widgets = [
+            self._flowing_sep, self._flowing_lbl,
+            self._flowing_hint,
+        ]
+        # 슬라이더 행은 layout에 포함되어 개별 hide 불가 → 위젯 단위 관리
+        # 대신 전체 flowing 영역을 컨테이너로 감쌈
+        self._flowing_container = QWidget()
+        _fc_layout = QVBoxLayout(self._flowing_container)
+        _fc_layout.setContentsMargins(0, 0, 0, 0)
+        _fc_layout.setSpacing(3)
+        # 이미 al에 추가된 위젯들을 직접 숨기는 방식 사용
+        self._flowing_slider_widgets = [
+            self.slider_flowing_interval, self.lbl_flowing_interval,
+            self.slider_flowing_speed, self.lbl_flowing_speed,
+        ]
+
+        # 초기 가시성 설정 (flowing이 아니면 숨김)
+        self._update_flowing_visibility(self._mode_key)
+
         # 힌트 (AudioPanel과 동일)
         ht = QLabel("Attack ↑ = 빠르게 반응  |  Release ↑ = 긴 잔향")
         ht.setStyleSheet("color:#888;font-size:10px;")
@@ -120,14 +229,69 @@ class HybridPanel(QWidget):
         bar.setStyleSheet(f"QProgressBar{{background:#2b2b2b;border-radius:3px}}QProgressBar::chunk{{background:{color};border-radius:3px}}")
         grid.addWidget(bar, row, 1); return bar
 
+    # ★ Phase 2
+    def _on_color_effect_changed(self, idx):
+        self._color_effect = _INDEX_COLOR_EFFECT.get(idx, COLOR_EFFECT_STATIC)
+        if self._is_running: self.hybrid_params_changed.emit(self.collect_params())
+
+    # ★ Phase 3: 구역 수 또는 추출 방식 변경
+    def _on_zone_or_extract_changed(self, _=None):
+        self._update_extract_mode_enabled()
+        if self._is_running: self.hybrid_params_changed.emit(self.collect_params())
+
+    def _update_extract_mode_enabled(self):
+        """per-LED 모드에서는 distinctive가 의미 없으므로 콤보 비활성화."""
+        n_zones = self.combo_zone_count.currentData()
+        is_per_led = (n_zones == N_ZONES_PER_LED)
+        self.combo_extract_mode.setEnabled(not is_per_led)
+        if is_per_led:
+            self.combo_extract_mode.blockSignals(True)
+            self.combo_extract_mode.setCurrentIndex(0)  # 평균으로 리셋
+            self.combo_extract_mode.blockSignals(False)
+
     def _on_mode_changed(self, idx):
         new_key = _INDEX_AUDIO_MODE.get(idx, "pulse")
         if new_key == self._mode_key: return
         self._save_mode_params(self._mode_key); self._load_mode_params(new_key)
         self.param_widget.set_audio_mode(new_key); self._mode_key = new_key
+        self._update_flowing_visibility(new_key)  # ★ Phase 4
         if self._is_running: self.hybrid_params_changed.emit(self.collect_params())
 
+    # ★ Phase 4: flowing 가시성 + 파라미터
+    def _update_flowing_visibility(self, mode_key):
+        """flowing 모드일 때만 전용 슬라이더 표시."""
+        is_flowing = (mode_key == "flowing")
+        for w in self._flowing_widgets:
+            w.setVisible(is_flowing)
+        for w in self._flowing_slider_widgets:
+            w.setVisible(is_flowing)
+        # flowing 모드에서 슬라이더 라벨 갱신
+        if is_flowing:
+            self._update_flowing_labels()
+
+    def _update_flowing_labels(self):
+        interval = self.slider_flowing_interval.value() / 10.0
+        self.lbl_flowing_interval.setText(f"{interval:.1f}초")
+        speed_pct = self.slider_flowing_speed.value()
+        self.lbl_flowing_speed.setText(f"{speed_pct}%")
+
+    def _get_flowing_interval(self):
+        """슬라이더 값 → 실제 갱신 주기 (초)."""
+        return self.slider_flowing_interval.value() / 10.0
+
+    def _get_flowing_speed(self):
+        """슬라이더 값(0~100) → 실제 회전 속도.
+
+        0% → 0.02 (매우 느림)
+        50% → 0.08 (기본)
+        100% → 0.20 (빠름)
+        """
+        t = self.slider_flowing_speed.value() / 100.0
+        return 0.02 + t * 0.18
+
     def _on_changed(self, _=None):
+        if self._mode_key == "flowing":
+            self._update_flowing_labels()  # ★ Phase 4
         if self._is_running: self.hybrid_params_changed.emit(self.collect_params())
 
     def _on_min_brightness(self, value):
@@ -145,14 +309,28 @@ class HybridPanel(QWidget):
 
     def collect_params(self):
         p = self.param_widget.get_params()
-        return {"audio_mode": _INDEX_AUDIO_MODE.get(self.combo_mode.currentIndex(), "pulse"),
-                "color_source": COLOR_SOURCE_SCREEN, "n_zones": self.combo_zone_count.currentData() or 4,
-                "min_brightness": self.slider_min_brightness.value() / 100.0,
-                "brightness": p["brightness"] / 100.0, "bass_sensitivity": p["bass_sens"] / 100.0,
-                "mid_sensitivity": p["mid_sens"] / 100.0, "high_sensitivity": p["high_sens"] / 100.0,
-                "attack": p["attack"] / 100.0, "release": p["release"] / 100.0,
-                "wave_speed": wave_speed_from_slider(p["wave_speed"]),
-                "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"])}
+        return {
+            "audio_mode": _INDEX_AUDIO_MODE.get(self.combo_mode.currentIndex(), "pulse"),
+            "color_source": COLOR_SOURCE_SCREEN,
+            "n_zones": self.combo_zone_count.currentData() or 4,
+            "min_brightness": self.slider_min_brightness.value() / 100.0,
+            "brightness": p["brightness"] / 100.0,
+            "bass_sensitivity": p["bass_sens"] / 100.0,
+            "mid_sensitivity": p["mid_sens"] / 100.0,
+            "high_sensitivity": p["high_sens"] / 100.0,
+            "attack": p["attack"] / 100.0,
+            "release": p["release"] / 100.0,
+            "wave_speed": wave_speed_from_slider(p["wave_speed"]),
+            "zone_weights": (p["zone_bass"], p["zone_mid"], p["zone_high"]),
+            # ★ Phase 2
+            "color_effect": self._color_effect,
+            "gradient_speed": 1.0,
+            # ★ Phase 3
+            "color_extract_mode": self.combo_extract_mode.currentData() or "average",
+            # ★ Phase 4: flowing 파라미터
+            "flowing_interval": self._get_flowing_interval(),
+            "flowing_speed": self._get_flowing_speed(),
+        }
 
     def update_energy(self, bass, mid, high):
         self.bar_bass.setValue(int(bass * 100)); self.bar_mid.setValue(int(mid * 100)); self.bar_high.setValue(int(high * 100))
@@ -161,8 +339,15 @@ class HybridPanel(QWidget):
     def apply_to_config(self):
         self._save_mode_params(self._mode_key)
         opts = self._config.setdefault("options", {})
-        opts["hybrid_state"] = {"sub_mode": self._mode_key, "zone_count": self.combo_zone_count.currentData() or 4,
-                                "min_brightness": self.slider_min_brightness.value()}
+        opts["hybrid_state"] = {
+            "sub_mode": self._mode_key,
+            "zone_count": self.combo_zone_count.currentData() or 4,
+            "min_brightness": self.slider_min_brightness.value(),
+            "color_effect": self._color_effect,  # ★ Phase 2
+            "color_extract_mode": self.combo_extract_mode.currentData() or "average",  # ★ Phase 3
+            "flowing_interval": self.slider_flowing_interval.value(),  # ★ Phase 4
+            "flowing_speed": self.slider_flowing_speed.value(),        # ★ Phase 4
+        }
 
     def load_from_config(self):
         state = self._config.get("options", {}).get("hybrid_state", {})
@@ -177,5 +362,30 @@ class HybridPanel(QWidget):
         min_b = state.get("min_brightness", 5)
         self.slider_min_brightness.blockSignals(True); self.slider_min_brightness.setValue(min_b); self.slider_min_brightness.blockSignals(False)
         self.lbl_min_brightness.setText(f"{min_b}%"); self._load_mode_params(self._mode_key)
+
+        # ★ Phase 2: 색상 효과 복원
+        self._color_effect = state.get("color_effect", COLOR_EFFECT_STATIC)
+        effect_idx = _COLOR_EFFECT_TO_INDEX.get(self._color_effect, 0)
+        self.combo_color_effect.blockSignals(True)
+        self.combo_color_effect.setCurrentIndex(effect_idx)
+        self.combo_color_effect.blockSignals(False)
+
+        # ★ Phase 3: 추출 방식 복원
+        saved_extract = state.get("color_extract_mode", "average")
+        self.combo_extract_mode.blockSignals(True)
+        for i in range(self.combo_extract_mode.count()):
+            if self.combo_extract_mode.itemData(i) == saved_extract:
+                self.combo_extract_mode.setCurrentIndex(i); break
+        self.combo_extract_mode.blockSignals(False)
+        self._update_extract_mode_enabled()
+
+        # ★ Phase 4: flowing 슬라이더 복원
+        self.slider_flowing_interval.blockSignals(True)
+        self.slider_flowing_interval.setValue(state.get("flowing_interval", 30))
+        self.slider_flowing_interval.blockSignals(False)
+        self.slider_flowing_speed.blockSignals(True)
+        self.slider_flowing_speed.setValue(state.get("flowing_speed", 50))
+        self.slider_flowing_speed.blockSignals(False)
+        self._update_flowing_visibility(self._mode_key)
 
     def cleanup(self): self._save_mode_params(self._mode_key)

@@ -5,6 +5,10 @@
 - vectorized_render_pulse(): Python 루프 없이 펄스 렌더링
 - vectorized_render_spectrum(): Python 루프 없이 스펙트럼 렌더링
 
+[Phase 2] 색상 효과 추가
+- build_base_color_array_animated(): 시간 기반 색상 효과 (gradient/rainbow_time)
+- HSV ↔ RGB 벡터화 헬퍼 함수
+
 순수 numpy 모듈. Qt 의존성 없음.
 """
 
@@ -24,6 +28,7 @@ AUDIO_SPECTRUM = "spectrum"
 AUDIO_BASS_DETAIL = "bass_detail"
 AUDIO_WAVE = "wave"
 AUDIO_DYNAMIC = "dynamic"
+AUDIO_FLOWING = "flowing"  # ★ Phase 4: 하이브리드 전용
 
 COLOR_SOURCE_SOLID = "solid"
 COLOR_SOURCE_SCREEN = "screen"
@@ -42,6 +47,12 @@ DEFAULT_ZONE_WEIGHTS = (33, 33, 34)
 BASS_DETAIL_FREQ_MIN = 20
 BASS_DETAIL_FREQ_MAX = 500
 BASS_DETAIL_N_BANDS = 16
+
+# ★ Phase 2: 색상 효과 상수
+COLOR_EFFECT_STATIC = "static"
+COLOR_EFFECT_GRADIENT_CW = "gradient_cw"
+COLOR_EFFECT_GRADIENT_CCW = "gradient_ccw"
+COLOR_EFFECT_RAINBOW_TIME = "rainbow_time"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -572,52 +583,33 @@ def vectorized_render_wave(base_colors, led_norm_y, pulses,
 
 # ══════════════════════════════════════════════════════════════════
 #  [Dynamic 모드] v4 — Slot + Envelope Follower
-#
-#  핵심 컨셉 변경:
-#  - 기존: onset → spawn ripple → ripple 자체가 attack/release로 밝아졌다 꺼짐
-#  - 신규: onset → slot(위치)을 할당 → slot의 밝기는 매 프레임 bass envelope을 따라감
-#
-#  Pulse 모드와의 유사성:
-#  - Pulse: 매 프레임 intensity = bass → 전체 LED가 bass를 따라감
-#  - Dynamic v4: 매 프레임 각 slot의 intensity가 bass를 따라감, 위치만 onset 시 결정
-#
-#  같은 비트의 연속 onset:
-#  - 새 ripple을 만들지 않고, 가장 최근 slot의 energy를 boost
-#  - "refractory period" — onset 후 일정 시간은 같은 slot에 축적
-#
-#  자연스러운 소멸:
-#  - slot의 envelope이 threshold 이하로 내려가면 자연 소멸
-#  - 교체/즉사 없음 → 시각적 불연속 제거
 # ══════════════════════════════════════════════════════════════════
 
 # ── Dynamic 파라미터 상수 ──
-DYN_ONSET_DELTA_BASE = 0.012   # 기본 onset 감지 최소 변화량
-DYN_ONSET_BASS_MIN = 0.12     # ★ onset_bass 절대값 최소 (AGC 노이즈 필터)
-DYN_REFRACTORY = 0.10          # onset 후 이 시간 내 재onset → 기존 slot boost (초)
-DYN_COOLDOWN = 0.03            # 새 slot 생성 최소 간격 (boost는 이 제한 없음)
-DYN_MAX_SLOTS = 8              # 동시 최대 slot 수
-DYN_MIN_DISTANCE = 0.18        # 새 slot과 기존 slot 간 최소 거리
+DYN_ONSET_DELTA_BASE = 0.012
+DYN_ONSET_BASS_MIN = 0.12
+DYN_REFRACTORY = 0.10
+DYN_COOLDOWN = 0.03
+DYN_MAX_SLOTS = 8
+DYN_MIN_DISTANCE = 0.18
 
-# 파원 크기 — 에너지에 따라 스케일링
-DYN_RIPPLE_WIDTH_MIN = 0.03    # 약한 비트: core σ  LED
-DYN_RIPPLE_WIDTH_MAX = 0.06    # 강한 비트: core σ  LED
-DYN_RIPPLE_HALO_MIN = 0.08     # 약한 비트: halo σ  LED
-DYN_RIPPLE_HALO_MAX = 0.12     # 강한 비트: halo σ  LED
+DYN_RIPPLE_WIDTH_MIN = 0.03
+DYN_RIPPLE_WIDTH_MAX = 0.06
+DYN_RIPPLE_HALO_MIN = 0.08
+DYN_RIPPLE_HALO_MAX = 0.12
 
-DYN_RIPPLE_SPEED = 0.2         # 미세 확산 (제자리 느낌)
+DYN_RIPPLE_SPEED = 0.2
 DYN_RIPPLE_EXPAND_CORE = 0.02
 DYN_RIPPLE_EXPAND_HALO = 0.04
 
-# Envelope follower — asymmetric IIR (fast attack / slow release)
-# UI attack/release 슬라이더가 이 값을 스케일링
-DYN_ENV_ATTACK_MIN = 3.0       # attack=0: 보통 속도로 밝아짐
-DYN_ENV_ATTACK_MAX = 25.0      # attack=1: 즉시 밝아짐
-DYN_ENV_RELEASE_MIN = 0.5      # release=0: 빨리 꺼짐 (초당 감쇠율)
-DYN_ENV_RELEASE_MAX = 4.0      # release=1: 아주 천천히 꺼짐
+DYN_ENV_ATTACK_MIN = 3.0
+DYN_ENV_ATTACK_MAX = 25.0
+DYN_ENV_RELEASE_MIN = 0.5
+DYN_ENV_RELEASE_MAX = 4.0
 
-DYN_ENERGY_BOOST = 1.4         # 초기 에너지 배수
-DYN_SPARKLE_PROB = 0.10        # sparkle 확률
-DYN_SLOT_DEATH_THRESHOLD = 0.015  # 이 이하면 slot 소멸
+DYN_ENERGY_BOOST = 1.4
+DYN_SPARKLE_PROB = 0.10
+DYN_SLOT_DEATH_THRESHOLD = 0.015
 
 _SIDES = ("bottom", "left", "top", "right")
 
@@ -702,9 +694,6 @@ class DynamicRipple:
     """하나의 Dynamic slot.
 
     v4: envelope follower 패턴.
-    - target_energy: onset 시 설정되는 "이 slot이 도달해야 할 밝기"
-    - envelope: 매 프레임 attack/release로 target을 추적하는 현재 밝기
-    - onset이 반복되면 target이 갱신(boost)될 뿐, slot이 새로 생기지 않음
     """
     __slots__ = ("center_t", "radius", "target_energy", "envelope",
                  "age", "last_onset_time", "color_offset",
@@ -714,23 +703,19 @@ class DynamicRipple:
         self.center_t = center_t
         self.radius = 0.0
         self.target_energy = min(energy * DYN_ENERGY_BOOST, 1.8)
-        self.envelope = 0.0  # envelope follower — attack rate로 target 추적
+        self.envelope = 0.0
         self.age = 0.0
         self.last_onset_time = current_time
         self.color_offset = color_offset
 
-        # 에너지 비례 파원 크기
         e_frac = min(energy, 1.0)
         self.width_core = DYN_RIPPLE_WIDTH_MIN + e_frac * (DYN_RIPPLE_WIDTH_MAX - DYN_RIPPLE_WIDTH_MIN)
         self.width_halo = DYN_RIPPLE_HALO_MIN + e_frac * (DYN_RIPPLE_HALO_MAX - DYN_RIPPLE_HALO_MIN)
 
     def boost(self, energy, current_time):
-        """같은 비트의 연속 onset — 기존 slot의 target을 갱신."""
         new_target = min(energy * DYN_ENERGY_BOOST, 1.8)
-        # target은 현재보다 높을 때만 갱신 (이미 밝으면 유지)
         if new_target > self.target_energy:
             self.target_energy = new_target
-            # 크기도 갱신 (더 강한 비트 → 더 큰 파원)
             e_frac = min(energy, 1.0)
             self.width_core = max(self.width_core,
                                   DYN_RIPPLE_WIDTH_MIN + e_frac * (DYN_RIPPLE_WIDTH_MAX - DYN_RIPPLE_WIDTH_MIN))
@@ -744,79 +729,52 @@ def dynamic_tick_ripples(ripples, dt, bass, mid, high,
                          prev_bass=0.0, side_t_ranges=None,
                          attack=0.5, release=0.5, sensitivity=1.0,
                          raw_bass=None, prev_raw_bass=0.0):
-    """v4: Slot + Envelope Follower.
-
-    매 프레임:
-    1. 모든 slot의 envelope을 bass 기반으로 업데이트 (attack/release)
-    2. onset 감지 시:
-       a. refractory 기간 내 → 가장 최근 slot을 boost
-       b. refractory 지남 → 새 slot 생성 (spacing 적용)
-    3. envelope이 threshold 이하인 slot은 자연 소멸
-    """
-    # attack/release → envelope follower rate
+    """v4: Slot + Envelope Follower."""
     env_attack = DYN_ENV_ATTACK_MIN + attack * (DYN_ENV_ATTACK_MAX - DYN_ENV_ATTACK_MIN)
     env_release = DYN_ENV_RELEASE_MAX - release * (DYN_ENV_RELEASE_MAX - DYN_ENV_RELEASE_MIN)
-    # release=0 → 4.0 (빨리 꺼짐), release=1 → 0.5 (천천히 꺼짐)
 
-    # ── 1. 모든 slot의 envelope 업데이트 ──
     for r in ripples:
         r.radius += DYN_RIPPLE_SPEED * dt
         r.age += dt
-
-        # target은 release rate로 자연 감쇠
         r.target_energy *= (1.0 - env_release * dt)
-
-        # envelope은 target을 향해 asymmetric하게 추적
         if r.envelope < r.target_energy:
-            # attack: 빠르게 따라 올라감
             r.envelope += env_attack * dt
             r.envelope = min(r.envelope, r.target_energy)
         else:
-            # release: 천천히 따라 내려감
             r.envelope *= (1.0 - env_release * dt)
 
-    # ── 2. 자연 소멸 ──
     ripples[:] = [r for r in ripples if r.envelope > DYN_SLOT_DEATH_THRESHOLD]
 
-    # ── 3. onset 감지 ──
     onset_bass = raw_bass if raw_bass is not None else bass
     onset_prev = prev_raw_bass if raw_bass is not None else prev_bass
 
     onset_threshold = DYN_ONSET_DELTA_BASE / max(sensitivity, 0.1)
     bass_delta = onset_bass - onset_prev
 
-    # ★ onset 조건:
-    # 1. delta가 threshold 초과 — sensitivity가 threshold만 조절
-    # 2. onset_bass가 고정 최소값(0.20) 이상 — AGC 노이즈 필터
     if (bass_delta > onset_threshold
             and onset_bass > DYN_ONSET_BASS_MIN):
 
         energy = max(bass, onset_bass * 0.7)
 
-        # refractory 확인: 최근 onset이 있었으면 그 slot을 boost
         most_recent = None
         if ripples:
             most_recent = max(ripples, key=lambda r: r.last_onset_time)
 
         if (most_recent is not None
                 and (current_time - most_recent.last_onset_time) < DYN_REFRACTORY):
-            # ★ 같은 비트 → 기존 slot boost (새 ripple 안 만듦)
             most_recent.boost(energy, current_time)
         elif (current_time - last_spawn_time) > DYN_COOLDOWN:
-            # 새 slot 생성
             center = _pick_position_with_spacing(side_t_ranges, ripples)
             if center is not None and len(ripples) < DYN_MAX_SLOTS:
                 color_off = (current_time * 0.2) % 1.0
                 ripples.append(DynamicRipple(center, energy, current_time, color_off))
                 last_spawn_time = current_time
             elif center is None and len(ripples) < DYN_MAX_SLOTS:
-                # spacing 실패 → 랜덤 위치로 완화 (비트를 놓치지 않기 위해)
                 fallback = _pick_position_proportional(side_t_ranges)
                 color_off = (current_time * 0.2) % 1.0
                 ripples.append(DynamicRipple(fallback, energy, current_time, color_off))
                 last_spawn_time = current_time
             elif ripples:
-                # slot 꽉 참 → 가장 어두운 slot을 boost (교체 아님!)
                 weakest = min(ripples, key=lambda r: r.envelope)
                 if energy * DYN_ENERGY_BOOST > weakest.envelope * 2.0:
                     weakest.boost(energy, current_time)
@@ -826,13 +784,11 @@ def dynamic_tick_ripples(ripples, dt, bass, mid, high,
 
 
 def _circular_distance(a, b):
-    """둘레 좌표 0~1에서의 circular 거리 (최대 0.5)."""
     d = abs(a - b)
     return min(d, 1.0 - d)
 
 
 def _pick_position_with_spacing(side_t_ranges, ripples, max_attempts=5):
-    """면 길이 비례 위치 + 기존 slot과 최소 거리 유지."""
     if side_t_ranges is None:
         return np.random.random()
 
@@ -868,7 +824,6 @@ def _pick_position_with_spacing(side_t_ranges, ripples, max_attempts=5):
 
 
 def _pick_position_proportional(side_t_ranges):
-    """면 길이 비례 위치 (spacing 없이)."""
     if side_t_ranges is None:
         return np.random.random()
 
@@ -892,10 +847,7 @@ def _pick_position_proportional(side_t_ranges):
 
 def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
                               high, min_brightness, audio_brightness):
-    """v4: envelope follower 기반 렌더링.
-
-    각 slot의 envelope 값이 곧 밝기 — Pulse처럼 부드러운 밝기 변화.
-    """
+    """v4: envelope follower 기반 렌더링."""
     n_leds = len(perimeter_t)
     intensity = np.full(n_leds, min_brightness, dtype=np.float64)
 
@@ -908,16 +860,184 @@ def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
         esc_sq = 2.0 * esc * esc
         esh_sq = 2.0 * esh * esh
 
-        # ★ envelope 사용 — attack/release가 반영된 부드러운 밝기
         e = r.envelope
         core = e * np.exp(-(delta * delta) / esc_sq)
         halo = e * 0.35 * np.exp(-(delta * delta) / esh_sq)
         intensity += core + halo
 
-    # per-LED soft clamp
     np.minimum(intensity, 1.0, out=intensity)
 
     intensity *= audio_brightness
     leds = base_colors * intensity[:, np.newaxis]
 
     return leds.astype(np.float32)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  [Phase 2] HSV 변환 헬퍼 + 시간 기반 색상 효과
+# ══════════════════════════════════════════════════════════════════
+
+# 그라데이션 물결 파라미터
+_GRADIENT_S_MIN = 0.4     # 채도 최소 배율
+_GRADIENT_S_RANGE = 0.6   # 채도 변동폭
+_GRADIENT_V_MIN = 0.55    # 밝기 최소 배율
+_GRADIENT_V_RANGE = 0.45  # 밝기 변동폭
+_GRADIENT_V_PHASE_OFFSET = np.pi / 3  # V 물결의 위상 오프셋
+
+# 무지개 시간 순회 기본 속도
+_RAINBOW_TIME_SPEED = 0.08  # hue 회전 초당 (speed=1.0일 때)
+
+
+def _rgb_to_hsv_single(rgb):
+    """(3,) RGB 0~255 → (h, s, v) 각각 0~1."""
+    r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    diff = mx - mn
+    if diff == 0:
+        h = 0.0
+    elif mx == r:
+        h = ((g - b) / diff) % 6.0 / 6.0
+    elif mx == g:
+        h = ((b - r) / diff + 2.0) / 6.0
+    else:
+        h = ((r - g) / diff + 4.0) / 6.0
+    s = 0.0 if mx == 0 else diff / mx
+    v = mx
+    return h, s, v
+
+
+def _hsv_to_rgb_single(h, s, v):
+    """스칼라 H, S, V (0~1) → (3,) RGB float32 0~255."""
+    h6 = (h % 1.0) * 6.0
+    i = int(h6)
+    f = h6 - i
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    if i == 0:   r, g, b = v, t, p
+    elif i == 1: r, g, b = q, v, p
+    elif i == 2: r, g, b = p, v, t
+    elif i == 3: r, g, b = p, q, v
+    elif i == 4: r, g, b = t, p, v
+    else:        r, g, b = v, p, q
+    return np.array([r * 255.0, g * 255.0, b * 255.0], dtype=np.float32)
+
+
+def _hsv_to_rgb_array(h, s, v):
+    """(N,) H, S, V (0~1) → (N, 3) RGB float32 0~255. 벡터화."""
+    h = np.asarray(h, dtype=np.float64) % 1.0
+    s = np.asarray(s, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    h6 = h * 6.0
+    i = h6.astype(np.int32) % 6
+    f = h6 - np.floor(h6)
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    n = len(h)
+    rgb = np.zeros((n, 3), dtype=np.float64)
+    m0 = i == 0; m1 = i == 1; m2 = i == 2
+    m3 = i == 3; m4 = i == 4; m5 = i == 5
+    rgb[m0] = np.column_stack([v[m0], t[m0], p[m0]])
+    rgb[m1] = np.column_stack([q[m1], v[m1], p[m1]])
+    rgb[m2] = np.column_stack([p[m2], v[m2], t[m2]])
+    rgb[m3] = np.column_stack([p[m3], q[m3], v[m3]])
+    rgb[m4] = np.column_stack([t[m4], p[m4], v[m4]])
+    rgb[m5] = np.column_stack([v[m5], p[m5], q[m5]])
+    return (rgb * 255.0).astype(np.float32)
+
+
+def _rgb_array_to_hsv(rgb):
+    """(N, 3) RGB float32 0~255 → (N,) H, (N,) S, (N,) V 각각 0~1."""
+    rgb_norm = np.asarray(rgb, dtype=np.float64) / 255.0
+    r, g, b = rgb_norm[:, 0], rgb_norm[:, 1], rgb_norm[:, 2]
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    diff = mx - mn
+    h = np.zeros_like(mx)
+    mask_r = (mx == r) & (diff > 0)
+    mask_g = (mx == g) & (diff > 0) & ~mask_r
+    mask_b = (mx == b) & (diff > 0) & ~mask_r & ~mask_g
+    h[mask_r] = (((g[mask_r] - b[mask_r]) / diff[mask_r]) % 6.0) / 6.0
+    h[mask_g] = ((b[mask_g] - r[mask_g]) / diff[mask_g] + 2.0) / 6.0
+    h[mask_b] = ((r[mask_b] - g[mask_b]) / diff[mask_b] + 4.0) / 6.0
+    s = np.where(mx > 0, diff / mx, 0.0)
+    v = mx
+    return h, s, v
+
+
+def build_base_color_array_animated(
+    led_band_indices, n_bands, clockwise_t, current_time,
+    color_effect="static",
+    rainbow=True, solid_color=None, screen_colors=None,
+    gradient_speed=1.0,
+):
+    """시간 기반 색상 효과가 적용된 base_colors 생성.
+
+    color_effect가 "static"이면 기존 build_base_color_array()와 동일.
+    그 외는 매 프레임 호출되어야 함 (시간 의존).
+
+    Args:
+        led_band_indices: (n_leds,) float64 — LED별 밴드 인덱스
+        n_bands: 총 밴드 수
+        clockwise_t: (n_leds,) float64 — LED 둘레 좌표 (0~1, 시계방향)
+        current_time: float — 현재 시간 (time.monotonic)
+        color_effect: "static" | "gradient_cw" | "gradient_ccw" | "rainbow_time"
+        rainbow: bool — 무지개 모드
+        solid_color: (3,) float32 — 단색 RGB 0~255
+        screen_colors: (n_leds, 3) float32 — 화면 색상 (하이브리드)
+        gradient_speed: float — 효과 속도 배수
+
+    Returns:
+        (n_leds, 3) float32 — LED별 RGB 0~255
+    """
+    # screen_colors가 있으면 효과 미적용 (하이브리드 screen 모드)
+    if screen_colors is not None:
+        return screen_colors.copy()
+
+    if color_effect == COLOR_EFFECT_STATIC:
+        return build_base_color_array(
+            led_band_indices, n_bands,
+            rainbow=rainbow, solid_color=solid_color,
+        )
+
+    n_leds = len(led_band_indices)
+    ct = np.asarray(clockwise_t, dtype=np.float64)
+
+    if color_effect == COLOR_EFFECT_RAINBOW_TIME:
+        hue = (current_time * _RAINBOW_TIME_SPEED * gradient_speed) % 1.0
+        rgb = _hsv_to_rgb_single(hue, 1.0, 1.0)
+        return np.broadcast_to(rgb, (n_leds, 3)).copy()
+
+    if color_effect in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW):
+        direction = 1.0 if color_effect == COLOR_EFFECT_GRADIENT_CW else -1.0
+        if rainbow:
+            # 무지개 + 그라데이션 — 위치별 무지개를 S/V 물결 변조
+            t = led_band_indices / max(1, n_bands - 1)
+            base_rgb = band_color_vectorized(t)
+            h, s, v = _rgb_array_to_hsv(base_rgb)
+            phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
+            s_mod = _GRADIENT_S_MIN + _GRADIENT_S_RANGE * (0.5 + 0.5 * np.sin(phase))
+            v_mod = _GRADIENT_V_MIN + _GRADIENT_V_RANGE * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
+            s = np.clip(s * s_mod, 0, 1)
+            v = np.clip(v * v_mod, 0, 1)
+            return _hsv_to_rgb_array(h, s, v)
+        else:
+            # 단색 + 그라데이션 — HSV S/V 물결
+            if solid_color is None:
+                solid_color = np.array([255, 0, 80], dtype=np.float32)
+            base_h, base_s, base_v = _rgb_to_hsv_single(solid_color)
+            phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
+            s_mod = _GRADIENT_S_MIN + _GRADIENT_S_RANGE * (0.5 + 0.5 * np.sin(phase))
+            v_mod = _GRADIENT_V_MIN + _GRADIENT_V_RANGE * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
+            h = np.full(n_leds, base_h)
+            s = np.clip(base_s * s_mod, 0, 1)
+            v = np.clip(base_v * v_mod, 0, 1)
+            return _hsv_to_rgb_array(h, s, v)
+
+    # fallback
+    return build_base_color_array(
+        led_band_indices, n_bands,
+        rainbow=rainbow, solid_color=solid_color,
+    )

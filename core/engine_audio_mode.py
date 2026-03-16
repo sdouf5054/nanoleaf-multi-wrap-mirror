@@ -32,6 +32,8 @@ from core.engine_utils import (
     compute_led_normalized_y, compute_side_t_ranges,
     WavePulse, wave_tick_pulses,
     DynamicRipple, dynamic_tick_ripples,
+    build_base_color_array_animated,
+    COLOR_EFFECT_STATIC,
 )
 
 
@@ -139,23 +141,31 @@ class AudioModeEngine(BaseEngine):
     # ── ADR-014: 색상 배열 캐시 ──────────────────────────────────
 
     def _rebuild_base_colors(self):
-        """색상/모드 변경 시 기본 색상 배열 재빌드."""
         ap = self._current_audio_params
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
-
-        self._cached_base_colors = build_base_color_array(
-            self._led_band_indices, n_bands,
-            rainbow=ap.rainbow,
-            solid_color=np.array(ap.base_color, dtype=np.float32),
-        )
+        # ★ Phase 2: animated 효과가 아닌 경우에만 캐시
+        if ap.color_effect == COLOR_EFFECT_STATIC:
+            self._cached_base_colors = build_base_color_array(
+                self._led_band_indices, n_bands,
+                rainbow=ap.rainbow,
+                solid_color=np.array(ap.base_color, dtype=np.float32),
+            )
+        # animated일 때는 _run_loop에서 매 프레임 갱신하므로 여기서는 기본값만 설정
+        else:
+            self._cached_base_colors = build_base_color_array(
+                self._led_band_indices, n_bands,
+                rainbow=ap.rainbow,
+                solid_color=np.array(ap.base_color, dtype=np.float32),
+            )
         self._cached_rainbow = ap.rainbow
         self._cached_base_color_tuple = ap.base_color
 
     def _maybe_rebuild_base_colors(self, ap):
-        """색상 설정이 변경되었으면 재빌드."""
         if (ap.rainbow != self._cached_rainbow
-                or ap.base_color != self._cached_base_color_tuple):
+                or ap.base_color != self._cached_base_color_tuple
+                or ap.color_effect != getattr(self, '_cached_color_effect', COLOR_EFFECT_STATIC)):
             self._rebuild_base_colors()
+            self._cached_color_effect = ap.color_effect
 
     # ── 메인 루프 ────────────────────────────────────────────────
 
@@ -231,6 +241,19 @@ class AudioModeEngine(BaseEngine):
             bd_spec = None
             dt = time.monotonic() - loop_start  # 대략적 dt (이전 프레임 간격)
 
+             # ★ Phase 2: animated 색상 효과 — 매 프레임 base_colors 갱신
+            if ap.color_effect != COLOR_EFFECT_STATIC:
+                self._cached_base_colors = build_base_color_array_animated(
+                    self._led_band_indices,
+                    self._audio_engine.n_bands if self._audio_engine else 16,
+                    self._dyn_clockwise_t,
+                    loop_start,
+                    color_effect=ap.color_effect,
+                    rainbow=ap.rainbow,
+                    solid_color=np.array(ap.base_color, dtype=np.float32),
+                    gradient_speed=ap.gradient_speed,
+                )
+                
             if audio_mode == AUDIO_WAVE:
                 # Wave: 펄스 큐 업데이트 + 렌더링
                 self._wave_last_spawn = wave_tick_pulses(
