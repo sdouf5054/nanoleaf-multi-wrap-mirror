@@ -92,14 +92,26 @@ def _register_startup():
     """[ADR-032] Registry Run key로 시작프로그램 등록."""
     try:
         import winreg
-        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-        if not os.path.exists(pythonw): pythonw = sys.executable
-        main_py = os.path.abspath("main.py")
-        cmd = f'"{pythonw}" "{main_py}" --startup'
+
+        if getattr(sys, 'frozen', False):
+            # exe 빌드: sys.executable이 곧 앱 실행 파일
+            cmd = f'"{sys.executable}" --startup'
+        else:
+            # 스크립트 실행: pythonw.exe + main.py 절대 경로
+            pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+            if not os.path.exists(pythonw):
+                pythonw = sys.executable
+            # main.py 경로를 이 파일 기준으로 계산 (CWD 의존 제거)
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            main_py = os.path.join(project_root, "main.py")
+            cmd = f'"{pythonw}" "{main_py}" --startup'
+
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, cmd)
-        winreg.CloseKey(key); return True
-    except Exception: return False
+        winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
 
 
 def _unregister_startup():
