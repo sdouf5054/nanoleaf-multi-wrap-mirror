@@ -978,15 +978,8 @@ class ControlTab(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _get_engine_mode_string(self):
-        """토글 조합 → 기존 엔진 모드 문자열 (과도기 호환)."""
-        if self._display_on and self._audio_on:
-            return "hybrid"
-        elif self._display_on:
-            return "mirror"
-        elif self._audio_on:
-            return "audio"
-        else:
-            return "audio"  # plain LED도 AudioModeEngine으로 처리 (정적 색)
+        """Phase 7: 항상 unified — UnifiedEngine이 토글 플래그로 분기."""
+        return "unified"
 
     def _refresh_audio_devices(self):
         self.combo_audio_device.clear()

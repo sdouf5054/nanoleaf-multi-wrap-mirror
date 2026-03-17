@@ -1,14 +1,10 @@
-"""BaseEngine — 공통 엔진 수명주기 (Phase 5: EngineParams 통합)
+"""BaseEngine — 공통 엔진 수명주기 (Phase 7: 호환 shim 제거)
 
-[Phase 5 변경]
-- _pending_mirror_params / _pending_audio_params → _pending_params (EngineParams) 통합
-- _current_mirror_params / _current_audio_params → _current_params (EngineParams) 통합
-- update_mirror_params / update_audio_params: 입력을 EngineParams로 변환하여 저장
-- _swap_params: 단일 스왑
-- 호환 속성: _current_mirror_params / _current_audio_params → _current_params 참조
-
-기존 엔진 코드에서 ap.xxx / mp.xxx로 접근하던 코드는
-EngineParams의 호환 속성(brightness, smoothing_enabled, color_source, n_zones)으로 동작.
+[Phase 7 변경]
+- update_mirror_params / update_audio_params 제거
+- _current_mirror_params / _current_audio_params 호환 속성 제거
+- update_params(EngineParams) 단일 API만 유지
+- MirrorParams/AudioParams import 제거
 """
 
 import time
@@ -26,9 +22,8 @@ from core.layout import get_led_positions, build_weight_matrix
 from core.color import ColorPipeline
 from core.color_correction import ColorCorrection
 from core.constants import HW_ERRORS, HW_CONNECT_ERRORS
-from core.engine_params import EngineParams, MirrorParams, AudioParams, LayoutParams
+from core.engine_params import EngineParams, LayoutParams
 from core.engine_utils import (
-    MODE_MIRROR, MODE_AUDIO, MODE_HYBRID,
     N_ZONES_PER_LED,
     _build_led_zone_map_by_side,
 )
@@ -38,7 +33,7 @@ class BaseEngine(QThread):
     """모든 엔진 모드의 공통 베이스 클래스.
 
     서브클래스는 다음을 구현해야 합니다:
-        mode: str              — "mirror", "audio", "hybrid"
+        mode: str              — "unified" 등
         _init_mode_resources() — 모드별 리소스 초기화
         _run_loop()            — 메인 루프
         _cleanup_mode()        — 모드별 리소스 정리
@@ -59,11 +54,9 @@ class BaseEngine(QThread):
         self.config = copy.deepcopy(config)
         self._stop_event = threading.Event()
 
-        # ── Phase 5: 통합 파라미터 ──
+        # ── 통합 파라미터 ──
         self._pending_params: EngineParams | None = None
         self._current_params = EngineParams(
-            display_enabled=(self.mode in (MODE_MIRROR, MODE_HYBRID)),
-            audio_enabled=(self.mode in (MODE_AUDIO, MODE_HYBRID)),
             master_brightness=config.get("mirror", {}).get("master_brightness",
                               config.get("mirror", {}).get("brightness", 1.0)),
             smoothing_factor=config.get("mirror", {}).get("smoothing_factor", 0.5),
@@ -111,23 +104,12 @@ class BaseEngine(QThread):
         self._debug_profile = False
 
     # ══════════════════════════════════════════════════════════════
-    #  Phase 5: 통합 파라미터 API
+    #  파라미터 API
     # ══════════════════════════════════════════════════════════════
 
     def update_params(self, params: EngineParams):
         """UI → 엔진 통합 파라미터 전달 (atomic 참조 대입)."""
         self._pending_params = params
-
-    def update_mirror_params(self, params: MirrorParams):
-        """[호환 유지] MirrorParams → EngineParams 변환 후 전달."""
-        ep = params.to_engine_params()
-        self._pending_params = ep
-
-    def update_audio_params(self, params: AudioParams):
-        """[호환 유지] AudioParams → EngineParams 변환 후 전달."""
-        display_on = self._current_params.display_enabled
-        ep = params.to_engine_params(display_enabled=display_on)
-        self._pending_params = ep
 
     def update_layout_params(self, decay_radius=None, parallel_penalty=None,
                              decay_per_side=None, penalty_per_side=None):
@@ -150,20 +132,6 @@ class BaseEngine(QThread):
         if p is not None:
             self._pending_params = None
             self._current_params = p
-
-    # ── 호환 속성: 기존 엔진 코드에서 mp/ap로 접근하던 패턴 지원 ──
-
-    @property
-    def _current_mirror_params(self):
-        """[호환] 기존 코드의 self._current_mirror_params 참조를 지원.
-        반환하는 것은 EngineParams이지만, brightness/smoothing_enabled 등
-        호환 속성이 있으므로 기존 코드가 그대로 동작."""
-        return self._current_params
-
-    @property
-    def _current_audio_params(self):
-        """[호환] 기존 코드의 self._current_audio_params 참조를 지원."""
-        return self._current_params
 
     # ══════════════════════════════════════════════════════════════
     #  일시정지 / 중지 / 세션 복귀
@@ -423,6 +391,9 @@ class BaseEngine(QThread):
     def run(self):
         self._init_logging()
         try:
+            # ★ pending params를 먼저 반영 — _init_mode_resources()가
+            #   실제 display_enabled/audio_enabled 값을 참조할 수 있도록
+            self._swap_params()
             self._init_mode_resources()
             self._init_usb()
             self._expected_monitors = self._get_monitor_count()

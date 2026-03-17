@@ -1,24 +1,26 @@
-"""EngineController — UI↔엔진 중재자 (Phase 5: EngineParams 지원)
+"""EngineController — UI↔엔진 중재자 (Phase 7: UnifiedEngine 통합)
 
-[Phase 5 변경]
-- set_params(EngineParams) 신규 메서드 → engine.update_params() 직접 전달
-- set_mirror_params / set_audio_params: 호환 유지 (내부에서 변환)
-- start_engine: initial_params (EngineParams) 지원
+[Phase 7 변경]
+- _ENGINE_CLASSES: 모든 모드 → UnifiedEngine으로 단일화
+- set_params(EngineParams) 직접 전달 유지
+- MirrorParams/AudioParams 호환 shim 제거
+- start_engine: initial_params (EngineParams) 전용
 """
 
 import copy
 from PySide6.QtCore import QObject, Signal, QTimer
 
-from core.engine_params import EngineParams, MirrorParams, AudioParams
-from core.engine_mirror import MirrorEngine
-from core.engine_audio_mode import AudioModeEngine
-from core.engine_hybrid_mode import HybridEngine
+from core.engine_params import EngineParams
+from core.unified_engine import UnifiedEngine
 from core.engine_utils import MODE_MIRROR, MODE_AUDIO, MODE_HYBRID
 
+# Phase 7: 모든 모드가 UnifiedEngine으로 처리됨
+# 기존 mode 문자열 호환을 위해 매핑은 유지하되 모두 같은 클래스
 _ENGINE_CLASSES = {
-    MODE_MIRROR: MirrorEngine,
-    MODE_AUDIO: AudioModeEngine,
-    MODE_HYBRID: HybridEngine,
+    "unified": UnifiedEngine,
+    MODE_MIRROR: UnifiedEngine,
+    MODE_AUDIO: UnifiedEngine,
+    MODE_HYBRID: UnifiedEngine,
 }
 
 
@@ -40,7 +42,7 @@ class EngineController(QObject):
         super().__init__(parent)
         self.config = config
         self._engine = None
-        self._current_mode = MODE_MIRROR
+        self._current_mode = "unified"
         self._audio_device_index = None
 
     @property
@@ -62,40 +64,29 @@ class EngineController(QObject):
     def set_audio_device_index(self, index):
         self._audio_device_index = index
 
-    def start_engine(self, mode=None, initial_mirror_params=None,
-                     initial_audio_params=None, initial_params=None):
+    def start_engine(self, mode=None, initial_params=None,
+                     initial_mirror_params=None, initial_audio_params=None):
         """엔진 시작.
 
         Args:
-            mode: 엔진 모드 문자열
-            initial_mirror_params: MirrorParams (호환)
-            initial_audio_params: AudioParams (호환)
-            initial_params: EngineParams (Phase 5 — 직접 전달)
+            mode: 엔진 모드 문자열 (Phase 7에서는 무시됨, 항상 UnifiedEngine)
+            initial_params: EngineParams (Phase 5+)
+            initial_mirror_params: 호환 유지 (무시)
+            initial_audio_params: 호환 유지 (무시)
         """
         self.stop_engine_sync()
 
         if mode is not None:
             self._current_mode = mode
 
-        engine_cls = _ENGINE_CLASSES.get(self._current_mode)
-        if engine_cls is None:
-            self.error.emit(f"알 수 없는 모드: {self._current_mode}", "critical")
-            return
-
-        engine = engine_cls(
+        engine = UnifiedEngine(
             self.config,
             audio_device_index=self._audio_device_index,
         )
 
-        # Phase 5: EngineParams 직접 전달 우선
+        # EngineParams 직접 전달
         if initial_params is not None:
             engine.update_params(initial_params)
-        else:
-            # 호환: 기존 MirrorParams/AudioParams
-            if initial_mirror_params is not None:
-                engine.update_mirror_params(initial_mirror_params)
-            if initial_audio_params is not None:
-                engine.update_audio_params(initial_audio_params)
 
         self._engine = engine
         self._connect_signals(engine)
@@ -143,19 +134,9 @@ class EngineController(QObject):
     # ══════════════════════════════════════════════════════════════
 
     def set_params(self, params: EngineParams):
-        """Phase 5: 통합 EngineParams 직접 전달."""
+        """통합 EngineParams 직접 전달."""
         if self._engine:
             self._engine.update_params(params)
-
-    def set_mirror_params(self, params: MirrorParams):
-        """[호환 유지] 미러링 파라미터 전달."""
-        if self._engine:
-            self._engine.update_mirror_params(params)
-
-    def set_audio_params(self, params: AudioParams):
-        """[호환 유지] 오디오/하이브리드 파라미터 전달."""
-        if self._engine:
-            self._engine.update_audio_params(params)
 
     def update_layout_params(self, **kwargs):
         if self._engine:
