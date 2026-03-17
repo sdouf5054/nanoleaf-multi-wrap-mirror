@@ -46,9 +46,14 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 
 def _qt_message_handler(mode, context, message):
-    """DPI 관련 무해한 경고를 필터링."""
+    """무해한 Qt 경고를 필터링."""
+    # DPI 중복 설정 경고 무시
     if "SetProcessDpiAwarenessContext" in message:
-        return  # 무시 — PySide6 기본 DPI가 정상 작동 중
+        return
+    # QPainter 스타일 캐시 경고 무시 (Windows Fusion 스타일 + 스타일시트 조합에서
+    # Qt가 내부 QPixmap 캐시에 그릴 때 발생하는 cosmetic 경고. 기능 영향 없음.)
+    if "QPainter" in message:
+        return
     # 나머지 메시지는 stderr로 출력
     import sys as _sys
     if mode == QtMsgType.QtWarningMsg:

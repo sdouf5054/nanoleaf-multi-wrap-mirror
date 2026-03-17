@@ -1,31 +1,143 @@
-"""엔진 파라미터 스냅샷 — ADR-003 적용
+"""엔진 파라미터 스냅샷 — 통합 EngineParams (Phase 0)
 
-[ADR-003] GIL 의존 atomic scalar 대신, UI가 빌드한 스냅샷 객체를
-엔진이 프레임 시작 시 한 번 atomic swap하는 패턴.
+[변경 이력]
+- 기존 MirrorParams + AudioParams → EngineParams 단일 dataclass로 통합
+- display_enabled / audio_enabled 토글 플래그 추가
+- master_brightness: 모든 모드 공용 최대 밝기
+- MirrorParams / AudioParams: 호환 팩토리 함수로 유지 (Phase 4~5 완료 시 제거)
 
-UI 스레드: snapshot 객체를 생성하여 engine._pending_params에 대입
-엔진 스레드: 매 프레임 시작 시 _pending_params를 읽어 현재 파라미터로 교체
-
-CPython GIL 하에서 객체 참조 대입은 atomic이므로,
-별도 lock 없이 안전하게 스냅샷을 교환할 수 있습니다.
+[설계 원칙]
+- frozen=True: UI가 빌드한 스냅샷을 엔진이 atomic swap
+- 모든 필드에 안전한 기본값 → UI에서 부분 갱신 시에도 동작
+- LayoutParams는 별도 유지 (dirty flag 때문에 frozen 불가)
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Tuple
 
+
+# ══════════════════════════════════════════════════════════════════
+#  EngineParams — 통합 파라미터 스냅샷
+# ══════════════════════════════════════════════════════════════════
+
+@dataclass(frozen=True)
+class EngineParams:
+    """모든 엔진 모드의 통합 파라미터 스냅샷.
+
+    UI 스레드에서 빌드 → engine._pending_params에 atomic 대입 →
+    엔진 스레드가 프레임 시작 시 _swap_params()로 교체.
+
+    필드 그룹:
+    - 토글: display_enabled, audio_enabled
+    - 공용: master_brightness
+    - 디스플레이 계열: smoothing, 구역, 추출, 감쇠/페널티
+    - 색상 (디스플레이 OFF 시): rainbow, base_color, color_effect 등
+    - 오디오 계열: audio_mode, 감도, attack/release, 모드별 파라미터
+    - flowing 전용: flowing_interval, flowing_speed
+    """
+
+    # ── 토글 상태 ──
+    display_enabled: bool = False
+    audio_enabled: bool = False
+
+    # ── 공용 ──
+    master_brightness: float = 1.0    # 0~1. 모든 모드의 최대 밝기.
+
+    # ── 디스플레이 계열 ──
+    smoothing_factor: float = 0.5     # 0이면 스무딩 off
+    mirror_n_zones: int = -1          # -1 = per-LED
+    color_extract_mode: str = "average"  # "average" | "distinctive"
+
+    # ── 색상 (디스플레이 OFF 또는 오디오-only 모드) ──
+    rainbow: bool = True
+    base_color: Tuple[int, int, int] = (255, 0, 80)
+    color_effect: str = "static"      # static, gradient_cw, gradient_ccw, rainbow_time
+    gradient_speed: float = 1.0       # 효과 속도 배수
+    gradient_hue_range: float = 0.08  # hue shift 범위 (0~0.20)
+    gradient_sv_range: float = 0.5    # S/V 변동 강도 (0~1)
+
+    # ── 오디오 계열 ──
+    audio_mode: str = "pulse"         # pulse, spectrum, bass_detail, wave, dynamic, flowing
+    min_brightness: float = 0.02      # 오디오 최소 밝기
+    bass_sensitivity: float = 1.0
+    mid_sensitivity: float = 1.0
+    high_sensitivity: float = 1.0
+    attack: float = 0.5
+    release: float = 0.1
+    input_smoothing: float = 0.3
+    zone_weights: Tuple[int, int, int] = (33, 33, 34)
+
+    # ── Wave 전용 ──
+    wave_speed: float = 1.4
+
+    # ── Flowing 전용 (디스플레이+오디오 ON) ──
+    flowing_interval: float = 3.0     # palette 갱신 주기 (초)
+    flowing_speed: float = 0.08       # 기본 회전 속도
+
+    # ══════════════════════════════════════════════════════════════
+    #  호환 속성: 기존 엔진 코드에서 참조하는 이름들
+    # ══════════════════════════════════════════════════════════════
+
+    @property
+    def brightness(self) -> float:
+        """기존 AudioParams.brightness 호환.
+
+        오디오 모드에서 brightness는 master_brightness로 대체.
+        기존 코드: ap.brightness → 이제 ep.brightness = ep.master_brightness
+        """
+        return self.master_brightness
+
+    @property
+    def smoothing_enabled(self) -> bool:
+        """기존 MirrorParams.smoothing_enabled 호환.
+
+        smoothing_factor > 0이면 활성.
+        """
+        return self.smoothing_factor > 0.0
+
+    @property
+    def color_source(self) -> str:
+        """기존 AudioParams.color_source 호환.
+
+        디스플레이 ON → "screen", OFF → "solid".
+        """
+        return "screen" if self.display_enabled else "solid"
+
+    @property
+    def n_zones(self) -> int:
+        """기존 AudioParams.n_zones 호환 (하이브리드 구역 수)."""
+        return self.mirror_n_zones
+
+
+# ══════════════════════════════════════════════════════════════════
+#  호환 팩토리: 기존 코드가 MirrorParams/AudioParams를 생성하는 곳에서
+#  EngineParams로 전환하기 전까지 사용
+# ══════════════════════════════════════════════════════════════════
 
 @dataclass(frozen=True)
 class MirrorParams:
-    """미러링 모드 파라미터 스냅샷."""
+    """[호환 유지] 미러링 전용 파라미터 — Phase 5 완료 시 제거."""
     brightness: float = 1.0
     smoothing_enabled: bool = True
     smoothing_factor: float = 0.5
-    mirror_n_zones: int = -1  # N_ZONES_PER_LED
+    mirror_n_zones: int = -1
+
+    def to_engine_params(self, **overrides) -> EngineParams:
+        """MirrorParams → EngineParams 변환."""
+        base = {
+            "display_enabled": True,
+            "audio_enabled": False,
+            "master_brightness": self.brightness,
+            "smoothing_factor": self.smoothing_factor if self.smoothing_enabled else 0.0,
+            "mirror_n_zones": self.mirror_n_zones,
+        }
+        base.update(overrides)
+        return EngineParams(**base)
 
 
 @dataclass(frozen=True)
 class AudioParams:
-    """오디오/하이브리드 공통 파라미터 스냅샷."""
+    """[호환 유지] 오디오/하이브리드 파라미터 — Phase 5 완료 시 제거."""
     audio_mode: str = "pulse"
     brightness: float = 1.0
     min_brightness: float = 0.02
@@ -36,29 +148,53 @@ class AudioParams:
     release: float = 0.1
     input_smoothing: float = 0.3
     zone_weights: Tuple[int, int, int] = (33, 33, 34)
-
-    # 색상
     rainbow: bool = True
     base_color: Tuple[int, int, int] = (255, 0, 80)
-
-    # ★ Phase 2: 색상 효과
-    color_effect: str = "static"       # static, gradient_cw, gradient_ccw, rainbow_time
-    gradient_speed: float = 1.0        # 효과 속도 배수
-    gradient_hue_range: float = 0.08   # hue shift 범위 (0~0.20)
-    gradient_sv_range: float = 0.5     # S/V 변동 강도 (0~1)
-
-    # 하이브리드 전용
+    color_effect: str = "static"
+    gradient_speed: float = 1.0
+    gradient_hue_range: float = 0.08
+    gradient_sv_range: float = 0.5
     color_source: str = "screen"
     n_zones: int = 4
-    color_extract_mode: str = "average"  # ★ Phase 3: "average" | "distinctive"
+    color_extract_mode: str = "average"
+    wave_speed: float = 1.4
+    flowing_interval: float = 3.0
+    flowing_speed: float = 0.08
 
-    # ★ Wave 모드 전용
-    wave_speed: float = 1.4  # 초당 위치 진행 (0→1). UI 슬라이더 50% = 1.4
+    def to_engine_params(self, display_enabled=False, **overrides) -> EngineParams:
+        """AudioParams → EngineParams 변환."""
+        base = {
+            "display_enabled": display_enabled,
+            "audio_enabled": True,
+            "master_brightness": self.brightness,
+            "min_brightness": self.min_brightness,
+            "bass_sensitivity": self.bass_sensitivity,
+            "mid_sensitivity": self.mid_sensitivity,
+            "high_sensitivity": self.high_sensitivity,
+            "attack": self.attack,
+            "release": self.release,
+            "input_smoothing": self.input_smoothing,
+            "zone_weights": self.zone_weights,
+            "rainbow": self.rainbow,
+            "base_color": self.base_color,
+            "color_effect": self.color_effect,
+            "gradient_speed": self.gradient_speed,
+            "gradient_hue_range": self.gradient_hue_range,
+            "gradient_sv_range": self.gradient_sv_range,
+            "audio_mode": self.audio_mode,
+            "mirror_n_zones": self.n_zones,
+            "color_extract_mode": self.color_extract_mode,
+            "wave_speed": self.wave_speed,
+            "flowing_interval": self.flowing_interval,
+            "flowing_speed": self.flowing_speed,
+        }
+        base.update(overrides)
+        return EngineParams(**base)
 
-    # ★ Phase 4: Flowing 모드 전용
-    flowing_interval: float = 3.0   # palette 갱신 주기 (초)
-    flowing_speed: float = 0.08     # 기본 회전 속도
 
+# ══════════════════════════════════════════════════════════════════
+#  LayoutParams — 별도 유지 (dirty flag 필요)
+# ══════════════════════════════════════════════════════════════════
 
 @dataclass
 class LayoutParams:
