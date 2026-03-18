@@ -4,13 +4,17 @@
 LED 둘레를 시계방향으로 회전하며, 음악 에너지에 따라
 밝기와 속도가 변화.
 
-[Hotfix] 이전 색 잔류 문제 해결:
-  - 절대 보간: color_start→color_target 고정 경로로 crossfade
-    (drift가 시작점을 밀어내는 문제 제거)
-  - 스마트 warm start: 화면이 크게 바뀌면 prev_centroids 리셋
-    (이전 색이 K-means를 고착시키는 문제 제거)
-  - drift를 렌더링 시점에만 적용
-    (color_current는 순수 crossfade 결과만 유지)
+[Hotfix v3] 유령 색 즉시 퇴출:
+  기존 문제: warm start K-means가 화면에 없는 이전 색을 끌어당김.
+  stale_count 기반 감지는 3주기(~9초)가 걸리고,
+  warm start가 매번 유사한 유령 색을 재생성하여 stale_count가 리셋됨.
+
+  해결: fresh 추출(warm start 없이)과 warm 추출 결과를 직접 비교.
+  warm 결과의 각 색이 fresh 결과의 어떤 색과도 멀면 "유령"으로 판단하고
+  해당 slot을 fresh 색으로 즉시 교체. 1주기만에 해결.
+
+  추가: _prev_centroids를 항상 최종 결과(유령 교체 후)로 갱신하여
+  다음 갱신에서 유령이 warm start에 재투입되는 것을 원천 차단.
 """
 
 import numpy as np
@@ -39,9 +43,13 @@ FLOW_BASS_BRIGHT_RANGE = 0.6   # bass=1일 때 추가 밝기
 FLOW_MID_DRIFT_BOOST = 0.5     # mid가 hsv_drift 진폭에 미치는 배수
 FLOW_BASS_SPEED_BOOST = 0.02   # bass가 초당 phase에 추가하는 양
 
-# ★ warm start 리셋 임계값 — 이전 palette와 새 추출의 평균 거리가 이 값 이상이면
-# prev_centroids를 버리고 K-means를 처음부터 실행
-_WARM_START_RESET_THRESHOLD = 80.0  # RGB 0~255 스케일 (대략 색 1/3 변화)
+# warm start 리셋 임계값
+_WARM_START_RESET_THRESHOLD = 80.0
+_WARM_START_PER_CENTROID_THRESHOLD = 120.0
+
+# ★ [v3] 유령 색 감지 임계값
+# warm 결과의 한 색이 fresh 결과의 모든 색과 이 거리 이상이면 "유령"
+_GHOST_DISTANCE_THRESHOLD = 60.0
 
 # 기본 초기 색상 (첫 화면 캡처 전 fallback)
 _DEFAULT_INIT_COLORS = np.array([
@@ -115,18 +123,18 @@ def _smooth_step(t):
     return t * t * (3.0 - 2.0 * t)
 
 
+def _min_dist_to_set(color, color_set):
+    """한 색과 색 집합 사이의 최소 유클리드 거리."""
+    dists = np.sqrt(np.sum((color_set - color) ** 2, axis=1))
+    return float(np.min(dists))
+
+
 # ══════════════════════════════════════════════════════════════════
 #  FlowBlob — 하나의 색상 덩어리
 # ══════════════════════════════════════════════════════════════════
 
 class FlowBlob:
-    """하나의 색상 blob.
-
-    [Hotfix] color_start 추가:
-    - crossfade는 항상 color_start→color_target 고정 경로
-    - color_current는 crossfade 결과만 저장 (drift에 의해 변형 안 됨)
-    - drift는 render_flowing()에서 적용
-    """
+    """하나의 색상 blob."""
     __slots__ = (
         "color_current", "color_target", "color_start",
         "phase", "speed", "width", "brightness",
@@ -175,64 +183,85 @@ class FlowPalette:
     def update_from_screen(self, per_led_colors):
         """새 palette 추출 + crossfade 시작.
 
-        [Hotfix] 스마트 warm start:
-        - 이전 palette와 새 추출 결과의 거리가 크면 prev_centroids를 리셋
-        - 이렇게 하면 화면이 크게 바뀔 때 이전 색에 고착되지 않음
+        [v3] fresh vs warm 비교로 유령 색 즉시 퇴출.
+
+        전략:
+        1. fresh 추출 (warm start 없이) → 화면의 실제 색
+        2. warm start 조건 판단 → 조건 충족 시 warm 추출
+        3. warm 결과의 각 색을 fresh 결과와 비교:
+           - fresh의 어떤 색과도 거리 > threshold → "유령" → fresh 색으로 교체
+           - warm start의 안정성은 유지하면서 유령만 제거
+        4. 최종 결과를 _prev_centroids에 저장 (유령이 다음에 재투입 안 됨)
         """
         if per_led_colors is None or len(per_led_colors) == 0:
             return
 
-        # ★ 1단계: 먼저 warm start 없이 추출해서 현재 화면의 실제 색 확인
-        fresh_colors, _ = extract_dominant_colors(
+        # ── 1단계: fresh 추출 (화면의 실제 색) ──
+        fresh_colors, fresh_ratios = extract_dominant_colors(
             per_led_colors,
             n_colors=self.n_colors,
             black_threshold=15,
-            prev_centroids=None,  # 순수 추출
+            prev_centroids=None,
         )
 
-        # ★ 2단계: 이전 palette와 비교하여 warm start 사용 여부 결정
+        # ── 2단계: warm start 판단 ──
         use_warm_start = False
         if self._prev_centroids is not None:
-            avg_dist = np.mean(np.sqrt(np.sum(
+            per_centroid_dists = np.sqrt(np.sum(
                 (fresh_colors - self._prev_centroids) ** 2, axis=1
-            )))
-            use_warm_start = avg_dist < _WARM_START_RESET_THRESHOLD
+            ))
+            avg_dist = float(np.mean(per_centroid_dists))
+            max_dist = float(np.max(per_centroid_dists))
 
-        # ★ 3단계: 결정에 따라 최종 추출
+            use_warm_start = (
+                avg_dist < _WARM_START_RESET_THRESHOLD
+                and max_dist < _WARM_START_PER_CENTROID_THRESHOLD
+            )
+
+        # ── 3단계: 추출 + 유령 교체 ──
         if use_warm_start:
-            colors, ratios = extract_dominant_colors(
+            warm_colors, warm_ratios = extract_dominant_colors(
                 per_led_colors,
                 n_colors=self.n_colors,
                 black_threshold=15,
                 prev_centroids=self._prev_centroids,
             )
+
+            # ★ 유령 감지: warm 결과의 각 색이 fresh의 모든 색과 먼 경우
+            final_colors = warm_colors.copy()
+            final_ratios = warm_ratios.copy()
+
+            for i in range(self.n_colors):
+                min_dist = _min_dist_to_set(warm_colors[i], fresh_colors)
+                if min_dist > _GHOST_DISTANCE_THRESHOLD:
+                    # 유령 → fresh 결과에서 이 warm 색과 가장 가까운 fresh 색으로 교체
+                    best_fresh_idx = np.argmin(
+                        np.sqrt(np.sum((fresh_colors - warm_colors[i]) ** 2, axis=1))
+                    )
+                    final_colors[i] = fresh_colors[best_fresh_idx]
+                    final_ratios[i] = fresh_ratios[best_fresh_idx]
+
+            colors, ratios = final_colors, final_ratios
         else:
-            colors, ratios = fresh_colors, _  # 이미 추출한 결과 사용
-            # 아, fresh_colors에서 ratios가 없어. 다시 추출
-            colors, ratios = extract_dominant_colors(
-                per_led_colors,
-                n_colors=self.n_colors,
-                black_threshold=15,
-                prev_centroids=None,
-            )
+            colors, ratios = fresh_colors, fresh_ratios
 
-        self._prev_centroids = colors.copy()
-
-        # ★ 4단계: blob에 새 target 설정 + crossfade 시작점 고정
+        # ── 4단계: blob에 새 target 설정 ──
         for i in range(min(len(self.blobs), self.n_colors)):
             blob = self.blobs[i]
-            blob.color_start = blob.color_current.copy()  # ★ 현재 색을 시작점으로 고정
+            blob.color_start = blob.color_current.copy()
             blob.color_target = colors[i].copy()
 
             area = ratios[i] if i < len(ratios) else 0.2
             blob.width = FLOW_WIDTH_MIN + area * (FLOW_WIDTH_MAX - FLOW_WIDTH_MIN)
             blob.brightness = FLOW_BRIGHTNESS_MIN + area * (FLOW_BRIGHTNESS_MAX - FLOW_BRIGHTNESS_MIN)
 
+        # ★ 유령 교체 후의 최종 결과를 저장 → 다음 warm start에 유령이 재투입 안 됨
+        self._prev_centroids = colors.copy()
         self.transition_progress = 0.0
 
     def tick(self, dt, bass, mid, high, base_speed=FLOW_BASE_SPEED):
         """매 프레임: phase 진행 + crossfade.
- 
+
         [수정] base_speed를 실제 회전 속도에 반영.
         blob별 속도 오프셋은 유지하여 각 blob이 약간씩 다른 속도로 회전.
         """
@@ -240,11 +269,11 @@ class FlowPalette:
         if self.transition_progress < 1.0:
             self.transition_progress += dt / self.transition_duration
             self.transition_progress = min(1.0, self.transition_progress)
- 
+
         t = _smooth_step(self.transition_progress)
         for blob in self.blobs:
             blob.color_current = _lerp_hsv(blob.color_start, blob.color_target, t)
- 
+
         # ── 2. Phase 진행 (회전) ──
         for blob in self.blobs:
             # ★ base_speed(UI 슬라이더) + blob별 오프셋
@@ -253,7 +282,7 @@ class FlowPalette:
             blob.phase += effective_speed * dt
             blob.phase += bass * FLOW_BASS_SPEED_BOOST * dt
             blob.phase %= 1.0
- 
+
         # ── 3. drift phase 진행 ──
         for blob in self.blobs:
             blob.hsv_drift_phase += dt * 1.5
