@@ -232,26 +232,29 @@ class FlowPalette:
 
     def tick(self, dt, bass, mid, high, base_speed=FLOW_BASE_SPEED):
         """매 프레임: phase 진행 + crossfade.
-
-        [Hotfix] drift는 여기서 하지 않음 — render_flowing()에서 적용.
-        color_current는 순수 crossfade 결과만 보유.
+ 
+        [수정] base_speed를 실제 회전 속도에 반영.
+        blob별 속도 오프셋은 유지하여 각 blob이 약간씩 다른 속도로 회전.
         """
         # ── 1. Palette crossfade: color_start → color_target 절대 보간 ──
         if self.transition_progress < 1.0:
             self.transition_progress += dt / self.transition_duration
             self.transition_progress = min(1.0, self.transition_progress)
-
+ 
         t = _smooth_step(self.transition_progress)
         for blob in self.blobs:
             blob.color_current = _lerp_hsv(blob.color_start, blob.color_target, t)
-
+ 
         # ── 2. Phase 진행 (회전) ──
         for blob in self.blobs:
-            blob.phase += blob.speed * dt
+            # ★ base_speed(UI 슬라이더) + blob별 오프셋
+            speed_offset = blob.speed - FLOW_BASE_SPEED
+            effective_speed = base_speed + speed_offset
+            blob.phase += effective_speed * dt
             blob.phase += bass * FLOW_BASS_SPEED_BOOST * dt
             blob.phase %= 1.0
-
-        # ── 3. drift phase 진행 (실제 drift는 render에서 적용) ──
+ 
+        # ── 3. drift phase 진행 ──
         for blob in self.blobs:
             blob.hsv_drift_phase += dt * 1.5
 

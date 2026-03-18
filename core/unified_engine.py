@@ -141,6 +141,8 @@ class UnifiedEngine(BaseEngine):
         # ── Flowing 모드 (D+A ON) ──
         self._flow_palette = None
         self._flow_last_update = 0.0
+        self._flow_palette_colors = None
+        self._flow_palette_ratios = None
 
         # ── 정적 모드 색상 캐시 (D=OFF, A=OFF) ──
         self._static_dirty = True
@@ -492,12 +494,21 @@ class UnifiedEngine(BaseEngine):
                     self.energy_updated.emit(
                         self._smooth_bass, self._smooth_mid, self._smooth_high
                     )
-                    # 스펙트럼: bass_detail이면 bd_smooth, 아니면 일반 spectrum
                     if (ep.audio_mode == AUDIO_BASS_DETAIL
                             and self._bd_smooth is not None):
                         self.spectrum_updated.emit(self._bd_smooth.copy())
                     elif self._smooth_spectrum is not None:
                         self.spectrum_updated.emit(self._smooth_spectrum.copy())
+ 
+                    # ★ Flowing 팔레트 프리뷰 전달
+                    if (ep.audio_mode == AUDIO_FLOWING
+                            and self._flow_palette_colors is not None):
+                        self.spectrum_updated.emit(
+                            {"type": "flow_palette",
+                             "colors": self._flow_palette_colors,
+                             "ratios": self._flow_palette_ratios}
+                        )
+ 
                 if raw_rgb is not None:
                     self.screen_colors_updated.emit(raw_rgb.tolist())
 
@@ -935,14 +946,13 @@ class UnifiedEngine(BaseEngine):
             )
 
         elif audio_mode == AUDIO_FLOWING and ep.display_enabled:
-            # Flowing: 디스플레이 ON에서만 작동
             if (self._per_led_colors is not None
                     and self._per_led_colors.sum() > 0
                     and self._flow_palette is not None
                     and (loop_start - self._flow_last_update) > ep.flowing_interval):
                 self._flow_palette.update_from_screen(self._per_led_colors)
                 self._flow_last_update = loop_start
-
+ 
             if self._flow_palette is not None:
                 self._flow_palette.tick(
                     frame_interval, bass, mid, high,
@@ -952,12 +962,20 @@ class UnifiedEngine(BaseEngine):
                     self._clockwise_t, self._flow_palette,
                     bass, ep.master_brightness, mid=mid,
                 )
+                # ★ 팔레트 프리뷰용 색상 저장
+                self._flow_palette_colors = [
+                    blob.color_current.tolist() for blob in self._flow_palette.blobs
+                ]
+                self._flow_palette_ratios = [
+                    blob.width for blob in self._flow_palette.blobs
+                ]
             else:
-                # fallback
                 raw_rgb = vectorized_render_pulse(
                     frame_base_colors, bass, mid, high,
                     ep.min_brightness, ep.master_brightness,
                 )
+                self._flow_palette_colors = None
+                self._flow_palette_ratios = None
 
         elif audio_mode == AUDIO_BASS_DETAIL:
             bd_spec = self._process_bass_detail(eng, atk, rel, ep)

@@ -907,9 +907,15 @@ class ControlTab(QWidget):
             self.section_audio.update_energy(bass, mid, high)
 
     def update_spectrum(self, spec):
-        """엔진 → 스펙트럼 위젯 갱신."""
+        """엔진 → 스펙트럼 위젯 갱신 (+ flowing 팔레트 프리뷰)."""
         if hasattr(self, 'section_audio'):
-            self.section_audio.update_spectrum(spec)
+            # ★ flowing 팔레트 데이터 감지
+            if isinstance(spec, dict) and spec.get("type") == "flow_palette":
+                self.section_audio.update_flow_palette(
+                    spec["colors"], spec.get("ratios")
+                )
+            else:
+                self.section_audio.update_spectrum(spec)
 
     def update_pause_button(self, is_paused):
         self.btn_pause.setText("▶ 재개" if is_paused else "⏸ 일시정지")
