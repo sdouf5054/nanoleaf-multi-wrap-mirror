@@ -58,6 +58,13 @@ try:
 except ImportError:
     pass
 
+# PlaybackType은 별도 패키지(winrt-Windows.Media)가 필요할 수 있음 — optional
+_MediaPlaybackType = None
+try:
+    from winrt.windows.media import MediaPlaybackType as _MediaPlaybackType
+except ImportError:
+    pass
+
 # ── optional import: PIL (썸네일 디코딩) ──────────────────────────
 HAS_PIL = False
 try:
@@ -107,6 +114,25 @@ async def _get_media_properties(session):
         return title, artist, thumbnail_ref
     except Exception:
         return None, None, None
+
+
+def _get_playback_type(session):
+    """SMTC 세션의 PlaybackType을 가져온다.
+
+    Returns:
+        str — "music", "video", "image", "unknown"
+    """
+    if session is None or _MediaPlaybackType is None:
+        return "unknown"
+    try:
+        info = session.get_playback_info()
+        if info is None or info.playback_type is None:
+            return "unknown"
+        pt = info.playback_type.value
+        # MediaPlaybackType: Unknown=0, Music=1, Video=2, Image=3
+        return {1: "music", 2: "video", 3: "image"}.get(pt, "unknown")
+    except Exception:
+        return "unknown"
 
 
 async def _read_thumbnail_bytes(thumbnail_ref):
@@ -192,6 +218,7 @@ class MediaFrameProvider:
         self._cached_frame: Optional[np.ndarray] = None  # (rows, cols, 3) uint8
         self._cached_title: str = ""
         self._cached_artist: str = ""
+        self._cached_playback_type: str = "unknown"  # ★ music/video/image/unknown
         self._media_hash: int = 0  # hash(title + artist) — 변경 감지용
 
         # ── 폴링 스레드 ──
@@ -228,6 +255,7 @@ class MediaFrameProvider:
             self._cached_frame = None
             self._cached_title = ""
             self._cached_artist = ""
+            self._cached_playback_type = "unknown"
             self._media_hash = 0
 
     def get_frame(self) -> Optional[np.ndarray]:
@@ -248,7 +276,7 @@ class MediaFrameProvider:
         """현재 곡 정보 반환 (UI 표시용).
 
         Returns:
-            {"title": str, "artist": str} 또는 None
+            {"title": str, "artist": str, "playback_type": str} 또는 None
         """
         with self._lock:
             if not self._cached_title and not self._cached_artist:
@@ -256,6 +284,7 @@ class MediaFrameProvider:
             return {
                 "title": self._cached_title,
                 "artist": self._cached_artist,
+                "playback_type": self._cached_playback_type,
             }
 
     def update_grid_size(self, grid_cols, grid_rows):
@@ -307,6 +336,11 @@ class MediaFrameProvider:
             self._clear_cache()
             return
 
+        # ★ PlaybackType 캐시 (매 폴링마다 갱신 — 세션 중간에 바뀔 수 있음)
+        playback_type = _get_playback_type(session)
+        with self._lock:
+            self._cached_playback_type = playback_type
+
         # ── 변경 감지: hash(title + artist) 비교 ──
         new_hash = hash((title, artist))
         if new_hash == self._media_hash:
@@ -333,5 +367,6 @@ class MediaFrameProvider:
         with self._lock:
             self._cached_title = ""
             self._cached_artist = ""
+            self._cached_playback_type = "unknown"
             self._media_hash = 0
             self._cached_frame = None

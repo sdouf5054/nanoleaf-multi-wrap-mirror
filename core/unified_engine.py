@@ -71,6 +71,11 @@ _STALE_THRESHOLD = 3.0
 _STALE_RECREATE_COOLDOWN = 3.0
 _STALE_LED_OFF_THRESHOLD = 10.0
 
+# ── ★ 화면 변화량 감지 상수 ──
+_SCREEN_DIFF_INTERVAL = 2.0    # 측정 주기 (초)
+_SCREEN_DIFF_THRESHOLD = 8.0   # MSE 임계값 — 이상이면 "영상"
+_SCREEN_DIFF_HOLD_FRAMES = 3   # 연속 N회 정적이어야 "정적"으로 전환 (오판 방지)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  MirrorFrameResult
@@ -180,6 +185,11 @@ class UnifiedEngine(BaseEngine):
         self._media_provider: Optional[MediaFrameProvider] = None
         self._prev_media_enabled: bool = False
 
+        # ── ★ 화면 변화량 감지 (미디어 연동 video 판별) ──
+        self._screen_diff_prev_frame: Optional[np.ndarray] = None
+        self._screen_is_dynamic: bool = False      # True = 영상(미러링), False = 정적(앨범아트)
+        self._screen_diff_last_check: float = 0.0  # 마지막 측정 시각
+
     # ══════════════════════════════════════════════════════════════
     #  ★ 캡처 소스 선택 — 미디어 연동의 핵심
     # ══════════════════════════════════════════════════════════════
@@ -187,21 +197,108 @@ class UnifiedEngine(BaseEngine):
     def _grab_frame(self, ep):
         """현재 모드에 맞는 프레임을 가져온다.
 
-        미디어 연동 ON (ep.use_media_frame) → 앨범 아트 프레임
-        미디어 연동 OFF 또는 프레임 없음 → 화면 캡처 프레임 (폴백)
+        [방법 3: SMTC PlaybackType + 화면 변화량 감지]
+
+        미디어 연동 ON (ep.use_media_frame):
+          1) PlaybackType = Music → 무조건 앨범 아트
+          2) PlaybackType = Video/Unknown →
+             화면 캡처 diff 측정 → 정적이면 앨범 아트, 동적이면 미러링
+
+        미디어 연동 OFF → 화면 캡처
 
         Returns:
             numpy 프레임 또는 None
         """
         if ep.use_media_frame and self._media_provider is not None:
             media_frame = self._media_provider.get_frame()
+
             if media_frame is not None:
-                return media_frame
-            # 미디어 프레임 없음 → 화면 캡처로 폴백
+                # PlaybackType 확인
+                info = self._media_provider.get_media_info()
+                playback_type = info.get("playback_type", "unknown") if info else "unknown"
+
+                if playback_type == "music":
+                    # ── DEBUG ──
+                    self.status_changed.emit(f"[DEBUG] type=music → MEDIA (앨범아트)")
+                    return media_frame
+
+                # Video/Unknown → 화면 변화량으로 판별
+                use_media = self._should_use_media_frame()
+                if use_media:
+                    return media_frame
+                # 동적 화면(영상) → 아래의 화면 캡처로 폴백
+                return self._capture.grab() if self._capture else None
+            else:
+                # ── DEBUG ──
+                self.status_changed.emit("[DEBUG] media_frame=None → 화면 캡처 폴백")
 
         if self._capture is not None:
             return self._capture.grab()
         return None
+
+    def _should_use_media_frame(self):
+        """화면 변화량을 측정하여 미디어 프레임 사용 여부를 판별.
+
+        2초마다 캡처 프레임을 비교하여 정적/동적 판별.
+        정적(음원 영상) → True (앨범아트 사용)
+        동적(일반 영상) → False (미러링 사용)
+
+        Returns:
+            bool — True면 앨범아트, False면 미러링
+        """
+        now = time.monotonic()
+
+        # 측정 주기가 안 됐으면 캐시된 결과 반환
+        if now - self._screen_diff_last_check < _SCREEN_DIFF_INTERVAL:
+            return not self._screen_is_dynamic
+
+        self._screen_diff_last_check = now
+
+        # 화면 캡처 프레임 가져오기
+        if self._capture is None:
+            return True  # 캡처 없으면 앨범아트 사용
+
+        current_frame = self._capture.grab()
+        if current_frame is None:
+            return True
+
+        # 이전 프레임이 없으면 저장만 하고 앨범아트 사용
+        if self._screen_diff_prev_frame is None:
+            self._screen_diff_prev_frame = current_frame.copy()
+            return True
+
+        # MSE 계산 (grid 크기 프레임이므로 매우 빠름)
+        try:
+            prev = self._screen_diff_prev_frame.astype(np.float32)
+            curr = current_frame.astype(np.float32)
+            # 크기 불일치 대응
+            if prev.shape != curr.shape:
+                self._screen_diff_prev_frame = current_frame.copy()
+                return True
+            mse = float(np.mean((curr - prev) ** 2))
+        except Exception:
+            self._screen_diff_prev_frame = current_frame.copy()
+            return True
+
+        self._screen_diff_prev_frame = current_frame.copy()
+        self._screen_diff_prev_frame = current_frame.copy()
+
+        # ── DEBUG: 상태바에 판별 정보 출력 ──
+        info = self._media_provider.get_media_info() if self._media_provider else None
+        pt = info.get("playback_type", "?") if info else "?"
+        decision = "MIRROR" if mse > _SCREEN_DIFF_THRESHOLD else "MEDIA"
+        self.status_changed.emit(
+            f"[DEBUG] type={pt} MSE={mse:.1f} thr={_SCREEN_DIFF_THRESHOLD} → {decision}"
+        )
+
+        if mse > _SCREEN_DIFF_THRESHOLD:
+            # 동적 — 영상 재생 중 → 미러링
+            self._screen_is_dynamic = True
+        else:
+            # 정적 — 음원 영상 또는 정지 화면 → 앨범아트
+            self._screen_is_dynamic = False
+
+        return not self._screen_is_dynamic
 
     # ══════════════════════════════════════════════════════════════
     #  초기화
