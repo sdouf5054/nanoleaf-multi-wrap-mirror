@@ -7,6 +7,9 @@
 - 스무딩: 체크박스+스핀 → 슬라이더 하나 (0=off)
 - 고급 옵션(감쇠/페널티/변별값): 기본 접힌 상태, 클릭 시 펼침
 - 색상 효과: 정적 / 그라데이션 CW/CCW — 3개 (무지개 없음, 화면 색 연동)
+
+[Phase 7 변경]
+- per-LED 모드에서도 Distinctive 추출 허용
 """
 
 from PySide6.QtWidgets import (
@@ -269,7 +272,6 @@ class DisplayMirrorSection(QWidget):
 
     def _on_zone_changed(self, _=None):
         n = self.combo_zone_count.currentData()
-        self._update_extract_enabled()
         if n is not None:
             self.zone_count_changed.emit(n)
         self.params_changed.emit()
@@ -289,16 +291,6 @@ class DisplayMirrorSection(QWidget):
         self._adv_open = not self._adv_open
         self._adv_container.setVisible(self._adv_open)
         self.btn_advanced.setText("▼ 고급 옵션" if self._adv_open else "▶ 고급 옵션")
-
-    def _update_extract_enabled(self):
-        """per-LED 모드에서는 distinctive 비활성화."""
-        n = self.combo_zone_count.currentData()
-        is_per_led = (n == N_ZONES_PER_LED)
-        self.combo_extract_mode.setEnabled(not is_per_led)
-        if is_per_led:
-            self.combo_extract_mode.blockSignals(True)
-            self.combo_extract_mode.setCurrentIndex(0)
-            self.combo_extract_mode.blockSignals(False)
 
     # ── collect / apply / load ───────────────────────────────────
 
@@ -384,7 +376,6 @@ class DisplayMirrorSection(QWidget):
                 self.combo_extract_mode.setCurrentIndex(i)
                 break
         self.combo_extract_mode.blockSignals(False)
-        self._update_extract_enabled()
 
         # 감쇠/페널티
         self.spin_decay.setValue(m.get("decay_radius", 0.3))

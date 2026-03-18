@@ -9,6 +9,8 @@ Nanoleaf Screen Mirror — GUI 앱 진입점 (PySide6)
 [ADR-029] PySide6 빌트인 High DPI 스케일링 (CHANGE → B)
   - SetProcessDpiAwareness + Qt 자동 스케일링을 PySide6에 위임
   - 수동 DPI 재조정 코드 40줄 제거
+
+[Phase 7] auto_start: default_mode → 토글 기본값 기반으로 변경
 """
 
 import sys
@@ -136,11 +138,10 @@ def main():
     if not start_to_tray:
         window.show()
 
-    # === 10) 자동 시작 ===
+    # === 10) 자동 시작 (Phase 7: 토글 기본값 기반) ===
     if config.get("options", {}).get("auto_start_mirror", False):
-        default_mode = config.get("options", {}).get("default_mode", "mirror")
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(1000, lambda: window.start_engine(default_mode))
+        QTimer.singleShot(1000, lambda: window.start_engine())
 
     sys.exit(app.exec())
 

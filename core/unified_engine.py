@@ -194,11 +194,10 @@ class UnifiedEngine(BaseEngine):
             )
 
         if not ep.audio_enabled:
-            # D=ON, A=OFF: ColorPipeline 사용 (per-LED 스무딩 포함)
+            # D=ON, A=OFF: ColorPipeline (per-LED average) 또는 직접 처리 (distinctive)
             self._rebuild_pipeline()
-            # N구역 모드에서는 별도 ColorCorrection 사용
-            if ep.mirror_n_zones != N_ZONES_PER_LED:
-                self._mirror_cc = ColorCorrection(self.config.get("color", {}))
+            # ColorCorrection: N구역 모드와 per-LED distinctive 모두에서 필요
+            self._mirror_cc = ColorCorrection(self.config.get("color", {}))
 
         self._last_brightness = ep.master_brightness
 
@@ -586,8 +585,16 @@ class UnifiedEngine(BaseEngine):
                 new_prev = None
             except (ValueError, IndexError, FloatingPointError):
                 return None
+        elif ep.color_extract_mode == "distinctive":
+            # per-LED + distinctive: vivid boost 직접 적용 (ColorPipeline 우회)
+            try:
+                grb_data, raw_preview, new_prev = self._compute_mirror_per_led_distinctive(
+                    frame, ep, prev_colors
+                )
+            except (ValueError, IndexError, FloatingPointError):
+                return None
         else:
-            # per-LED 모드: ColorPipeline
+            # per-LED + average: ColorPipeline (스무딩 포함)
             try:
                 grb_data, rgb_colors = pipeline.process(frame, prev_colors)
                 new_prev = rgb_colors
@@ -646,6 +653,45 @@ class UnifiedEngine(BaseEngine):
         self._mirror_cc.apply(leds)
 
         return leds_to_grb(leds), raw_preview
+
+    def _compute_mirror_per_led_distinctive(self, frame, ep, prev_colors):
+        """per-LED + distinctive 미러링 — vivid boost + 스무딩 직접 적용.
+
+        ColorPipeline 대신 weight_matrix 직접 사용하여 채도 우선순위를 적용.
+        스무딩은 EMA로 직접 처리.
+
+        Returns:
+            (grb_data, raw_preview, new_prev_colors)
+        """
+        grid_flat = frame.reshape(-1, 3).astype(np.float32)
+        per_led_raw = self._weight_matrix @ grid_flat
+
+        # 채도 우선순위 v2: vivid boost + ambient
+        per_led_raw, _, self._prev_ambient_color = boost_per_led_vivid(
+            grid_flat, self._weight_matrix, per_led_raw,
+            region_masks=self._vivid_region_masks,
+            blend=0.4, ambient_blend=0.2,
+            prev_ambient_color=self._prev_ambient_color,
+        )
+        # per-LED 적응형 스무딩
+        per_led_raw = smooth_per_led(
+            per_led_raw, self._prev_per_led_vivid, smoothing=0.5,
+        )
+        self._prev_per_led_vivid = per_led_raw.copy()
+
+        # 프레임 간 스무딩 (ColorPipeline.process()의 EMA에 대응)
+        if prev_colors is not None and ep.smoothing_factor > 0:
+            s = ep.smoothing_factor
+            per_led_raw = per_led_raw * (1.0 - s) + prev_colors * s
+
+        raw_preview = per_led_raw.copy()
+        raw_preview *= ep.master_brightness
+
+        leds = per_led_raw * ep.master_brightness
+        self._mirror_cc.apply(leds)
+        grb_data = leds_to_grb(leds)
+
+        return grb_data, raw_preview, per_led_raw
 
     def _handle_stale_frame(self, last_good_frame_time, last_recreate_time,
                             led_turned_off, stop_wait):
