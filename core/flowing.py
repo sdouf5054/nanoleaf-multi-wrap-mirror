@@ -15,10 +15,15 @@ LED 둘레를 시계방향으로 회전하며, 음악 에너지에 따라
 
   추가: _prev_centroids를 항상 최종 결과(유령 교체 후)로 갱신하여
   다음 갱신에서 유령이 warm start에 재투입되는 것을 원천 차단.
+
+[Refactor] HSV 변환 함수를 core.hsv_utils로 통합
+- 로컬 _rgb_to_hsv, _hsv_to_rgb, _lerp_hsv 제거
+- hsv_utils.rgb_to_hsv, hsv_utils.hsv_to_rgb, hsv_utils.lerp_hsv 사용
 """
 
 import numpy as np
 from core.color_extract import extract_dominant_colors
+from core.hsv_utils import rgb_to_hsv, hsv_to_rgb, lerp_hsv
 
 # ══════════════════════════════════════════════════════════════════
 #  상수
@@ -62,59 +67,10 @@ _DEFAULT_INIT_COLORS = np.array([
 
 
 # ══════════════════════════════════════════════════════════════════
-#  HSV 헬퍼 (flowing 전용)
+#  HSV 헬퍼 — hsv_utils 위에 flowing 전용 래퍼
 # ══════════════════════════════════════════════════════════════════
 
-def _rgb_to_hsv(rgb):
-    """(3,) RGB 0~255 → (h, s, v) 0~1."""
-    r, g, b = rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0
-    mx = max(r, g, b)
-    mn = min(r, g, b)
-    diff = mx - mn
-    if diff == 0:
-        h = 0.0
-    elif mx == r:
-        h = ((g - b) / diff) % 6.0 / 6.0
-    elif mx == g:
-        h = ((b - r) / diff + 2.0) / 6.0
-    else:
-        h = ((r - g) / diff + 4.0) / 6.0
-    s = 0.0 if mx == 0 else diff / mx
-    v = mx
-    return h, s, v
-
-
-def _hsv_to_rgb(h, s, v):
-    """스칼라 H, S, V (0~1) → (3,) float32 RGB 0~255."""
-    h6 = (h % 1.0) * 6.0
-    i = int(h6)
-    f = h6 - i
-    p = v * (1.0 - s)
-    q = v * (1.0 - s * f)
-    t = v * (1.0 - s * (1.0 - f))
-    if i == 0:   r, g, b = v, t, p
-    elif i == 1: r, g, b = q, v, p
-    elif i == 2: r, g, b = p, v, t
-    elif i == 3: r, g, b = p, q, v
-    elif i == 4: r, g, b = t, p, v
-    else:        r, g, b = v, p, q
-    return np.array([r * 255.0, g * 255.0, b * 255.0], dtype=np.float32)
-
-
-def _lerp_hsv(color_a, color_b, t):
-    """HSV 공간에서 두 RGB 색상을 보간. hue shortest path."""
-    t = max(0.0, min(1.0, t))
-    h1, s1, v1 = _rgb_to_hsv(color_a)
-    h2, s2, v2 = _rgb_to_hsv(color_b)
-    dh = h2 - h1
-    if dh > 0.5:
-        dh -= 1.0
-    elif dh < -0.5:
-        dh += 1.0
-    h = (h1 + dh * t) % 1.0
-    s = s1 + (s2 - s1) * t
-    v = v1 + (v2 - v1) * t
-    return _hsv_to_rgb(h, max(0, min(1, s)), max(0, min(1, v)))
+# rgb_to_hsv, hsv_to_rgb, lerp_hsv는 core.hsv_utils에서 직접 사용
 
 
 def _smooth_step(t):
@@ -184,14 +140,6 @@ class FlowPalette:
         """새 palette 추출 + crossfade 시작.
 
         [v3] fresh vs warm 비교로 유령 색 즉시 퇴출.
-
-        전략:
-        1. fresh 추출 (warm start 없이) → 화면의 실제 색
-        2. warm start 조건 판단 → 조건 충족 시 warm 추출
-        3. warm 결과의 각 색을 fresh 결과와 비교:
-           - fresh의 어떤 색과도 거리 > threshold → "유령" → fresh 색으로 교체
-           - warm start의 안정성은 유지하면서 유령만 제거
-        4. 최종 결과를 _prev_centroids에 저장 (유령이 다음에 재투입 안 됨)
         """
         if per_led_colors is None or len(per_led_colors) == 0:
             return
@@ -234,7 +182,6 @@ class FlowPalette:
             for i in range(self.n_colors):
                 min_dist = _min_dist_to_set(warm_colors[i], fresh_colors)
                 if min_dist > _GHOST_DISTANCE_THRESHOLD:
-                    # 유령 → fresh 결과에서 이 warm 색과 가장 가까운 fresh 색으로 교체
                     best_fresh_idx = np.argmin(
                         np.sqrt(np.sum((fresh_colors - warm_colors[i]) ** 2, axis=1))
                     )
@@ -255,16 +202,12 @@ class FlowPalette:
             blob.width = FLOW_WIDTH_MIN + area * (FLOW_WIDTH_MAX - FLOW_WIDTH_MIN)
             blob.brightness = FLOW_BRIGHTNESS_MIN + area * (FLOW_BRIGHTNESS_MAX - FLOW_BRIGHTNESS_MIN)
 
-        # ★ 유령 교체 후의 최종 결과를 저장 → 다음 warm start에 유령이 재투입 안 됨
+        # ★ 유령 교체 후의 최종 결과를 저장
         self._prev_centroids = colors.copy()
         self.transition_progress = 0.0
 
     def tick(self, dt, bass, mid, high, base_speed=FLOW_BASE_SPEED):
-        """매 프레임: phase 진행 + crossfade.
-
-        [수정] base_speed를 실제 회전 속도에 반영.
-        blob별 속도 오프셋은 유지하여 각 blob이 약간씩 다른 속도로 회전.
-        """
+        """매 프레임: phase 진행 + crossfade."""
         # ── 1. Palette crossfade: color_start → color_target 절대 보간 ──
         if self.transition_progress < 1.0:
             self.transition_progress += dt / self.transition_duration
@@ -272,11 +215,10 @@ class FlowPalette:
 
         t = _smooth_step(self.transition_progress)
         for blob in self.blobs:
-            blob.color_current = _lerp_hsv(blob.color_start, blob.color_target, t)
+            blob.color_current = lerp_hsv(blob.color_start, blob.color_target, t)
 
         # ── 2. Phase 진행 (회전) ──
         for blob in self.blobs:
-            # ★ base_speed(UI 슬라이더) + blob별 오프셋
             speed_offset = blob.speed - FLOW_BASE_SPEED
             effective_speed = base_speed + speed_offset
             blob.phase += effective_speed * dt
@@ -299,17 +241,6 @@ def render_flowing(clockwise_t, palette, bass, brightness, mid=0.0,
     [Hotfix] drift를 렌더링 시점에 적용:
     - blob.color_current(순수 crossfade 결과)에서 hue를 미세 변동
     - color_current 자체는 변형하지 않음 → crossfade 수렴에 영향 없음
-
-    Args:
-        clockwise_t: (n_leds,) float64 — LED 둘레 좌표 (0~1)
-        palette: FlowPalette
-        bass: float — 현재 bass 에너지 (0~1)
-        brightness: float — UI 밝기 설정 (0~1)
-        mid: float — 현재 mid 에너지 (0~1, drift 진폭 증가용)
-        min_brightness: float — 무음 시 최소 밝기 (0~1, 슬라이더 값)
-
-    Returns:
-        (n_leds, 3) float32 — 보정 전 raw RGB 0~255
     """
     n_leds = len(clockwise_t)
     rgb = np.zeros((n_leds, 3), dtype=np.float64)
@@ -330,16 +261,16 @@ def render_flowing(clockwise_t, palette, bass, brightness, mid=0.0,
         render_color = blob.color_current
         if blob.hsv_drift_rate > 0:
             drift_amp = blob.hsv_drift_rate * (1.0 + mid * FLOW_MID_DRIFT_BOOST)
-            h, s, v = _rgb_to_hsv(blob.color_current)
+            h, s, v = rgb_to_hsv(blob.color_current)
             h_delta = drift_amp * 0.016 * np.sin(blob.hsv_drift_phase + blob.phase * 6.28)
-            render_color = _hsv_to_rgb((h + h_delta) % 1.0, s, v)
+            render_color = hsv_to_rgb((h + h_delta) % 1.0, s, v)
 
         # 4. 색상 × 밝기 × influence → additive blend
         color_scaled = render_color * blob.brightness * influence[:, np.newaxis]
         rgb += color_scaled
 
-    # 5. 음악 반응 — min_brightness가 무음 시 밝기 바닥을 결정
-    bass_floor = max(min_brightness, 0.02)  # 최소 보장
+    # 5. 음악 반응
+    bass_floor = max(min_brightness, 0.02)
     bass_mod = bass_floor + bass * FLOW_BASS_BRIGHT_RANGE
     rgb *= bass_mod * brightness
 

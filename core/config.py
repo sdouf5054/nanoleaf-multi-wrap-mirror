@@ -292,3 +292,16 @@ def save_config(config):
     path = _config_path()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+def get_audio_mode_defaults(mode_name):
+    """오디오 모드의 기본값을 DEFAULT_CONFIG에서 추출.
+
+    Args:
+        mode_name: str — "pulse", "spectrum", "bass_detail" 등
+
+    Returns:
+        dict — 해당 모드의 기본 파라미터. 없으면 pulse 기본값 반환.
+    """
+    key = f"audio_{mode_name}"
+    return DEFAULT_CONFIG.get(key, DEFAULT_CONFIG.get("audio_pulse", {})).copy()

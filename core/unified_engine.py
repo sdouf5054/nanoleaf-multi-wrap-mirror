@@ -8,17 +8,17 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
   D=OFF, A=ON   → 오디오 비주얼라이저 (사용자 색상 + 오디오 반응)
   D=ON,  A=ON   → 하이브리드 (화면 색 + 오디오 반응)
 
-[Phase 8 변경]
-- GradientPhase 도입: gradient_speed 변경 시 색상 점프 방지
-- build_base_color_array_animated / apply_mirror_gradient_modulation에
-  gradient_phase= 인자 전달
-
-[Hotfix] flowing 모드에서 미러링 설정(구역 분할/추출 방식/스무딩) 무시
-- _update_screen_colors()에서 flowing일 때 raw per_led_colors만 전달
-- 구역 분할, distinctive 추출, 스무딩은 flowing의 자체 K-means에 불필요
+[Refactor] _run_loop() 분해 + MirrorFrameResult 구조화
+- _run_loop(): 오케스트레이터 (~50줄) — 순서만 보여줌
+- _handle_runtime_param_changes(): 구역/밴드/색상 런타임 변경 처리
+- _render_frame(): 렌더링 경로 분기 → (raw_rgb, grb_data)
+- _send_frame_and_emit_signals(): USB 전송 + 시그널 emit
+- MirrorFrameResult: NamedTuple로 반환값 구조화
 """
 
 import time
+from dataclasses import dataclass
+from typing import Optional
 import numpy as np
 
 from core.base_engine import BaseEngine
@@ -26,6 +26,7 @@ from core.color_correction import ColorCorrection
 from core.color import ColorPipeline
 from core.audio_engine import AudioEngine as AudioCapture, _build_log_bands
 from core.constants import HW_ERRORS
+from core.platform import get_primary_resolution
 from core.engine_utils import (
     N_ZONES_PER_LED,
     SCREEN_UPDATE_INTERVAL,
@@ -55,10 +56,28 @@ from core.vivid_extract import (
 )
 from core.flowing import FlowPalette, render_flowing
 
-# ── stale detection 상수 (MirrorEngine에서 가져옴) ──
-_STALE_THRESHOLD = 3.0          # 초: 이 시간 동안 프레임 없으면 recreate 시도
-_STALE_RECREATE_COOLDOWN = 3.0  # 초: recreate 재시도 간격
-_STALE_LED_OFF_THRESHOLD = 10.0 # 초: 이 시간 동안 프레임 없으면 LED 끔
+# ── stale detection 상수 ──
+_STALE_THRESHOLD = 3.0
+_STALE_RECREATE_COOLDOWN = 3.0
+_STALE_LED_OFF_THRESHOLD = 10.0
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MirrorFrameResult — _frame_mirror_only 반환값 구조화
+# ══════════════════════════════════════════════════════════════════
+
+@dataclass
+class MirrorFrameResult:
+    """미러링 전용 프레임 처리 결과.
+
+    None 대신 이 구조체를 반환하여 호출부에서 인덱싱 대신
+    이름으로 접근할 수 있게 합니다.
+    """
+    raw_preview: np.ndarray       # (n_leds, 3) — UI 프리뷰용
+    grb_data: bytes               # GRB 바이트 — USB 전송용
+    prev_colors: Optional[np.ndarray]  # 다음 프레임 스무딩용
+    last_good_frame_time: float   # stale detection용 타임스탬프
+    led_turned_off: bool          # LED 끔 상태 플래그
 
 
 def _ar(current, target, attack_rate, release_rate):
@@ -102,13 +121,13 @@ class UnifiedEngine(BaseEngine):
 
         # ── 화면 색상 (디스플레이 ON) ──
         self._per_led_colors = None
-        self._zone_map = None            # N구역 모드용
+        self._zone_map = None
         self._zone_colors = None
         self._prev_zone_dominant = None
 
         # ── 미러링 전용 (D=ON, A=OFF) ──
-        self._mirror_cc = None           # N구역 미러링용 별도 ColorCorrection
-        self._last_brightness = -1.0     # 밝기 변경 감지
+        self._mirror_cc = None
+        self._last_brightness = -1.0
 
         # ── 채도 우선순위 v2 ──
         self._vivid_region_masks = None
@@ -144,7 +163,7 @@ class UnifiedEngine(BaseEngine):
         # ── 정적 모드 색상 캐시 (D=OFF, A=OFF) ──
         self._static_dirty = True
 
-        # ── ★ Phase 8: 그라데이션 누적 위상 ──
+        # ── 그라데이션 누적 위상 ──
         self._gradient_phase = GradientPhase()
 
     # ══════════════════════════════════════════════════════════════
@@ -154,7 +173,6 @@ class UnifiedEngine(BaseEngine):
     def _init_mode_resources(self):
         ep = self._current_params
 
-        # ── 둘레 좌표: 모든 모드에서 필요 (정적 그라데이션에서도 사용) ──
         self._perimeter_t = _compute_led_perimeter_t(self.config)
         self._clockwise_t = _compute_led_clockwise_t(self.config)
         self._led_norm_y = compute_led_normalized_y(self.config)
@@ -164,49 +182,30 @@ class UnifiedEngine(BaseEngine):
         segments = self.config.get("layout", {}).get("segments", [])
         self._led_order = _build_led_order_from_segments(segments, self._led_count)
 
-        # ── 색상 보정 (공통) ──
         self._cc = ColorCorrection(self.config.get("color", {}))
 
-        # ── 디스플레이 리소스 (D=ON) ──
         if ep.display_enabled:
             self._init_display_resources(ep)
-
-        # ── 오디오 리소스 (A=ON) ──
         if ep.audio_enabled:
             self._init_audio_resources(ep)
-
-        # ── 정적 모드: 기본 색상 초기화 (D=OFF) ──
         if not ep.display_enabled:
             self._rebuild_base_colors_for_color_panel(ep)
 
     def _init_display_resources(self, ep):
-        """디스플레이 ON 공통 리소스: 캡처 + weight_matrix + vivid masks."""
         self._init_capture()
-
-        # 채도 우선순위 v2: LED별 핵심 영역 캐시
         if self._weight_matrix is not None:
             self._vivid_region_masks = build_led_region_masks(
                 self._weight_matrix, top_pct=0.10
             )
-
         self._per_led_colors = np.zeros((self._led_count, 3), dtype=np.float32)
-
-        # N구역 모드 준비 (미러링 전용 + 하이브리드 모두에서 사용)
         if ep.mirror_n_zones != N_ZONES_PER_LED:
-            self._zone_map = _build_led_zone_map_by_side(
-                self.config, ep.mirror_n_zones
-            )
-
+            self._zone_map = _build_led_zone_map_by_side(self.config, ep.mirror_n_zones)
         if not ep.audio_enabled:
-            # D=ON, A=OFF: ColorPipeline (per-LED average) 또는 직접 처리 (distinctive)
             self._rebuild_pipeline()
-            # ColorCorrection: N구역 모드와 per-LED distinctive 모두에서 필요
             self._mirror_cc = ColorCorrection(self.config.get("color", {}))
-
         self._last_brightness = ep.master_brightness
 
     def _init_audio_resources(self, ep):
-        """오디오 ON 리소스: AudioCapture + 밴드 매핑."""
         self.status_changed.emit("오디오 캡처 초기화...")
         self._audio_engine = AudioCapture(
             device_index=self._audio_device_index,
@@ -216,25 +215,18 @@ class UnifiedEngine(BaseEngine):
         self._audio_engine.mid_sensitivity = ep.mid_sensitivity
         self._audio_engine.high_sensitivity = ep.high_sensitivity
         self._audio_engine.start()
-
         self._init_band_mapping(ep)
-
-        # 하이브리드 전용: FlowPalette
         if ep.display_enabled:
             self._flow_palette = FlowPalette(n_colors=5)
             self._flow_last_update = 0.0
 
     def _init_band_mapping(self, ep):
-        """밴드 매핑 + bass detail 초기화."""
         n_bands = self._audio_engine.n_bands
-
         self._led_band_indices = _compute_led_band_mapping(
             self._perimeter_t, n_bands, ep.zone_weights
         )
-
         self._smooth_bass = self._smooth_mid = self._smooth_high = 0.0
         self._smooth_spectrum = np.zeros(n_bands, dtype=np.float64)
-
         fft_freqs = self._audio_engine.fft_freqs
         self._bd_band_bins = _build_log_bands(
             BASS_DETAIL_N_BANDS, BASS_DETAIL_FREQ_MIN,
@@ -242,8 +234,6 @@ class UnifiedEngine(BaseEngine):
         )
         self._bd_agc = np.full(BASS_DETAIL_N_BANDS, 0.01, dtype=np.float64)
         self._bd_smooth = np.zeros(BASS_DETAIL_N_BANDS, dtype=np.float64)
-
-        # 오디오 base colors 초기 빌드
         self._rebuild_base_colors_for_audio(ep)
 
     # ══════════════════════════════════════════════════════════════
@@ -251,13 +241,11 @@ class UnifiedEngine(BaseEngine):
     # ══════════════════════════════════════════════════════════════
 
     def _rebuild_base_colors_for_color_panel(self, ep):
-        """색상 패널 설정(무지개/단색)에서 base_colors 빌드."""
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
         if self._led_band_indices is None:
             self._led_band_indices = _compute_led_band_mapping(
                 self._perimeter_t, n_bands, ep.zone_weights
             )
-
         self._cached_base_colors = build_base_color_array(
             self._led_band_indices, n_bands,
             rainbow=ep.rainbow,
@@ -269,12 +257,9 @@ class UnifiedEngine(BaseEngine):
         self._static_dirty = False
 
     def _rebuild_base_colors_for_audio(self, ep):
-        """오디오 모드용 base_colors 빌드."""
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
-
         if ep.audio_mode == AUDIO_FLOWING:
             return
-
         if (ep.display_enabled
                 and self._per_led_colors is not None
                 and self._per_led_colors.sum() > 0):
@@ -300,13 +285,11 @@ class UnifiedEngine(BaseEngine):
                 rainbow=ep.rainbow,
                 solid_color=np.array(ep.base_color, dtype=np.float32),
             )
-
         self._cached_rainbow = ep.rainbow
         self._cached_base_color_tuple = ep.base_color
         self._cached_color_effect = ep.color_effect
 
     def _maybe_rebuild_base_colors(self, ep):
-        """색상/효과 변경 감지 → 재빌드."""
         changed = (
             ep.rainbow != self._cached_rainbow
             or ep.base_color != self._cached_base_color_tuple
@@ -320,7 +303,7 @@ class UnifiedEngine(BaseEngine):
                 self._static_dirty = False
 
     # ══════════════════════════════════════════════════════════════
-    #  메인 루프
+    #  메인 루프 — 오케스트레이터
     # ══════════════════════════════════════════════════════════════
 
     def _run_loop(self):
@@ -331,7 +314,7 @@ class UnifiedEngine(BaseEngine):
         fps_display = fps_start
         stop_wait = self._stop_event.wait
 
-        # 오디오 상태 추적
+        # 런타임 변경 추적 상태
         prev_zone_weights = ep.zone_weights
         prev_n_zones = ep.mirror_n_zones
 
@@ -341,20 +324,15 @@ class UnifiedEngine(BaseEngine):
         last_recreate_time = 0.0
         led_turned_off = False
 
-        # ★ Phase 8: 이전 루프 시각 (dt 계산용)
         prev_loop_time = time.monotonic()
 
-        # 모니터 워처 (디스플레이 ON)
         if ep.display_enabled:
             self._start_monitor_watcher()
 
-        # 상태 메시지
         self._emit_status_message(ep)
 
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
-
-            # ★ Phase 8: dt 계산 + 그라데이션 위상 누적
             dt = loop_start - prev_loop_time
             prev_loop_time = loop_start
 
@@ -362,150 +340,70 @@ class UnifiedEngine(BaseEngine):
             self._swap_params()
             ep = self._current_params
 
-            # ★ Phase 8: 그라데이션 위상 누적 (모든 모드에서, static이 아니면)
+            # ── 그라데이션 위상 누적 ──
             if ep.color_effect != COLOR_EFFECT_STATIC:
                 self._gradient_phase.tick(dt, ep.gradient_speed)
 
+            # ── 일시정지 ──
             if self._paused:
                 if stop_wait(timeout=0.05):
                     break
                 continue
 
-            # ── 모니터 분리 대기 (디스플레이 ON) ──
-            if ep.display_enabled and self._monitor_disconnected:
-                if stop_wait(timeout=0.5):
-                    break
-                continue
-
-            # ── 세션 복귀 (절전모드) ──
-            self._check_and_handle_session_resume()
-
-            # ── 디스플레이 변경 ──
-            if ep.display_enabled and self._display_change_flag.is_set():
-                self._handle_display_change()
-                if not ep.audio_enabled:
-                    prev_colors = None
-                last_good_frame_time = time.monotonic()
-                led_turned_off = False
-
-            # ── 레이아웃 dirty (디스플레이 ON) ──
+            # ── 디스플레이 관련 사전 처리 ──
             if ep.display_enabled:
-                with self._layout_lock:
-                    layout_dirty = self._layout_params.dirty
-                    if layout_dirty:
-                        self._layout_params.dirty = False
-                if layout_dirty:
-                    try:
-                        self._weight_matrix = self._build_layout(
-                            self._active_w, self._active_h
-                        )
-                        if not ep.audio_enabled:
-                            self._rebuild_pipeline()
-                        prev_colors = None
-                    except (ValueError, IndexError, np.linalg.LinAlgError):
-                        pass
-
-            # ── n_zones 런타임 변경 감지 ──
-            if ep.mirror_n_zones != prev_n_zones:
-                prev_n_zones = ep.mirror_n_zones
-                if ep.mirror_n_zones != N_ZONES_PER_LED:
-                    self._zone_map = _build_led_zone_map_by_side(
-                        self.config, ep.mirror_n_zones
-                    )
-                else:
-                    self._zone_map = None
-                self._prev_zone_dominant = None
-                if ep.audio_enabled:
-                    self._rebuild_base_colors_for_audio(ep)
-
-            # ── 오디오 대역 비율 변경 → 밴드 매핑 재계산 ──
-            if ep.audio_enabled and ep.zone_weights != prev_zone_weights:
-                n_bands = self._audio_engine.n_bands
-                self._led_band_indices = _compute_led_band_mapping(
-                    self._perimeter_t, n_bands, ep.zone_weights
-                )
-                prev_zone_weights = ep.zone_weights
-                self._rebuild_base_colors_for_audio(ep)
-
-            # ── 색상 변경 감지 ──
-            self._maybe_rebuild_base_colors(ep)
-
-            # ════════════════════════════════════════════════
-            #  렌더링 경로 분기
-            # ════════════════════════════════════════════════
-
-            raw_rgb = None
-            grb_data = None
-
-            if ep.display_enabled and not ep.audio_enabled:
-                result = self._frame_mirror_only(
-                    ep, prev_colors,
-                    last_good_frame_time, last_recreate_time, led_turned_off,
-                    frame_count,
-                )
-                if result is None:
-                    last_good_frame_time, last_recreate_time, led_turned_off = (
-                        self._handle_stale_frame(
-                            last_good_frame_time, last_recreate_time,
-                            led_turned_off, stop_wait,
-                        )
-                    )
-                    if self._stop_event.is_set():
+                if self._monitor_disconnected:
+                    if stop_wait(timeout=0.5):
                         break
                     continue
-                raw_rgb, grb_data, prev_colors, last_good_frame_time, led_turned_off = result
-
-            elif ep.audio_enabled:
-                raw_rgb, grb_data = self._frame_audio(
-                    ep, loop_start, frame_count,
-                    last_good_frame_time, last_recreate_time, led_turned_off,
-                )
-                if ep.display_enabled:
+                self._check_and_handle_session_resume()
+                if self._display_change_flag.is_set():
+                    self._handle_display_change()
+                    if not ep.audio_enabled:
+                        prev_colors = None
                     last_good_frame_time = time.monotonic()
                     led_turned_off = False
 
+            # ── 런타임 파라미터 변경 처리 ──
+            prev_n_zones, prev_zone_weights = self._handle_runtime_param_changes(
+                ep, prev_n_zones, prev_zone_weights, prev_colors,
+            )
+
+            # ── 렌더링 ──
+            render_result = self._render_frame(
+                ep, prev_colors,
+                last_good_frame_time, last_recreate_time, led_turned_off,
+                frame_count, loop_start, stop_wait,
+            )
+
+            if render_result is None:
+                # stale frame 또는 skip — 루프 계속
+                if self._stop_event.is_set():
+                    break
+                continue
+
+            # 미러링 전용 경로: MirrorFrameResult
+            # 오디오/정적 경로: (raw_rgb, grb_data) tuple
+            if isinstance(render_result, MirrorFrameResult):
+                raw_rgb = render_result.raw_preview
+                grb_data = render_result.grb_data
+                prev_colors = render_result.prev_colors
+                last_good_frame_time = render_result.last_good_frame_time
+                led_turned_off = render_result.led_turned_off
             else:
-                raw_rgb, grb_data = self._frame_static(ep, loop_start)
+                raw_rgb, grb_data = render_result
+                if ep.display_enabled and ep.audio_enabled:
+                    last_good_frame_time = time.monotonic()
+                    led_turned_off = False
 
-            # ── USB 전송 ──
-            try:
-                self._device.send_rgb(grb_data)
-            except HW_ERRORS:
-                pass
+            # ── USB 전송 + 시그널 emit ──
+            should_break = self._send_frame_and_emit_signals(
+                ep, grb_data, raw_rgb, frame_count, stop_wait,
+            )
+            if should_break:
+                break
 
-            if not self._device.connected:
-                self.status_changed.emit("USB 연결 끊김 — 재연결 시도 중...")
-                self._device.force_reconnect()
-                if self._device.connected:
-                    self._emit_status_message(ep)
-                else:
-                    if stop_wait(timeout=2.0):
-                        break
-                    continue
-
-            # ── 시그널 (3프레임마다) ──
-            if frame_count % 3 == 0:
-                if ep.audio_enabled:
-                    self.energy_updated.emit(
-                        self._smooth_bass, self._smooth_mid, self._smooth_high
-                    )
-                    if (ep.audio_mode == AUDIO_BASS_DETAIL
-                            and self._bd_smooth is not None):
-                        self.spectrum_updated.emit(self._bd_smooth.copy())
-                    elif self._smooth_spectrum is not None:
-                        self.spectrum_updated.emit(self._smooth_spectrum.copy())
-
-                    if (ep.audio_mode == AUDIO_FLOWING
-                            and self._flow_palette_colors is not None):
-                        self.spectrum_updated.emit(
-                            {"type": "flow_palette",
-                             "colors": self._flow_palette_colors,
-                             "ratios": self._flow_palette_ratios}
-                        )
-
-                if raw_rgb is not None:
-                    self.screen_colors_updated.emit(raw_rgb.tolist())
-
+            # ── FPS 계산 + sleep ──
             frame_count += 1
             now = time.monotonic()
             if now - fps_display >= 1.0:
@@ -520,13 +418,168 @@ class UnifiedEngine(BaseEngine):
                     break
 
     # ══════════════════════════════════════════════════════════════
+    #  런타임 파라미터 변경 처리
+    # ══════════════════════════════════════════════════════════════
+
+    def _handle_runtime_param_changes(self, ep, prev_n_zones, prev_zone_weights,
+                                       prev_colors):
+        """구역 수/밴드/레이아웃/색상 변경을 감지하고 처리.
+
+        Returns:
+            (new_prev_n_zones, new_prev_zone_weights)
+        """
+        # ── 레이아웃 dirty ──
+        if ep.display_enabled:
+            with self._layout_lock:
+                layout_dirty = self._layout_params.dirty
+                if layout_dirty:
+                    self._layout_params.dirty = False
+            if layout_dirty:
+                try:
+                    self._weight_matrix = self._build_layout(
+                        self._active_w, self._active_h
+                    )
+                    if not ep.audio_enabled:
+                        self._rebuild_pipeline()
+                except (ValueError, IndexError, np.linalg.LinAlgError):
+                    pass
+
+        # ── n_zones 변경 ──
+        if ep.mirror_n_zones != prev_n_zones:
+            prev_n_zones = ep.mirror_n_zones
+            if ep.mirror_n_zones != N_ZONES_PER_LED:
+                self._zone_map = _build_led_zone_map_by_side(
+                    self.config, ep.mirror_n_zones
+                )
+            else:
+                self._zone_map = None
+            self._prev_zone_dominant = None
+            if ep.audio_enabled:
+                self._rebuild_base_colors_for_audio(ep)
+
+        # ── 대역 비율 변경 ──
+        if ep.audio_enabled and ep.zone_weights != prev_zone_weights:
+            n_bands = self._audio_engine.n_bands
+            self._led_band_indices = _compute_led_band_mapping(
+                self._perimeter_t, n_bands, ep.zone_weights
+            )
+            prev_zone_weights = ep.zone_weights
+            self._rebuild_base_colors_for_audio(ep)
+
+        # ── 색상 변경 감지 ──
+        self._maybe_rebuild_base_colors(ep)
+
+        return prev_n_zones, prev_zone_weights
+
+    # ══════════════════════════════════════════════════════════════
+    #  렌더링 경로 분기
+    # ══════════════════════════════════════════════════════════════
+
+    def _render_frame(self, ep, prev_colors,
+                      last_good_frame_time, last_recreate_time, led_turned_off,
+                      frame_count, loop_start, stop_wait):
+        """모드에 따라 적절한 렌더러를 호출.
+
+        Returns:
+            MirrorFrameResult — 미러링 전용 경로
+            (raw_rgb, grb_data) — 오디오/정적 경로
+            None — stale frame (루프에서 continue 필요)
+        """
+        if ep.display_enabled and not ep.audio_enabled:
+            # ── 미러링 전용 ──
+            result = self._frame_mirror_only(
+                ep, prev_colors,
+                last_good_frame_time, last_recreate_time, led_turned_off,
+                frame_count,
+            )
+            if result is None:
+                lgt, lrt, lto = self._handle_stale_frame(
+                    last_good_frame_time, last_recreate_time,
+                    led_turned_off, stop_wait,
+                )
+                # stale 상태를 호출부에 전달할 수 없으므로
+                # 인스턴스 변수로 잠시 저장 (다음 프레임에서 사용)
+                self._stale_state = (lgt, lrt, lto)
+                return None
+            return result
+
+        elif ep.audio_enabled:
+            # ── 오디오 ON ──
+            raw_rgb, grb_data = self._frame_audio(
+                ep, loop_start, frame_count,
+                last_good_frame_time, last_recreate_time, led_turned_off,
+            )
+            return raw_rgb, grb_data
+
+        else:
+            # ── 양쪽 OFF ──
+            raw_rgb, grb_data = self._frame_static(ep, loop_start)
+            return raw_rgb, grb_data
+
+    # ══════════════════════════════════════════════════════════════
+    #  USB 전송 + 시그널 emit
+    # ══════════════════════════════════════════════════════════════
+
+    def _send_frame_and_emit_signals(self, ep, grb_data, raw_rgb,
+                                      frame_count, stop_wait):
+        """USB 전송 + 주기적 시그널 emit.
+
+        Returns:
+            bool — True면 루프 종료 필요
+        """
+        # ── USB 전송 ──
+        try:
+            self._device.send_rgb(grb_data)
+        except HW_ERRORS:
+            pass
+
+        if not self._device.connected:
+            self.status_changed.emit("USB 연결 끊김 — 재연결 시도 중...")
+            self._device.force_reconnect()
+            if self._device.connected:
+                self._emit_status_message(ep)
+            else:
+                if stop_wait(timeout=2.0):
+                    return True
+                return False  # 재시도 (루프 계속)
+
+        # ── 시그널 (3프레임마다) ──
+        if frame_count % 3 == 0:
+            if ep.audio_enabled:
+                self.energy_updated.emit(
+                    self._smooth_bass, self._smooth_mid, self._smooth_high
+                )
+                if (ep.audio_mode == AUDIO_BASS_DETAIL
+                        and self._bd_smooth is not None):
+                    self.spectrum_updated.emit(self._bd_smooth.copy())
+                elif self._smooth_spectrum is not None:
+                    self.spectrum_updated.emit(self._smooth_spectrum.copy())
+
+                if (ep.audio_mode == AUDIO_FLOWING
+                        and self._flow_palette_colors is not None):
+                    self.spectrum_updated.emit(
+                        {"type": "flow_palette",
+                         "colors": self._flow_palette_colors,
+                         "ratios": self._flow_palette_ratios}
+                    )
+
+            if raw_rgb is not None:
+                self.screen_colors_updated.emit(raw_rgb.tolist())
+
+        return False
+
+    # ══════════════════════════════════════════════════════════════
     #  경로 A: 미러링 전용 (D=ON, A=OFF)
     # ══════════════════════════════════════════════════════════════
 
     def _frame_mirror_only(self, ep, prev_colors,
                            last_good_frame_time, last_recreate_time,
                            led_turned_off, frame_count):
-        """미러링 전용 프레임 처리."""
+        """미러링 전용 프레임 처리.
+
+        Returns:
+            MirrorFrameResult 또는 None (프레임 없음)
+        """
         pipeline = self._pipeline
 
         # ── 밝기 / 스무딩 반영 ──
@@ -538,7 +591,6 @@ class UnifiedEngine(BaseEngine):
 
         # ── 캡처 ──
         frame = self._capture.grab()
-
         if frame is None:
             return None
 
@@ -579,7 +631,6 @@ class UnifiedEngine(BaseEngine):
                 return None
 
         # ── 색상 연산 ──
-
         _gradient_active = _has_mirror_gradient_effect(
             ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range
         )
@@ -672,13 +723,18 @@ class UnifiedEngine(BaseEngine):
 
                 raw_preview = modulated
 
-        return raw_preview, grb_data, new_prev, new_last_good, new_led_off
+        return MirrorFrameResult(
+            raw_preview=raw_preview,
+            grb_data=grb_data,
+            prev_colors=new_prev,
+            last_good_frame_time=new_last_good,
+            led_turned_off=new_led_off,
+        )
 
     def _compute_mirror_zone_colors(self, frame, ep):
         """N구역 미러링 색상 계산."""
         grid_flat = frame.reshape(-1, 3).astype(np.float32)
         per_led_raw = self._weight_matrix @ grid_flat
-
         extract_mode = ep.color_extract_mode
 
         if extract_mode == "distinctive":
@@ -708,10 +764,8 @@ class UnifiedEngine(BaseEngine):
         leds = zone_colors[self._zone_map]
         raw_preview = leds.copy()
         raw_preview *= ep.master_brightness
-
         leds *= ep.master_brightness
         self._mirror_cc.apply(leds)
-
         return leds_to_grb(leds), raw_preview
 
     def _compute_mirror_per_led_distinctive(self, frame, ep, prev_colors):
@@ -736,11 +790,9 @@ class UnifiedEngine(BaseEngine):
 
         raw_preview = per_led_raw.copy()
         raw_preview *= ep.master_brightness
-
         leds = per_led_raw * ep.master_brightness
         self._mirror_cc.apply(leds)
         grb_data = leds_to_grb(leds)
-
         return grb_data, raw_preview, per_led_raw
 
     def _handle_stale_frame(self, last_good_frame_time, last_recreate_time,
@@ -754,7 +806,6 @@ class UnifiedEngine(BaseEngine):
                 last_recreate_time = now
                 self.status_changed.emit("캡처 복구 중...")
                 self._capture._recreate()
-
                 new_w = self._capture.screen_w
                 new_h = self._capture.screen_h
                 if (new_w > 0 and new_h > 0
@@ -811,7 +862,7 @@ class UnifiedEngine(BaseEngine):
         high = self._smooth_high
         spec = self._smooth_spectrum
 
-        # ── 화면 색상 갱신 (D=ON일 때만, N프레임마다) ──
+        # ── 화면 색상 갱신 (D=ON일 때만) ──
         if (ep.display_enabled
                 and self._capture is not None
                 and self._weight_matrix is not None
@@ -835,7 +886,7 @@ class UnifiedEngine(BaseEngine):
                 gradient_phase=self._gradient_phase,
             )
 
-        # ── D=ON + animated 효과 (화면 색 미사용 시에만 적용) ──
+        # ── D=ON + animated 효과 (화면 색 미사용 시에만) ──
         if (ep.color_effect != COLOR_EFFECT_STATIC
                 and ep.display_enabled
                 and not (self._per_led_colors is not None
@@ -854,7 +905,7 @@ class UnifiedEngine(BaseEngine):
                 gradient_phase=self._gradient_phase,
             )
 
-        # ── ★ 하이브리드 그라데이션: 프레임 단위 복사본에 변조 ──
+        # ── 하이브리드 그라데이션 ──
         if (ep.display_enabled
                 and _has_mirror_gradient_effect(
                     ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range)
@@ -873,6 +924,22 @@ class UnifiedEngine(BaseEngine):
             frame_base_colors = self._cached_base_colors
 
         # ── 오디오 모드별 렌더링 ──
+        raw_rgb = self._render_audio_mode(
+            ep, frame_base_colors, bass, mid, high, spec,
+            raw_bass, frame_interval, loop_start,
+        )
+
+        # ── 색상 보정 + GRB 변환 ──
+        leds_out = raw_rgb.copy()
+        self._cc.apply(leds_out)
+        grb_data = leds_to_grb(leds_out)
+
+        return raw_rgb, grb_data
+
+    def _render_audio_mode(self, ep, frame_base_colors,
+                           bass, mid, high, spec,
+                           raw_bass, frame_interval, loop_start):
+        """오디오 모드별 렌더링 분기."""
         audio_mode = ep.audio_mode
 
         if audio_mode == AUDIO_WAVE:
@@ -883,7 +950,7 @@ class UnifiedEngine(BaseEngine):
                 speed=ep.wave_speed,
             )
             self._wave_prev_bass = bass
-            raw_rgb = vectorized_render_wave(
+            return vectorized_render_wave(
                 frame_base_colors, self._led_norm_y,
                 self._wave_pulses,
                 ep.min_brightness, ep.master_brightness,
@@ -906,77 +973,77 @@ class UnifiedEngine(BaseEngine):
             )
             self._dyn_prev_bass = bass
             self._dyn_prev_raw_bass = raw_bass
-            raw_rgb = vectorized_render_dynamic(
+            return vectorized_render_dynamic(
                 frame_base_colors, self._dyn_clockwise_t,
                 self._dyn_ripples, high,
                 ep.min_brightness, ep.master_brightness,
             )
 
         elif audio_mode == AUDIO_FLOWING and ep.display_enabled:
-            if (self._per_led_colors is not None
-                    and self._per_led_colors.sum() > 0
-                    and self._flow_palette is not None
-                    and (loop_start - self._flow_last_update) > ep.flowing_interval):
-                self._flow_palette.update_from_screen(self._per_led_colors)
-                self._flow_last_update = loop_start
-
-            if self._flow_palette is not None:
-                self._flow_palette.tick(
-                    frame_interval, bass, mid, high,
-                    base_speed=ep.flowing_speed,
-                )
-                raw_rgb = render_flowing(
-                    self._clockwise_t, self._flow_palette,
-                    bass, ep.master_brightness, mid=mid,
-                    min_brightness=ep.min_brightness,
-                )
-                self._flow_palette_colors = [
-                    blob.color_current.tolist() for blob in self._flow_palette.blobs
-                ]
-                self._flow_palette_ratios = [
-                    blob.width for blob in self._flow_palette.blobs
-                ]
-            else:
-                raw_rgb = vectorized_render_pulse(
-                    frame_base_colors, bass, mid, high,
-                    ep.min_brightness, ep.master_brightness,
-                )
-                self._flow_palette_colors = None
-                self._flow_palette_ratios = None
+            return self._render_flowing_mode(
+                ep, bass, mid, high, frame_interval, loop_start,
+                frame_base_colors,
+            )
 
         elif audio_mode == AUDIO_BASS_DETAIL:
-            bd_spec = self._process_bass_detail(eng, atk, rel, ep)
-            raw_rgb = vectorized_render_spectrum(
+            bd_spec = self._process_bass_detail(self._audio_engine,
+                                                 0.15 + ep.attack * 0.70,
+                                                 0.25 - ep.release * 0.245, ep)
+            return vectorized_render_spectrum(
                 frame_base_colors, self._led_band_indices,
                 bd_spec, ep.min_brightness, ep.master_brightness,
             )
 
         elif audio_mode == AUDIO_SPECTRUM:
-            raw_rgb = vectorized_render_spectrum(
+            return vectorized_render_spectrum(
                 frame_base_colors, self._led_band_indices,
                 spec, ep.min_brightness, ep.master_brightness,
             )
 
         else:  # AUDIO_PULSE (또는 flowing + D=OFF → pulse fallback)
-            raw_rgb = vectorized_render_pulse(
+            return vectorized_render_pulse(
                 frame_base_colors, bass, mid, high,
                 ep.min_brightness, ep.master_brightness,
             )
 
-        # ── 색상 보정 + GRB 변환 ──
-        leds_out = raw_rgb.copy()
-        self._cc.apply(leds_out)
-        grb_data = leds_to_grb(leds_out)
+    def _render_flowing_mode(self, ep, bass, mid, high,
+                             frame_interval, loop_start, frame_base_colors):
+        """Flowing 모드 렌더링."""
+        if (self._per_led_colors is not None
+                and self._per_led_colors.sum() > 0
+                and self._flow_palette is not None
+                and (loop_start - self._flow_last_update) > ep.flowing_interval):
+            self._flow_palette.update_from_screen(self._per_led_colors)
+            self._flow_last_update = loop_start
 
-        return raw_rgb, grb_data
+        if self._flow_palette is not None:
+            self._flow_palette.tick(
+                frame_interval, bass, mid, high,
+                base_speed=ep.flowing_speed,
+            )
+            raw_rgb = render_flowing(
+                self._clockwise_t, self._flow_palette,
+                bass, ep.master_brightness, mid=mid,
+                min_brightness=ep.min_brightness,
+            )
+            self._flow_palette_colors = [
+                blob.color_current.tolist() for blob in self._flow_palette.blobs
+            ]
+            self._flow_palette_ratios = [
+                blob.width for blob in self._flow_palette.blobs
+            ]
+        else:
+            raw_rgb = vectorized_render_pulse(
+                frame_base_colors, bass, mid, high,
+                ep.min_brightness, ep.master_brightness,
+            )
+            self._flow_palette_colors = None
+            self._flow_palette_ratios = None
+
+        return raw_rgb
 
     def _update_screen_colors(self, ep):
-        """화면 캡처 → per_led_colors 갱신 + base_colors 재빌드.
-
-        ★ [Hotfix] flowing 모드에서는 구역 분할/추출 방식/스무딩을 건너뛰고
-        raw per_led_colors만 전달. flowing은 자체 K-means 5색 추출을 하므로
-        미러링 파이프라인의 후처리가 불필요하고 오히려 품질을 떨어뜨림.
-        """
+        """화면 캡처 → per_led_colors 갱신 + base_colors 재빌드."""
         screen_frame = self._capture.grab()
         if screen_frame is None:
             return
@@ -985,12 +1052,10 @@ class UnifiedEngine(BaseEngine):
             grid_flat = screen_frame.reshape(-1, 3).astype(np.float32)
             raw_per_led = self._weight_matrix @ grid_flat
 
-            # ★ flowing 모드: raw per_led_colors만 저장하고 즉시 리턴
             if ep.audio_mode == AUDIO_FLOWING:
                 self._per_led_colors = raw_per_led
                 return
 
-            # ── 일반 모드: 기존 파이프라인 (distinctive/zone 분할 등) ──
             self._per_led_colors = raw_per_led
 
             if ep.color_extract_mode == "distinctive":
@@ -1044,7 +1109,6 @@ class UnifiedEngine(BaseEngine):
             raw_rgb = self._cached_base_colors.copy()
             raw_rgb *= ep.master_brightness
         else:
-            # 애니메이션: 매 프레임 갱신 — ★ Phase 8: 누적 위상 사용
             raw_rgb = build_base_color_array_animated(
                 self._led_band_indices if self._led_band_indices is not None
                     else _compute_led_band_mapping(self._perimeter_t, n_bands, ep.zone_weights),

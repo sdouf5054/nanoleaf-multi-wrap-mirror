@@ -4,13 +4,10 @@
 디스플레이 토글 + 오디오 토글 조합으로 4가지 상태를 표현.
 각 토글 on/off에 따라 관련 패널이 부드럽게 펼쳐지거나 접힘.
 
-[Phase 4 — 엔진 연결]
-- 토글 조합 → 기존 엔진 클래스 매핑 (과도기 호환)
-- collect_engine_init_params → EngineParams 빌드
-- 파라미터 변경 시 실행 중인 엔진에 즉시 전달
-- master 밝기 → 엔진 즉시 반영
-- 토글 변경 시 실행 중이면 엔진 모드 전환
-- MainWindow 시그널 연결 완성
+[Refactor] 범용 위젯 분리
+- ToggleSwitch → ui/widgets/toggle_switch.py
+- CollapsiblePanel → ui/widgets/collapsible_panel.py
+- _NoScrollFilter → ui/widgets/no_scroll_filter.py (NoScrollFilter로 이름 변경)
 
 [시그널]
   request_engine_start(str)   — 모드 문자열로 엔진 시작 요청
@@ -18,9 +15,6 @@
   request_engine_pause()      — 일시정지 토글
   request_mode_switch(str)    — 실행 중 모드 전환 요청
   config_applied()            — config 저장됨
-
-[변경]
-- ★ 토글 기본값 버튼 옆에 현재 기본값 힌트 라벨 추가
 """
 
 import os
@@ -32,14 +26,19 @@ from PySide6.QtWidgets import (
     QSizePolicy, QSpinBox, QDoubleSpinBox,
     QSlider, QCheckBox,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QEvent, QPropertyAnimation, QEasingCurve, QRectF
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush
+from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 
 from core.engine_params import EngineParams
 from core.engine_utils import N_ZONES_PER_LED
 
-# ── 기존 재사용 위젯 ──
+# ── 파라미터 빌더 ──
+from ui.engine_params_builder import EngineParamsBuilder
+
+# ── 재사용 위젯 (ui/widgets에서 import) ──
 from ui.widgets.no_scroll_slider import NoScrollSlider
+from ui.widgets.no_scroll_filter import NoScrollFilter
+from ui.widgets.collapsible_panel import CollapsiblePanel
+from ui.widgets.toggle_switch import ToggleSwitch
 from ui.widgets.monitor_preview import MonitorPreview
 
 # ── Phase 2: 디스플레이 패널 섹션 ──
@@ -54,209 +53,13 @@ from core.audio_engine import list_loopback_devices, HAS_PYAUDIO
 
 
 # ══════════════════════════════════════════════════════════════════
-#  헬퍼: 스크롤 방지 이벤트 필터
-# ══════════════════════════════════════════════════════════════════
-
-class _NoScrollFilter(QObject):
-    """QComboBox 등에서 마우스 휠 스크롤 방지."""
-    _FILTERED = (QComboBox, QSpinBox, QDoubleSpinBox, QSlider)
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Wheel and isinstance(obj, self._FILTERED):
-            event.ignore()
-            return True
-        return False
-
-
-# ══════════════════════════════════════════════════════════════════
-#  CollapsiblePanel: 토글에 따라 부드럽게 펼쳐지는 컨테이너
-# ══════════════════════════════════════════════════════════════════
-
-class CollapsiblePanel(QWidget):
-    """max-height 애니메이션으로 부드럽게 펼치고 접는 패널.
-
-    사용법:
-        panel = CollapsiblePanel()
-        panel.set_content_layout(some_layout)
-        panel.set_expanded(True)   # 펼치기
-        panel.set_expanded(False)  # 접기
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._expanded = False
-
-        # 내부 컨테이너
-        self._container = QWidget()
-        self._container.setMaximumHeight(0)
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        outer.addWidget(self._container)
-
-        # 애니메이션
-        self._anim = QPropertyAnimation(self._container, b"maximumHeight")
-        self._anim.setDuration(250)
-        self._anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-
-    def set_content_layout(self, layout):
-        """내부 레이아웃 설정."""
-        self._container.setLayout(layout)
-
-    @property
-    def container(self):
-        """내부 위젯 — 직접 레이아웃을 설정할 때 사용."""
-        return self._container
-
-    def set_expanded(self, expanded, animate=True):
-        """펼침/접힘 상태 설정."""
-        if self._expanded == expanded:
-            return
-        self._expanded = expanded
-
-        if expanded:
-            # 펼치기: 보이게 한 뒤 높이 측정
-            self._container.setVisible(True)
-            self._container.setMaximumHeight(0)
-            self._container.adjustSize()
-            target = self._container.sizeHint().height()
-            if target < 10:
-                target = 2000  # fallback
-        else:
-            target = 0
-            # 접기: 애니메이션 시작 전에 즉시 숨김 → QPainter 경고 방지
-            self._container.setVisible(False)
-
-        if animate and self.isVisible():
-            self._anim.stop()
-            self._anim.setStartValue(self._container.maximumHeight())
-            self._anim.setEndValue(target)
-            if expanded:
-                self._anim.finished.connect(self._unlock_height)
-            self._anim.start()
-        else:
-            if expanded:
-                self._container.setMaximumHeight(16777215)
-            else:
-                self._container.setMaximumHeight(0)
-
-    def _unlock_height(self):
-        """펼침 애니메이션 완료 후 max-height 제한 해제."""
-        if self._expanded:
-            self._container.setMaximumHeight(16777215)
-        try:
-            self._anim.finished.disconnect(self._unlock_height)
-        except (TypeError, RuntimeError):
-            pass
-
-    @property
-    def is_expanded(self):
-        return self._expanded
-
-
-# ══════════════════════════════════════════════════════════════════
-#  ToggleSwitch: 커스텀 토글 스위치 위젯
-# ══════════════════════════════════════════════════════════════════
-
-class ToggleSwitch(QCheckBox):
-    """iOS 스타일 토글 스위치 — 커스텀 paintEvent.
-
-    QCheckBox를 상속하여 기존 시그널(stateChanged, toggled) 사용 가능.
-    스타일시트 indicator 대신 직접 그려서 QPainter engine==0 경고 방지.
-    """
-
-    _TRACK_W = 38
-    _TRACK_H = 20
-    _KNOB_MARGIN = 2
-    _SPACING = 8
-
-    def __init__(self, text="", parent=None):
-        super().__init__(text, parent)
-        # indicator를 숨기고 직접 그림
-        self.setStyleSheet("""
-            QCheckBox {
-                spacing: 8px;
-                font-size: 13px;
-                color: #d0d0d0;
-            }
-            QCheckBox::indicator {
-                width: 0px;
-                height: 0px;
-                margin: 0px;
-                padding: 0px;
-                border: none;
-                background: transparent;
-            }
-        """)
-
-    def sizeHint(self):
-        base = super().sizeHint()
-        # 트랙 너비 + 간격 + 텍스트 너비
-        w = self._TRACK_W + self._SPACING + base.width()
-        h = max(self._TRACK_H + 4, base.height())
-        from PySide6.QtCore import QSize
-        return QSize(w, h)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        if not painter.isActive():
-            return
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        checked = self.isChecked()
-        tw, th = self._TRACK_W, self._TRACK_H
-        km = self._KNOB_MARGIN
-        knob_d = th - 2 * km
-
-        # 트랙 위치: 수직 중앙
-        y = (self.height() - th) / 2
-
-        # ── 트랙 ──
-        track_rect = QRectF(0, y, tw, th)
-        if checked:
-            track_color = QColor("#2e86c1")
-        else:
-            track_color = QColor("#3a3a42")
-        painter.setPen(QPen(QColor("#555") if not checked else track_color, 1))
-        painter.setBrush(QBrush(track_color))
-        painter.drawRoundedRect(track_rect, th / 2, th / 2)
-
-        # ── 놉 ──
-        if checked:
-            knob_x = tw - km - knob_d
-        else:
-            knob_x = km
-        knob_rect = QRectF(knob_x, y + km, knob_d, knob_d)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        painter.drawEllipse(knob_rect)
-
-        # ── 텍스트 ──
-        text = self.text()
-        if text:
-            painter.setPen(QColor("#000000"))
-            font = self.font()
-            painter.setFont(font)
-            text_x = tw + self._SPACING
-            text_rect = QRectF(text_x, 0, self.width() - text_x, self.height())
-            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter, text)
-
-        painter.end()
-
-    def hitButton(self, pos):
-        """클릭 영역을 위젯 전체로."""
-        return self.rect().contains(pos)
-
-
-# ══════════════════════════════════════════════════════════════════
 #  ControlTab
 # ══════════════════════════════════════════════════════════════════
 
 class ControlTab(QWidget):
     """통합 컨트롤 탭 — 토글 기반 반응형 UI.
 
-    Signals → MainWindow (Phase 4에서 연결):
+    Signals → MainWindow:
         request_engine_start(str)
         request_engine_stop()
         request_engine_pause()
@@ -274,6 +77,7 @@ class ControlTab(QWidget):
         self.config = config
         self._engine_ctrl = engine_ctrl
         self._is_running = False
+        self._params_builder = EngineParamsBuilder()
 
         # 토글 상태
         opts = config.get("options", {})
@@ -324,7 +128,7 @@ class ControlTab(QWidget):
         )
 
         scroll.setWidget(container)
-        root.addWidget(scroll, 1)  # stretch=1 → 남는 공간 흡수
+        root.addWidget(scroll, 1)
 
         # ── 각 섹션 빌드 ──
         self._build_status_section()
@@ -337,9 +141,9 @@ class ControlTab(QWidget):
         self._build_bottom_actions(root)
 
         # ── 스크롤 방지 필터 ──
-        self._no_scroll_filter = _NoScrollFilter(self)
+        self._no_scroll_filter = NoScrollFilter(self)
         for w in container.findChildren(QWidget):
-            if isinstance(w, _NoScrollFilter._FILTERED):
+            if isinstance(w, NoScrollFilter.FILTERED_TYPES):
                 w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 w.installEventFilter(self._no_scroll_filter)
 
@@ -358,7 +162,6 @@ class ControlTab(QWidget):
         self.status_label.setStyleSheet("font-size:13px;font-weight:bold;")
         info_row.addWidget(self.status_label)
 
-        # 토글 상태 태그
         self.tag_display = QLabel("디스플레이 OFF")
         self.tag_display.setStyleSheet(
             "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
@@ -440,23 +243,19 @@ class ControlTab(QWidget):
 
         # 토글 행
         toggle_row = QHBoxLayout()
-
         self.toggle_display = ToggleSwitch("디스플레이 미러링")
         self.toggle_display.setChecked(self._display_on)
         self.toggle_display.toggled.connect(self._on_display_toggled)
         toggle_row.addWidget(self.toggle_display)
-
         toggle_row.addSpacing(20)
-
         self.toggle_audio = ToggleSwitch("오디오 반응")
         self.toggle_audio.setChecked(self._audio_on)
         self.toggle_audio.toggled.connect(self._on_audio_toggled)
         toggle_row.addWidget(self.toggle_audio)
-
         toggle_row.addStretch()
         lay.addLayout(toggle_row)
 
-        # ★ 기본값 설정 버튼 + 힌트 (같은 행)
+        # 기본값 설정 버튼 + 힌트
         default_toggle_row = QHBoxLayout()
         self.btn_set_default = QPushButton("현재 토글 설정을 기본값으로 설정")
         self.btn_set_default.setFixedHeight(24)
@@ -467,7 +266,6 @@ class ControlTab(QWidget):
         )
         self.btn_set_default.clicked.connect(self._on_set_default_toggles)
         default_toggle_row.addWidget(self.btn_set_default)
-
         self.lbl_toggle_default_hint = QLabel("")
         self.lbl_toggle_default_hint.setStyleSheet(
             "color:#6a6a74;font-size:10px;font-style:italic;"
@@ -477,7 +275,6 @@ class ControlTab(QWidget):
         lay.addLayout(default_toggle_row)
         self._update_toggle_default_hint()
 
-        # 구분선
         lay.addWidget(self._make_separator())
 
         # master 밝기
@@ -502,10 +299,9 @@ class ControlTab(QWidget):
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
-        # 구분선
         lay.addWidget(self._make_separator())
 
-        # 공통 설정: 화면 방향, 세로 회전, FPS
+        # 공통 설정
         orient_row = QHBoxLayout()
         orient_row.addWidget(QLabel("화면 방향:"))
         self.combo_orientation = QComboBox()
@@ -515,7 +311,6 @@ class ControlTab(QWidget):
             idx_map.get(self.config.get("mirror", {}).get("orientation", "auto"), 0)
         )
         orient_row.addWidget(self.combo_orientation)
-
         orient_row.addWidget(QLabel("세로 회전:"))
         self.combo_rotation = QComboBox()
         self.combo_rotation.addItems(["시계방향 (CW)", "반시계방향 (CCW)"])
@@ -537,12 +332,10 @@ class ControlTab(QWidget):
         fps_row.addStretch()
         lay.addLayout(fps_row)
 
-        # 오디오 디바이스
         audio_row = QHBoxLayout()
         audio_row.addWidget(QLabel("오디오 디바이스:"))
         self.combo_audio_device = QComboBox()
         self._refresh_audio_devices()
-        # 저장된 디바이스 복원
         saved_dev = self.config.get("options", {}).get("audio_device_index")
         if saved_dev is not None:
             for i in range(self.combo_audio_device.count()):
@@ -594,73 +387,55 @@ class ControlTab(QWidget):
     # ── ④ 토글 반응형 패널 ──────────────────────────────────────
 
     def _build_reactive_panels(self):
-        """디스플레이 side + 오디오 side 패널 빌드.
-
-        각 side에 두 개의 CollapsiblePanel이 있고,
-        토글 상태에 따라 하나만 펼쳐짐.
-        """
         # ── 디스플레이 side ──
-        # OFF 상태: 색상 패널
         self.panel_display_off = CollapsiblePanel()
         self._build_display_off_content(self.panel_display_off)
         self._main_layout.addWidget(self.panel_display_off)
 
-        # ON 상태: 미러링 설정 패널
         self.panel_display_on = CollapsiblePanel()
         self._build_display_on_content(self.panel_display_on)
         self._main_layout.addWidget(self.panel_display_on)
 
         # ── 오디오 side ──
-        # ON 상태: 오디오 반응 설정 패널
         self.panel_audio_on = CollapsiblePanel()
         self._build_audio_on_content(self.panel_audio_on)
         self._main_layout.addWidget(self.panel_audio_on)
 
     def _build_display_off_content(self, panel):
-        """디스플레이 OFF: 색상 패널 — DisplayColorSection 사용."""
         lay = QVBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-
         self.section_color = DisplayColorSection(self.config)
         self.section_color.params_changed.connect(self._on_display_params_changed)
         lay.addWidget(self.section_color)
-
         panel.set_content_layout(lay)
 
     def _build_display_on_content(self, panel):
-        """디스플레이 ON: 미러링 설정 패널 — DisplayMirrorSection 사용."""
         lay = QVBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-
         self.section_mirror = DisplayMirrorSection(self.config)
         self.section_mirror.params_changed.connect(self._on_display_params_changed)
         self.section_mirror.layout_params_changed.connect(self._on_layout_changed)
         self.section_mirror.zone_count_changed.connect(self._on_zone_count_changed)
         lay.addWidget(self.section_mirror)
-
         panel.set_content_layout(lay)
 
     def _build_audio_on_content(self, panel):
-        """오디오 ON: 오디오 반응 설정 패널 — AudioReactiveSection 사용."""
         lay = QVBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
-
         self.section_audio = AudioReactiveSection(self.config)
         self.section_audio.set_display_enabled(self._display_on)
         self.section_audio.params_changed.connect(self._on_audio_params_changed)
         self.section_audio.audio_mode_changed.connect(self._on_audio_mode_changed)
         self.section_audio.default_mode_saved.connect(self._on_default_mode_saved)
         lay.addWidget(self.section_audio)
-
         panel.set_content_layout(lay)
 
     # ── ⑤ 하단 고정 버튼 ────────────────────────────────────────
 
     def _build_bottom_actions(self, root_layout):
-        """스크롤 밖 하단에 고정되는 저장/되돌리기 버튼."""
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFrameShadow(QFrame.Shadow.Sunken)
@@ -711,8 +486,6 @@ class ControlTab(QWidget):
     def _on_audio_toggled(self, checked):
         self._audio_on = checked
         self._update_toggle_panels(animate=True)
-        # ★ 오디오 ON + display ON + flowing 기본 → set_display_enabled이
-        #   이미 호출된 뒤이므로, 여기서 flowing 자동 전환을 다시 시도
         if checked and self._display_on and hasattr(self, 'section_audio'):
             self.section_audio.set_display_enabled(self._display_on)
         self._sync_flowing_state()
@@ -721,11 +494,6 @@ class ControlTab(QWidget):
             self.request_mode_switch.emit(self._get_engine_mode_string())
 
     def _sync_flowing_state(self):
-        """★ flowing 모드 상태를 미러링 패널에 일관되게 동기화.
-
-        호출 시점: 디스플레이 토글, 오디오 토글, 오디오 모드 변경.
-        flowing 비활성화 조건: 오디오 OFF이거나, 현재 모드가 flowing이 아닐 때.
-        """
         if not hasattr(self, 'section_mirror') or not hasattr(self, 'section_audio'):
             return
         is_flowing = (
@@ -736,7 +504,6 @@ class ControlTab(QWidget):
         self.section_mirror.set_flowing_active(is_flowing)
 
     def _update_toggle_panels(self, animate=True):
-        """토글 상태에 따라 패널 펼침/접힘 + 태그 갱신."""
         # ── 태그 갱신 ──
         if self._display_on:
             self.tag_display.setText("디스플레이 ON")
@@ -764,23 +531,14 @@ class ControlTab(QWidget):
                 "border-radius:8px;font-size:10px;font-weight:600;"
             )
 
-        # ── 디스플레이 side ──
-        #  OFF → 색상 패널 표시
-        #  ON  → 미러링 설정 패널 표시
         self.panel_display_off.set_expanded(not self._display_on, animate=animate)
         self.panel_display_on.set_expanded(self._display_on, animate=animate)
-
-        # ── 오디오 side ──
-        #  OFF → 패널 없음 (접힘)
-        #  ON  → 오디오 반응 패널 표시
         self.panel_audio_on.set_expanded(self._audio_on, animate=animate)
 
     def _on_set_default_toggles(self):
-        """현재 토글 상태를 기본값으로 저장."""
         opts = self.config.setdefault("options", {})
         opts["default_display_enabled"] = self._display_on
         opts["default_audio_enabled"] = self._audio_on
-        # 스냅샷에도 반영
         self._applied_snapshot.setdefault("options", {})["default_display_enabled"] = self._display_on
         self._applied_snapshot.setdefault("options", {})["default_audio_enabled"] = self._audio_on
         self.config_applied.emit()
@@ -791,14 +549,11 @@ class ControlTab(QWidget):
         ))
 
     def _update_toggle_default_hint(self):
-        """★ 토글 기본값 힌트 라벨 갱신."""
         opts = self.config.get("options", {})
         d_on = opts.get("default_display_enabled", False)
         a_on = opts.get("default_audio_enabled", False)
-        d_str = "ON" if d_on else "OFF"
-        a_str = "ON" if a_on else "OFF"
         self.lbl_toggle_default_hint.setText(
-            f"기본값: 디스플레이 {d_str} / 오디오 {a_str}"
+            f"기본값: 디스플레이 {'ON' if d_on else 'OFF'} / 오디오 {'ON' if a_on else 'OFF'}"
         )
 
     # ══════════════════════════════════════════════════════════════
@@ -806,50 +561,41 @@ class ControlTab(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _on_start_clicked(self):
-        """시작 버튼 — config 동기화 후 엔진 시작 요청."""
         self._sync_config_from_ui()
         self.request_engine_start.emit(self._get_engine_mode_string())
 
     def _on_master_brightness_changed(self, value):
-        """master 밝기 슬라이더 변경 — config 즉시 반영 + 엔진 전달."""
         self.lbl_master_brightness.setText(f"{value}%")
         self.config.setdefault("mirror", {})["master_brightness"] = value / 100.0
         if self._is_running:
             self._push_params_to_engine()
 
     def _on_display_params_changed(self):
-        """디스플레이 색상/미러링 파라미터 변경 → 실행 중이면 엔진에 전달."""
         if self._is_running:
             self._push_params_to_engine()
 
     def _on_layout_changed(self):
-        """감쇠/페널티 변경 — 디바운스 후 엔진에 전달."""
         if self._is_running:
             self._layout_debounce.start()
 
     def _emit_layout_params(self):
-        """디바운스 만료 — 레이아웃 파라미터를 엔진에 전달."""
         if self._engine_ctrl and hasattr(self, 'section_mirror'):
             params = self.section_mirror.get_layout_params()
             self._engine_ctrl.update_layout_params(**params)
 
     def _on_zone_count_changed(self, n):
-        """구역 수 변경 → 실행 중이면 엔진 모드 재시작."""
         if self._is_running:
             self._sync_config_from_ui()
             self.request_mode_switch.emit(self._get_engine_mode_string())
 
     def _on_audio_params_changed(self):
-        """오디오 파라미터 변경 → 실행 중이면 엔진에 전달."""
         if self._is_running:
             self._push_params_to_engine()
 
     def _on_audio_mode_changed(self, mode_key):
-        """오디오 모드 변경 → flowing 상태 동기화."""
         self._sync_flowing_state()
 
     def _on_default_mode_saved(self):
-        """오디오 기본 모드가 즉시 저장됨 → 스냅샷에도 반영하여 종료 시 덮어쓰기 방지."""
         audio_state = self.config.get("options", {}).get("audio_state", {})
         snap_state = (self._applied_snapshot
                       .setdefault("options", {})
@@ -868,7 +614,6 @@ class ControlTab(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _on_apply(self):
-        """💾 저장 — UI→config 반영 + 스냅샷 갱신."""
         self._sync_config_from_ui()
         self._applied_snapshot = copy.deepcopy(self.config)
         self.config_applied.emit()
@@ -876,16 +621,13 @@ class ControlTab(QWidget):
         QTimer.singleShot(2000, lambda: self.btn_apply.setText("💾 저장"))
 
     def _on_revert(self):
-        """↩ 되돌리기 — 마지막 저장 스냅샷으로 복원."""
         for key in self._applied_snapshot:
             self.config[key] = copy.deepcopy(self._applied_snapshot[key])
         self._load_from_config()
-        # 실행 중이면 복원된 파라미터를 엔진에 전달
         if self._is_running:
             self._push_params_to_engine()
 
     def _sync_config_from_ui(self):
-        """UI 위젯 값을 config에 반영 (저장/되돌리기용)."""
         m = self.config.setdefault("mirror", {})
         m["orientation"] = {0: "auto", 1: "landscape", 2: "portrait"}.get(
             self.combo_orientation.currentIndex(), "auto"
@@ -895,14 +637,11 @@ class ControlTab(QWidget):
         self.config.setdefault("options", {})["audio_device_index"] = (
             self.combo_audio_device.currentData()
         )
-        # Phase 2: 디스플레이 패널
         self.section_color.apply_to_config()
         self.section_mirror.apply_to_config()
-        # Phase 3: 오디오 패널
         self.section_audio.apply_to_config()
 
     def _load_from_config(self):
-        """config에서 UI 위젯 복원."""
         m = self.config.get("mirror", {})
         self.combo_orientation.setCurrentIndex(
             {"auto": 0, "landscape": 1, "portrait": 2}.get(m.get("orientation", "auto"), 0)
@@ -911,17 +650,13 @@ class ControlTab(QWidget):
             0 if m.get("portrait_rotation", "cw") == "cw" else 1
         )
         self.spin_target_fps.setValue(m.get("target_fps", 60))
-        # master 밝기는 저장/되돌리기 범위 밖이므로 복원 안 함
-        # Phase 2: 디스플레이 패널
         self.section_color.load_from_config()
         self.section_mirror.load_from_config()
-        # Phase 3: 오디오 패널
         self.section_audio.load_from_config()
-        # ★ 토글 기본값 힌트 갱신
         self._update_toggle_default_hint()
 
     # ══════════════════════════════════════════════════════════════
-    #  외부 인터페이스 (MainWindow, 엔진에서 호출)
+    #  외부 인터페이스
     # ══════════════════════════════════════════════════════════════
 
     @property
@@ -934,20 +669,16 @@ class ControlTab(QWidget):
 
     @property
     def saved_config(self):
-        """💾 저장 버튼으로 확정된 config 스냅샷."""
         return self._applied_snapshot
 
     def set_engine_ctrl(self, ctrl):
-        """EngineController 참조 설정 (MainWindow에서 호출)."""
         self._engine_ctrl = ctrl
 
     def set_running_state(self, running):
-        """엔진 실행 상태에 따라 UI 활성화/비활성화."""
         self._is_running = running
         self.btn_start.setEnabled(not running)
         self.btn_pause.setEnabled(running)
         self.btn_stop.setEnabled(running)
-        # 실행 중엔 공통 설정 비활성화
         self.combo_orientation.setEnabled(not running)
         self.combo_rotation.setEnabled(not running)
         self.spin_target_fps.setEnabled(not running)
@@ -964,14 +695,11 @@ class ControlTab(QWidget):
             self.monitor_preview.set_colors(colors)
 
     def update_energy(self, bass, mid, high):
-        """엔진 → 에너지 레벨 바 갱신."""
         if hasattr(self, 'section_audio'):
             self.section_audio.update_energy(bass, mid, high)
 
     def update_spectrum(self, spec):
-        """엔진 → 스펙트럼 위젯 갱신 (+ flowing 팔레트 프리뷰)."""
         if hasattr(self, 'section_audio'):
-            # ★ flowing 팔레트 데이터 감지
             if isinstance(spec, dict) and spec.get("type") == "flow_palette":
                 self.section_audio.update_flow_palette(
                     spec["colors"], spec.get("ratios")
@@ -986,18 +714,15 @@ class ControlTab(QWidget):
         return self.combo_audio_device.currentData()
 
     def collect_engine_init_params(self):
-        """엔진 시작 시 초기 파라미터 수집."""
         params = {
             "display_enabled": self._display_on,
             "audio_enabled": self._audio_on,
             "master_brightness": self.slider_master_brightness.value() / 100.0,
         }
-        # 디스플레이 패널 파라미터
         if self._display_on:
             params.update(self.section_mirror.collect_params())
         else:
             params.update(self.section_color.collect_params())
-        # 오디오 패널 파라미터
         if self._audio_on:
             params.update(self.section_audio.collect_params())
         return params
@@ -1007,36 +732,22 @@ class ControlTab(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _build_engine_params(self):
-        """현재 UI 상태에서 EngineParams 빌드.
-
-        collect_engine_init_params()의 dict → EngineParams 변환.
-        EngineParams 필드에 없는 키는 자동으로 무시됨.
-        """
-        raw = self.collect_engine_init_params()
-        # EngineParams 필드에 있는 키만 필터링
-        valid_fields = {f.name for f in EngineParams.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in raw.items() if k in valid_fields}
-        return EngineParams(**filtered)
+        return self._params_builder.build(
+            display_enabled=self._display_on,
+            audio_enabled=self._audio_on,
+            master_brightness=self.slider_master_brightness.value() / 100.0,
+            display_params=self.section_mirror.collect_params() if self._display_on else None,
+            color_params=self.section_color.collect_params() if not self._display_on else None,
+            audio_params=self.section_audio.collect_params() if self._audio_on else None,
+        )
 
     def _push_params_to_engine(self):
-        """현재 UI 상태를 EngineParams로 빌드하여 엔진에 직접 전달.
-
-        Phase 5: 과도기 MirrorParams/AudioParams 변환 제거.
-        EngineController.set_params() → BaseEngine.update_params() 경로.
-        """
         if not self._engine_ctrl:
             return
         ep = self._build_engine_params()
         self._engine_ctrl.set_params(ep)
 
     def build_init_params_for_start(self):
-        """엔진 시작 시 사용할 초기 파라미터 반환.
-
-        Phase 5: EngineParams 직접 반환.
-
-        Returns:
-            (mode_str, EngineParams)
-        """
         ep = self._build_engine_params()
         mode = self._get_engine_mode_string()
         return mode, ep
@@ -1046,7 +757,6 @@ class ControlTab(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _get_engine_mode_string(self):
-        """Phase 7: 항상 unified — UnifiedEngine이 토글 플래그로 분기."""
         return "unified"
 
     def _refresh_audio_devices(self):

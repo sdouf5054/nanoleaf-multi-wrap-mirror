@@ -1,6 +1,12 @@
 """LED 캘리브레이션 탭 — 코너 찾기 + 세그먼트 자동 생성 (PySide6)
 
 [ADR-040] 공통 레이아웃 상수 적용 — 색상 보정 탭과 여백/버튼 위치 통일.
+
+[Refactor] DeviceOwnerMixin 적용
+- _toggle_connection, _set_connected_ui, _set_disconnected_ui,
+  _on_force_released, force_disconnect, cleanup 중복 제거
+- _on_device_force_released() 오버라이드: 강제 해제 시 스캔 중지
+- _DEVICE_OWNER = "setup_tab"
 """
 
 import time
@@ -13,10 +19,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 
 from core.config import save_config
+from ui.mixins.device_owner import DeviceOwnerMixin
 
-_OWNER = "setup_tab"
-
-# ── [ADR-040] 공통 레이아웃 상수 ──
 _GROUP_MARGINS = (6, 16, 6, 4)
 _GROUP_SPACING = 3
 
@@ -76,22 +80,42 @@ class LedScanThread(QThread):
     def stop_scan(self): self._running = False
 
 
-class SetupTab(QWidget):
+class SetupTab(DeviceOwnerMixin, QWidget):
+    """LED 캘리브레이션 탭.
+
+    DeviceOwnerMixin 제공:
+        _toggle_connection, _set_connected_ui, _set_disconnected_ui,
+        _on_force_released, force_disconnect, _device_cleanup
+
+    _on_device_force_released() 오버라이드:
+        강제 해제 시 실행 중인 스캔을 중지합니다.
+    """
+
     N_WRAPS = 2
+    _DEVICE_OWNER = "setup_tab"
     request_mirror_stop = Signal()
 
     def __init__(self, config, device_manager=None, parent=None):
-        super().__init__(parent)
+        QWidget.__init__(self, parent)
         self.config = config
         self.layout_cfg = config["layout"]
-        self.dm = device_manager
         self.scan_thread = None
         self._saved_layout = copy.deepcopy(config["layout"])
         self._saved_led_count = config["device"]["led_count"]
-        if self.dm:
-            self.dm.force_released.connect(self._on_force_released)
+
+        # ── Mixin 초기화 ──
+        self._init_device_owner(device_manager)
+
         self._build_ui()
         self._load_from_config()
+
+    # ── DeviceOwnerMixin 오버라이드 ──────────────────────────────
+
+    def _on_device_force_released(self):
+        """강제 해제 시 실행 중인 스캔을 중지."""
+        self._stop_scan()
+
+    # ── UI 빌드 ──────────────────────────────────────────────────
 
     def _build_ui(self):
         scroll = QScrollArea(self)
@@ -122,11 +146,15 @@ class SetupTab(QWidget):
         basic_layout = QHBoxLayout(basic_group)
         basic_layout.setContentsMargins(*_GROUP_MARGINS)
         basic_layout.addWidget(QLabel("LED 수:"))
-        self.spin_led_count = QSpinBox(); self.spin_led_count.setRange(1, 300); self.spin_led_count.setValue(self.config["device"]["led_count"])
+        self.spin_led_count = QSpinBox()
+        self.spin_led_count.setRange(1, 300)
+        self.spin_led_count.setValue(self.config["device"]["led_count"])
         basic_layout.addWidget(self.spin_led_count)
         basic_layout.addWidget(QLabel("감는 방향:"))
-        self.combo_direction = QComboBox(); self.combo_direction.addItems(["시계방향 (LED 번호 감소)", "반시계방향 (LED 번호 증가)"])
-        basic_layout.addWidget(self.combo_direction); basic_layout.addStretch()
+        self.combo_direction = QComboBox()
+        self.combo_direction.addItems(["시계방향 (LED 번호 감소)", "반시계방향 (LED 번호 증가)"])
+        basic_layout.addWidget(self.combo_direction)
+        basic_layout.addStretch()
         layout.addWidget(basic_group)
 
         # LED 스캔
@@ -134,53 +162,96 @@ class SetupTab(QWidget):
         scan_layout = QVBoxLayout(scan_group)
         scan_layout.setSpacing(_GROUP_SPACING)
         scan_layout.setContentsMargins(*_GROUP_MARGINS)
-        scan_desc = QLabel("LED를 순차 점등하면서 각 코너의 LED 번호를 기록합니다."); scan_desc.setWordWrap(True); scan_layout.addWidget(scan_desc)
+        scan_desc = QLabel("LED를 순차 점등하면서 각 코너의 LED 번호를 기록합니다.")
+        scan_desc.setWordWrap(True)
+        scan_layout.addWidget(scan_desc)
+
         ctrl_layout = QHBoxLayout()
-        self.btn_scan_start = QPushButton("▶ 자동 스캔"); self.btn_scan_start.clicked.connect(self._start_auto_scan); ctrl_layout.addWidget(self.btn_scan_start)
-        self.btn_manual = QPushButton("수동 모드"); self.btn_manual.clicked.connect(self._start_manual_mode); ctrl_layout.addWidget(self.btn_manual)
-        self.btn_prev = QPushButton("◀"); self.btn_prev.setFixedWidth(50); self.btn_prev.clicked.connect(self._step_backward); self.btn_prev.setEnabled(False); ctrl_layout.addWidget(self.btn_prev)
-        self.btn_next = QPushButton("▶"); self.btn_next.setFixedWidth(50); self.btn_next.clicked.connect(self._step_forward); self.btn_next.setEnabled(False); ctrl_layout.addWidget(self.btn_next)
-        self.btn_scan_stop = QPushButton("⏹ 중지"); self.btn_scan_stop.clicked.connect(self._stop_scan); self.btn_scan_stop.setEnabled(False); ctrl_layout.addWidget(self.btn_scan_stop)
+        self.btn_scan_start = QPushButton("▶ 자동 스캔")
+        self.btn_scan_start.clicked.connect(self._start_auto_scan)
+        ctrl_layout.addWidget(self.btn_scan_start)
+        self.btn_manual = QPushButton("수동 모드")
+        self.btn_manual.clicked.connect(self._start_manual_mode)
+        ctrl_layout.addWidget(self.btn_manual)
+        self.btn_prev = QPushButton("◀")
+        self.btn_prev.setFixedWidth(50)
+        self.btn_prev.clicked.connect(self._step_backward)
+        self.btn_prev.setEnabled(False)
+        ctrl_layout.addWidget(self.btn_prev)
+        self.btn_next = QPushButton("▶")
+        self.btn_next.setFixedWidth(50)
+        self.btn_next.clicked.connect(self._step_forward)
+        self.btn_next.setEnabled(False)
+        ctrl_layout.addWidget(self.btn_next)
+        self.btn_scan_stop = QPushButton("⏹ 중지")
+        self.btn_scan_stop.clicked.connect(self._stop_scan)
+        self.btn_scan_stop.setEnabled(False)
+        ctrl_layout.addWidget(self.btn_scan_stop)
         scan_layout.addLayout(ctrl_layout)
 
-        led_display = QHBoxLayout(); led_display.addWidget(QLabel("현재 LED:"))
-        self.spin_current_led = QSpinBox(); self.spin_current_led.setRange(0, 999); self.spin_current_led.setFixedWidth(90)
+        led_display = QHBoxLayout()
+        led_display.addWidget(QLabel("현재 LED:"))
+        self.spin_current_led = QSpinBox()
+        self.spin_current_led.setRange(0, 999)
+        self.spin_current_led.setFixedWidth(90)
         self.spin_current_led.setStyleSheet("font-size:20px;font-weight:bold;color:#2980b9;")
-        self.spin_current_led.setEnabled(False); self.spin_current_led.valueChanged.connect(self._on_spin_value_changed)
+        self.spin_current_led.setEnabled(False)
+        self.spin_current_led.valueChanged.connect(self._on_spin_value_changed)
         led_display.addWidget(self.spin_current_led)
-        self.btn_mark_corner = QPushButton("📌 이 LED를 코너로 기록"); self.btn_mark_corner.clicked.connect(self._mark_corner); self.btn_mark_corner.setEnabled(False)
-        led_display.addWidget(self.btn_mark_corner); led_display.addStretch()
-        scan_layout.addLayout(led_display); layout.addWidget(scan_group)
+        self.btn_mark_corner = QPushButton("📌 이 LED를 코너로 기록")
+        self.btn_mark_corner.clicked.connect(self._mark_corner)
+        self.btn_mark_corner.setEnabled(False)
+        led_display.addWidget(self.btn_mark_corner)
+        led_display.addStretch()
+        scan_layout.addLayout(led_display)
+        layout.addWidget(scan_group)
 
         # 코너 테이블
         corner_group = QGroupBox("코너 데이터 (2바퀴)")
         corner_layout = QVBoxLayout(corner_group)
         corner_layout.setSpacing(_GROUP_SPACING)
         corner_layout.setContentsMargins(*_GROUP_MARGINS)
-        corner_desc = QLabel("각 바퀴에서 변이 바뀌는 코너 LED 번호를 입력합니다."); corner_desc.setWordWrap(True); corner_layout.addWidget(corner_desc)
-        self.corner_table = QTableWidget(); self.corner_table.setRowCount(self.N_WRAPS); self.corner_table.setColumnCount(5)
+        corner_desc = QLabel("각 바퀴에서 변이 바뀌는 코너 LED 번호를 입력합니다.")
+        corner_desc.setWordWrap(True)
+        corner_layout.addWidget(corner_desc)
+        self.corner_table = QTableWidget()
+        self.corner_table.setRowCount(self.N_WRAPS)
+        self.corner_table.setColumnCount(5)
         self.corner_table.setHorizontalHeaderLabels(["시작(좌하)", "좌상", "우상", "우하", "끝점"])
         self.corner_table.setVerticalHeaderLabels(["바퀴 1", "바퀴 2"])
         self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.corner_table.setFixedHeight(90); corner_layout.addWidget(self.corner_table); layout.addWidget(corner_group)
+        self.corner_table.setFixedHeight(90)
+        corner_layout.addWidget(self.corner_table)
+        layout.addWidget(corner_group)
 
         # 세그먼트 미리보기
         seg_group = QGroupBox("세그먼트 (자동 생성)")
         seg_layout = QVBoxLayout(seg_group)
         seg_layout.setSpacing(_GROUP_SPACING)
         seg_layout.setContentsMargins(*_GROUP_MARGINS)
-        self.seg_preview = QTextEdit(); self.seg_preview.setReadOnly(True); self.seg_preview.setMaximumHeight(160)
-        self.seg_preview.setStyleSheet("font-family:Consolas,monospace;"); seg_layout.addWidget(self.seg_preview); layout.addWidget(seg_group)
+        self.seg_preview = QTextEdit()
+        self.seg_preview.setReadOnly(True)
+        self.seg_preview.setMaximumHeight(160)
+        self.seg_preview.setStyleSheet("font-family:Consolas,monospace;")
+        seg_layout.addWidget(self.seg_preview)
+        layout.addWidget(seg_group)
 
-        # 나머지 공간 흡수 — 버튼을 하단에 고정
         layout.addStretch()
 
         # 버튼
         btn_layout = QHBoxLayout()
-        btn_generate = QPushButton("🔄 세그먼트 생성"); btn_generate.clicked.connect(self._generate_segments); btn_layout.addWidget(btn_generate)
-        btn_reset = QPushButton("↩ 저장된 값 복원"); btn_reset.clicked.connect(self._reset_to_saved); btn_layout.addWidget(btn_reset)
-        btn_save = QPushButton("💾 설정 저장"); btn_save.clicked.connect(self._save); btn_layout.addWidget(btn_save)
+        btn_generate = QPushButton("🔄 세그먼트 생성")
+        btn_generate.clicked.connect(self._generate_segments)
+        btn_layout.addWidget(btn_generate)
+        btn_reset = QPushButton("↩ 저장된 값 복원")
+        btn_reset.clicked.connect(self._reset_to_saved)
+        btn_layout.addWidget(btn_reset)
+        btn_save = QPushButton("💾 설정 저장")
+        btn_save.clicked.connect(self._save)
+        btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
+
+    # ── config 로드 ──────────────────────────────────────────────
 
     def _load_from_config(self):
         corners = self.layout_cfg.get("corners", {})
@@ -198,63 +269,77 @@ class SetupTab(QWidget):
         lines = [f"LED {seg['start']:>2}→{seg['end']:<2}  {seg['side']}" for seg in segments]
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
-    def _set_connected_ui(self):
-        self.conn_label.setText("연결됨"); self.conn_label.setStyleSheet("color:#2d8c46;"); self.btn_connect.setText("연결 해제")
-    def _set_disconnected_ui(self):
-        self.conn_label.setText("연결 안 됨"); self.conn_label.setStyleSheet("color:#c0392b;"); self.btn_connect.setText("LED 연결")
+    # ── 연결 관련 (Mixin _toggle_connection 사용) ────────────────
 
-    def _on_force_released(self, prev_owner):
-        if prev_owner == _OWNER: self._stop_scan(); self._set_disconnected_ui()
+    # _toggle_connection()은 DeviceOwnerMixin에서 제공
+    # btn_connect.clicked → self._toggle_connection (UI 빌드에서 연결)
 
-    def force_disconnect(self):
-        if self.dm: self._stop_scan(); self.dm.release(_OWNER); self._set_disconnected_ui()
-
-    def _toggle_connection(self):
-        if not self.dm: return
-        if self.dm.is_connected and self.dm.owner == _OWNER:
-            self._stop_scan(); self.dm.release(_OWNER); self._set_disconnected_ui()
-        else:
-            self.request_mirror_stop.emit()
-            try: self.dm.acquire(_OWNER); self._set_connected_ui()
-            except Exception as e: QMessageBox.warning(self, "연결 실패", str(e))
+    # ── 스캔 ─────────────────────────────────────────────────────
 
     def _start_auto_scan(self):
-        if not self.dm or not self.dm.is_connected: QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요."); return
+        if not self.dm or not self.dm.is_connected:
+            QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요.")
+            return
         self._start_scan(paused=False)
+
     def _start_manual_mode(self):
-        if not self.dm or not self.dm.is_connected: QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요."); return
+        if not self.dm or not self.dm.is_connected:
+            QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요.")
+            return
         self._start_scan(paused=True)
 
     def _start_scan(self, paused=False):
-        if self.scan_thread and self.scan_thread.isRunning(): self.scan_thread.stop_scan(); self.scan_thread.wait()
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.stop_scan()
+            self.scan_thread.wait()
         led_count = self.spin_led_count.value()
-        self.spin_current_led.setRange(0, led_count - 1); self.spin_current_led.setValue(0)
+        self.spin_current_led.setRange(0, led_count - 1)
+        self.spin_current_led.setValue(0)
         self.scan_thread = LedScanThread(self.dm.device, led_count, delay_ms=400)
         self.scan_thread.set_paused(paused)
         self.scan_thread.led_changed.connect(self._on_led_changed)
         self.scan_thread.finished_scan.connect(self._on_scan_finished)
-        self.btn_scan_start.setEnabled(False); self.btn_manual.setEnabled(False); self.btn_scan_stop.setEnabled(True)
-        self.btn_prev.setEnabled(True); self.btn_next.setEnabled(True); self.btn_mark_corner.setEnabled(True); self.spin_current_led.setEnabled(True)
+        self.btn_scan_start.setEnabled(False)
+        self.btn_manual.setEnabled(False)
+        self.btn_scan_stop.setEnabled(True)
+        self.btn_prev.setEnabled(True)
+        self.btn_next.setEnabled(True)
+        self.btn_mark_corner.setEnabled(True)
+        self.spin_current_led.setEnabled(True)
         self.scan_thread.start()
 
     def _stop_scan(self):
-        if self.scan_thread and self.scan_thread.isRunning(): self.scan_thread.stop_scan(); self.btn_scan_stop.setEnabled(False)
-        else: self._on_scan_finished()
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.stop_scan()
+            self.btn_scan_stop.setEnabled(False)
+        else:
+            self._on_scan_finished()
 
     def _on_scan_finished(self):
-        self.btn_scan_start.setEnabled(True); self.btn_manual.setEnabled(True); self.btn_scan_stop.setEnabled(False)
-        self.btn_prev.setEnabled(False); self.btn_next.setEnabled(False); self.btn_mark_corner.setEnabled(False); self.spin_current_led.setEnabled(False)
+        self.btn_scan_start.setEnabled(True)
+        self.btn_manual.setEnabled(True)
+        self.btn_scan_stop.setEnabled(False)
+        self.btn_prev.setEnabled(False)
+        self.btn_next.setEnabled(False)
+        self.btn_mark_corner.setEnabled(False)
+        self.spin_current_led.setEnabled(False)
 
     def _on_spin_value_changed(self, value):
-        if self.scan_thread and self.scan_thread.isRunning(): self.scan_thread.jump_to(value)
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.jump_to(value)
 
     def _on_led_changed(self, idx):
-        self.spin_current_led.blockSignals(True); self.spin_current_led.setValue(idx); self.spin_current_led.blockSignals(False)
+        self.spin_current_led.blockSignals(True)
+        self.spin_current_led.setValue(idx)
+        self.spin_current_led.blockSignals(False)
 
     def _step_forward(self):
-        if self.scan_thread and self.scan_thread.isRunning(): self.scan_thread.step_forward()
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.step_forward()
+
     def _step_backward(self):
-        if self.scan_thread and self.scan_thread.isRunning(): self.scan_thread.step_backward()
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.step_backward()
 
     def _mark_corner(self):
         led_idx = str(self.spin_current_led.value())
@@ -262,13 +347,18 @@ class SetupTab(QWidget):
             for col in range(5):
                 item = self.corner_table.item(row, col)
                 if item is None or item.text().strip() == "":
-                    self.corner_table.setItem(row, col, QTableWidgetItem(led_idx)); return
+                    self.corner_table.setItem(row, col, QTableWidgetItem(led_idx))
+                    return
         QMessageBox.information(self, "코너", "모든 코너가 채워졌습니다.")
+
+    # ── 세그먼트 생성 ────────────────────────────────────────────
 
     def _validate_corners(self, corners_all):
         all_corners = []
-        for wrap in corners_all: all_corners.extend(wrap)
-        if len(all_corners) < 2: return True, ""
+        for wrap in corners_all:
+            all_corners.extend(wrap)
+        if len(all_corners) < 2:
+            return True, ""
         direction = 0
         for i in range(1, len(all_corners)):
             if all_corners[i] > all_corners[i - 1]: direction = 1; break
@@ -292,34 +382,47 @@ class SetupTab(QWidget):
                         raise ValueError(f"바퀴 {row+1}의 {col+1}번째 코너가 비어있습니다.")
                     wrap.append(int(item.text().strip()))
                 corners_all.append(wrap)
-        except ValueError as e: QMessageBox.warning(self, "코너 오류", str(e)); return
+        except ValueError as e:
+            QMessageBox.warning(self, "코너 오류", str(e))
+            return
 
         valid, err = self._validate_corners(corners_all)
-        if not valid: QMessageBox.warning(self, "순서 오류", err); return
+        if not valid:
+            QMessageBox.warning(self, "순서 오류", err)
+            return
 
-        segments = []; corners_dict = {}
+        segments = []
+        corners_dict = {}
         for w, wrap in enumerate(corners_all):
             prefix = f"w{w+1}_"
             for i, name in enumerate(("bl", "tl", "tr", "br", "end")):
                 corners_dict[prefix + name] = wrap[i]
             for i in range(4):
                 segments.append({"start": wrap[i], "end": wrap[i + 1], "side": sides_order[i]})
-        self.layout_cfg["corners"] = corners_dict; self.layout_cfg["segments"] = segments
+
+        self.layout_cfg["corners"] = corners_dict
+        self.layout_cfg["segments"] = segments
         self._update_seg_preview()
         QMessageBox.information(self, "세그먼트", f"{len(segments)}개 세그먼트 생성 완료.")
 
     def _reset_to_saved(self):
-        self.config["layout"] = copy.deepcopy(self._saved_layout); self.layout_cfg = self.config["layout"]
-        self.spin_led_count.setValue(self._saved_led_count); self._load_from_config()
+        self.config["layout"] = copy.deepcopy(self._saved_layout)
+        self.layout_cfg = self.config["layout"]
+        self.spin_led_count.setValue(self._saved_led_count)
+        self._load_from_config()
         QMessageBox.information(self, "복원", "저장된 설정으로 복원했습니다.")
 
     def _save(self):
         self.config["device"]["led_count"] = self.spin_led_count.value()
-        if not self.layout_cfg.get("segments"): self._generate_segments()
+        if not self.layout_cfg.get("segments"):
+            self._generate_segments()
         save_config(self.config)
-        self._saved_layout = copy.deepcopy(self.config["layout"]); self._saved_led_count = self.config["device"]["led_count"]
+        self._saved_layout = copy.deepcopy(self.config["layout"])
+        self._saved_led_count = self.config["device"]["led_count"]
         QMessageBox.information(self, "저장", "LED 설정이 저장되었습니다.")
 
     def cleanup(self):
-        if self.scan_thread and self.scan_thread.isRunning(): self.scan_thread.stop_scan(); self.scan_thread.wait(2000)
-        if self.dm: self.dm.release(_OWNER)
+        if self.scan_thread and self.scan_thread.isRunning():
+            self.scan_thread.stop_scan()
+            self.scan_thread.wait(2000)
+        self._device_cleanup()

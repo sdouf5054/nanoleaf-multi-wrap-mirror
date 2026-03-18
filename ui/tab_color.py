@@ -1,6 +1,11 @@
 """색상 보정 탭 — 화이트밸런스, 감마, 채널 믹싱 + 실시간 LED 프리뷰 (PySide6)
 
 [ADR-040] 공통 레이아웃 상수 적용 — 다른 탭과 여백 통일.
+
+[Refactor] DeviceOwnerMixin 적용
+- _toggle_connection, _set_connected_ui, _set_disconnected_ui,
+  _on_force_released, force_disconnect, cleanup 중복 제거
+- _DEVICE_OWNER = "color_tab"
 """
 
 import numpy as np
@@ -11,6 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal
 
 from core.config import save_config
+from ui.mixins.device_owner import DeviceOwnerMixin
 
 TEST_COLORS = [
     ("흰색", 255, 255, 255), ("빨강", 255, 0, 0), ("초록", 0, 255, 0),
@@ -18,7 +24,6 @@ TEST_COLORS = [
     ("마젠타", 255, 0, 255), ("연두", 128, 255, 0), ("주황", 255, 128, 0),
     ("따뜻한 백", 255, 220, 180),
 ]
-_OWNER = "color_tab"
 
 # ── [ADR-040] 공통 레이아웃 상수 ──
 _GROUP_MARGINS = (6, 16, 6, 4)
@@ -55,17 +60,26 @@ class ColorSliderRow(QWidget):
         self.slider.setValue(int(v * self.scale))
 
 
-class ColorTab(QWidget):
+class ColorTab(DeviceOwnerMixin, QWidget):
+    """색상 보정 탭.
+
+    DeviceOwnerMixin 제공:
+        _toggle_connection, _set_connected_ui, _set_disconnected_ui,
+        _on_force_released, force_disconnect, _device_cleanup
+    """
+
+    _DEVICE_OWNER = "color_tab"
     request_mirror_stop = Signal()
 
     def __init__(self, config, device_manager=None, parent=None):
-        super().__init__(parent)
+        QWidget.__init__(self, parent)
         self.config = config
         self.color_cfg = config["color"]
-        self.dm = device_manager
         self._current_test_rgb = (255, 255, 255)
-        if self.dm:
-            self.dm.force_released.connect(self._on_force_released)
+
+        # ── Mixin 초기화 ──
+        self._init_device_owner(device_manager)
+
         self._build_ui()
 
     def _build_ui(self):
@@ -158,7 +172,6 @@ class ColorTab(QWidget):
         preview_layout.addStretch()
         layout.addLayout(preview_layout)
 
-        # 나머지 공간을 미리보기와 버튼 사이에 흡수
         layout.addStretch()
 
         # 버튼
@@ -174,38 +187,7 @@ class ColorTab(QWidget):
         btn_layout.addWidget(btn_off)
         layout.addLayout(btn_layout)
 
-    def _set_connected_ui(self):
-        self.conn_label.setText("연결됨")
-        self.conn_label.setStyleSheet("color: #2d8c46;")
-        self.btn_connect.setText("연결 해제")
-
-    def _set_disconnected_ui(self):
-        self.conn_label.setText("연결 안 됨")
-        self.conn_label.setStyleSheet("color: #c0392b;")
-        self.btn_connect.setText("LED 연결")
-
-    def _on_force_released(self, prev_owner):
-        if prev_owner == _OWNER:
-            self._set_disconnected_ui()
-
-    def force_disconnect(self):
-        if self.dm:
-            self.dm.release(_OWNER)
-            self._set_disconnected_ui()
-
-    def _toggle_connection(self):
-        if not self.dm:
-            return
-        if self.dm.is_connected and self.dm.owner == _OWNER:
-            self.dm.release(_OWNER)
-            self._set_disconnected_ui()
-        else:
-            self.request_mirror_stop.emit()
-            try:
-                self.dm.acquire(_OWNER)
-                self._set_connected_ui()
-            except Exception as e:
-                QMessageBox.warning(self, "연결 실패", str(e))
+    # ── 색상 보정 로직 (탭 고유) ──────────────────────────────────
 
     def _apply_correction(self, r, g, b):
         rgb = np.array([[r, g, b]], dtype=np.float32)
@@ -229,7 +211,7 @@ class ColorTab(QWidget):
         cr, cg, cb = self._apply_correction(r, g, b)
         self.preview_output.setStyleSheet(f"background-color:rgb({cr},{cg},{cb});border:1px solid #ccc;")
         self.preview_label.setText(f"({r},{g},{b}) → ({cr},{cg},{cb})")
-        if self.dm and self.dm.is_connected and self.dm.owner == _OWNER:
+        if self.dm and self.dm.is_connected and self.dm.owner == self._DEVICE_OWNER:
             self.dm.device.set_all_color(cr, cg, cb)
 
     def _on_value_changed(self, _=None):
@@ -253,9 +235,8 @@ class ColorTab(QWidget):
         self.bleed.setValue(0.60)
 
     def _turn_off_leds(self):
-        if self.dm and self.dm.is_connected and self.dm.owner == _OWNER:
+        if self.dm and self.dm.is_connected and self.dm.owner == self._DEVICE_OWNER:
             self.dm.device.turn_off()
 
     def cleanup(self):
-        if self.dm:
-            self.dm.release(_OWNER)
+        self._device_cleanup()

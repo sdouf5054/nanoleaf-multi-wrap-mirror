@@ -5,12 +5,16 @@
 - _current_mirror_params / _current_audio_params 호환 속성 제거
 - update_params(EngineParams) 단일 API만 유지
 - MirrorParams/AudioParams import 제거
+
+[Refactor] Windows API 격리
+- ctypes.windll 직접 호출 제거
+- core.platform.get_monitor_count / get_primary_resolution 사용
+- 비-Windows 환경에서도 import 및 테스트 가능
 """
 
 import time
 import os
 import copy
-import ctypes
 import logging
 import threading
 import numpy as np
@@ -27,6 +31,7 @@ from core.engine_utils import (
     N_ZONES_PER_LED,
     _build_led_zone_map_by_side,
 )
+from core.platform import get_monitor_count, get_primary_resolution
 
 
 class BaseEngine(QThread):
@@ -199,7 +204,7 @@ class BaseEngine(QThread):
     def _init_capture(self):
         mirror_cfg = self.config["mirror"]
         target_fps = mirror_cfg["target_fps"]
-        init_res = self._get_primary_resolution()
+        init_res = get_primary_resolution()
         if init_res[0] > 0 and init_res[1] > 0:
             grid_cols, grid_rows = self._resolve_grid_size(init_res[0], init_res[1])
         else:
@@ -278,8 +283,8 @@ class BaseEngine(QThread):
     # ══════════════════════════════════════════════════════════════
 
     def _start_monitor_watcher(self):
-        self._expected_resolution = self._get_primary_resolution()
-        self._expected_monitors = self._get_monitor_count()
+        self._expected_resolution = get_primary_resolution()
+        self._expected_monitors = get_monitor_count()
         t = threading.Thread(target=self._monitor_watcher_loop, daemon=True)
         t.start()
 
@@ -290,14 +295,14 @@ class BaseEngine(QThread):
     def _monitor_watcher_tick(self):
         if self._stop_event.is_set():
             return
-        current_res = self._get_primary_resolution()
+        current_res = get_primary_resolution()
         if (current_res[0] > 0 and current_res[1] > 0
                 and self._expected_resolution[0] > 0
                 and current_res != self._expected_resolution):
             if not self._display_change_flag.is_set():
                 self._display_change_flag.set()
             self._expected_resolution = current_res
-        current_monitors = self._get_monitor_count()
+        current_monitors = get_monitor_count()
         if (not self._monitor_disconnected
                 and current_monitors < self._expected_monitors):
             self._monitor_disconnected = True
@@ -329,7 +334,7 @@ class BaseEngine(QThread):
             except Exception:
                 pass
             self._capture = None
-        new_res = self._get_primary_resolution()
+        new_res = get_primary_resolution()
         if new_res[0] <= 0 or new_res[1] <= 0:
             self.status_changed.emit("디스플레이 변경 — 해상도 조회 실패")
             return
@@ -366,38 +371,18 @@ class BaseEngine(QThread):
         self._expected_resolution = new_res
 
     # ══════════════════════════════════════════════════════════════
-    #  Windows API 헬퍼
-    # ══════════════════════════════════════════════════════════════
-
-    @staticmethod
-    def _get_monitor_count():
-        try:
-            return ctypes.windll.user32.GetSystemMetrics(80)
-        except Exception:
-            return -1
-
-    @staticmethod
-    def _get_primary_resolution():
-        try:
-            return (ctypes.windll.user32.GetSystemMetrics(0),
-                    ctypes.windll.user32.GetSystemMetrics(1))
-        except Exception:
-            return (0, 0)
-
-    # ══════════════════════════════════════════════════════════════
     #  QThread 진입점
     # ══════════════════════════════════════════════════════════════
 
     def run(self):
         self._init_logging()
         try:
-            # ★ pending params를 먼저 반영 — _init_mode_resources()가
-            #   실제 display_enabled/audio_enabled 값을 참조할 수 있도록
+            # ★ pending params를 먼저 반영
             self._swap_params()
             self._init_mode_resources()
             self._init_usb()
-            self._expected_monitors = self._get_monitor_count()
-            self._expected_resolution = self._get_primary_resolution()
+            self._expected_monitors = get_monitor_count()
+            self._expected_resolution = get_primary_resolution()
         except HW_CONNECT_ERRORS as e:
             self.error.emit(str(e), "critical")
             self._cleanup_partial()

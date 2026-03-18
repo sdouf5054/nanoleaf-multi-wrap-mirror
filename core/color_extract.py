@@ -10,9 +10,19 @@ sklearn 의존성 없이 numpy만으로 구현.
   - prev_centroids 전달 시 greedy matching으로 클러스터 순서 안정화
   - extract_zone_dominant()에 prev_zone_colors + smoothing 파라미터 추가
   - 채도 가중 정렬 옵션 (saturation_weight)
+
+[Refactor] HSV 변환 함수를 core.hsv_utils로 통합
+- 로컬 _saturation_of, _saturation_array, _amplify_saturation 제거
+- hsv_utils.saturation_of, saturation_array, amplify_saturation 사용
 """
 
 import numpy as np
+
+from core.hsv_utils import (
+    saturation_of as _saturation_of,
+    saturation_array as _saturation_array,
+    amplify_saturation as _amplify_saturation,
+)
 
 # ── 상수 ──────────────────────────────────────────────────────────
 BLACK_THRESHOLD_DEFAULT = 15   # max(R,G,B) 기준 — 이하는 letterbox로 간주
@@ -33,11 +43,7 @@ def extract_dominant_colors(pixels, n_colors=5, black_threshold=BLACK_THRESHOLD_
         n_colors: 추출할 색 수
         black_threshold: max(R,G,B)가 이 값 이하인 픽셀은 무시
         prev_centroids: (n_colors, 3) float32 또는 None — warm start용.
-            전달 시 K-means 초기화에 사용하고, 결과 순서도
-            이전 centroid에 가장 가까운 순서로 매칭하여
-            프레임 간 색상 점프를 방지.
         saturation_weight: float 0~1 — 정렬 시 채도 가중치.
-            0.0 = 면적만 기준 (기본), 1.0 = 면적×채도 동일 가중.
 
     Returns:
         colors: (n_colors, 3) float32 — RGB, 스코어 내림차순
@@ -100,28 +106,6 @@ def extract_zone_dominant(per_led_colors, zone_map, n_zones,
     """구역별 dominant color — per_led_to_zone_colors()의 대안.
 
     [Hotfix v4] 결정론적 median 기반 + 채도 우선순위.
-
-    동작:
-    1. letterbox 제거 → 채널별 median (면적 최대 색에 가까운 값)
-    2. saturation_boost > 0이면: 구역 내 고채도 픽셀의 대표색을 구해서
-       median과 블렌딩. 소수의 눈에 띄는 색(노란 텍스트, 빨간 하트 등)이
-       LED에 반영됨.
-    3. 적응형 EMA 스무딩
-
-    Args:
-        per_led_colors: (n_leds, 3) float32 — LED별 RGB
-        zone_map: (n_leds,) int32 — LED → 구역 매핑
-        n_zones: 구역 수
-        black_threshold: letterbox 필터 기준
-        prev_zone_colors: (n_zones, 3) float32 또는 None — EMA 스무딩용
-        smoothing: float 0~1 — EMA 최대 계수 (적응형으로 자동 감소)
-        saturation_boost: float 0~1 — 고채도 색 블렌딩 강도
-            0.0 = median 그대로 (기본)
-            0.3 = 고채도 30% 블렌딩 (권장)
-            0.7 = 고채도 지배적
-
-    Returns:
-        zone_colors: (n_zones, 3) float32 — 구역별 dominant RGB
     """
     per_led_colors = np.asarray(per_led_colors, dtype=np.float32)
     zone_map = np.asarray(zone_map, dtype=np.int32)
@@ -144,19 +128,13 @@ def extract_zone_dominant(per_led_colors, zone_map, n_zones,
         # 1. median (면적 기반 대표색)
         median_color = np.median(valid, axis=0)
 
-        # 2. 채도 부스트: 고채도 픽셀의 색을 채도 복원 후 블렌딩
-        #    weight_matrix를 거치면 채도가 떨어지므로, 고채도 LED의 HSV S를
-        #    증폭하여 "원래 색에 가깝게" 복원한 뒤 median과 블렌딩.
+        # 2. 채도 부스트
         if saturation_boost > 0 and len(valid) >= 3:
             sats = _saturation_array(valid)
             median_sat = float(np.median(sats))
             max_sat = float(sats.max())
 
-            # ★ 핵심 조건: 고채도 픽셀이 구역 중앙값보다 확실히 높아야 부스트
-            # — "배경만 있는 구역"에서는 max_sat ≈ median_sat이라 통과 안 함
-            # — "배경 + 노란 텍스트 LED"에서는 max_sat >> median_sat이라 통과
             if max_sat > median_sat + 0.08 and max_sat > 0.10:
-                # 구역 median 채도보다 확실히 높은 픽셀만 선택
                 high_threshold = median_sat + 0.05
                 high_sat_mask = sats >= high_threshold
 
@@ -171,7 +149,6 @@ def extract_zone_dominant(per_led_colors, zone_map, n_zones,
                     weights = high_sats / high_sats.sum()
                     high_sat_color = (amplified * weights[:, np.newaxis]).sum(axis=0)
 
-                    # 블렌딩: median × (1-boost) + 증폭된 고채도 × boost
                     zone_colors[zi] = np.clip(
                         median_color * (1.0 - saturation_boost)
                         + high_sat_color * saturation_boost,
@@ -232,85 +209,6 @@ def quantize_to_dominant(per_led_colors, n_colors=3,
 #  내부 함수
 # ══════════════════════════════════════════════════════════════════
 
-def _saturation_of(rgb):
-    """(3,) RGB 0~255 → 채도 0~1 (HSV의 S)."""
-    mx = max(float(rgb[0]), float(rgb[1]), float(rgb[2]))
-    mn = min(float(rgb[0]), float(rgb[1]), float(rgb[2]))
-    return (mx - mn) / mx if mx > 0 else 0.0
-
-
-def _saturation_array(pixels):
-    """(N, 3) RGB 0~255 → (N,) 채도 0~1. 벡터화."""
-    mx = pixels.max(axis=1)
-    mn = pixels.min(axis=1)
-    result = np.zeros_like(mx)
-    nz = mx > 0
-    result[nz] = (mx[nz] - mn[nz]) / mx[nz]
-    return result
-
-
-def _amplify_saturation(pixels, sats, target_s=0.85):
-    """고채도 픽셀의 채도를 target_s까지 끌어올림.
-
-    weight_matrix를 거치면서 떨어진 채도를 복원.
-    hue와 value는 유지하고 saturation만 증폭.
-
-    Args:
-        pixels: (N, 3) float32 — RGB 0~255
-        sats: (N,) float — 현재 채도 (0~1)
-        target_s: float — 목표 최소 채도
-
-    Returns:
-        amplified: (N, 3) float32 — 채도 증폭된 RGB 0~255
-    """
-    result = pixels.copy()
-    rgb_norm = pixels / 255.0
-
-    for i in range(len(pixels)):
-        if sats[i] < 0.01:
-            continue  # 무채색은 건드리지 않음
-
-        r, g, b = float(rgb_norm[i, 0]), float(rgb_norm[i, 1]), float(rgb_norm[i, 2])
-        mx = max(r, g, b)
-        mn = min(r, g, b)
-        diff = mx - mn
-
-        if diff <= 0 or mx <= 0:
-            continue
-
-        # 현재 HSV
-        if mx == r:
-            h = ((g - b) / diff) % 6.0 / 6.0
-        elif mx == g:
-            h = ((b - r) / diff + 2.0) / 6.0
-        else:
-            h = ((r - g) / diff + 4.0) / 6.0
-        s = diff / mx
-        v = mx
-
-        # S를 target_s까지 끌어올림 (이미 높으면 유지)
-        new_s = max(s, target_s)
-
-        # HSV → RGB
-        h6 = (h % 1.0) * 6.0
-        hi = int(h6)
-        f = h6 - hi
-        p = v * (1.0 - new_s)
-        q = v * (1.0 - new_s * f)
-        t = v * (1.0 - new_s * (1.0 - f))
-
-        if hi == 0:   nr, ng, nb = v, t, p
-        elif hi == 1: nr, ng, nb = q, v, p
-        elif hi == 2: nr, ng, nb = p, v, t
-        elif hi == 3: nr, ng, nb = p, q, v
-        elif hi == 4: nr, ng, nb = t, p, v
-        else:         nr, ng, nb = v, p, q
-
-        result[i] = [nr * 255.0, ng * 255.0, nb * 255.0]
-
-    return result
-
-
 def _score_order(centroids, counts, saturation_weight=0.0):
     """면적 + 선택적 채도 가중으로 정렬 순서 결정."""
     k = len(centroids)
@@ -328,10 +226,7 @@ def _score_order(centroids, counts, saturation_weight=0.0):
 
 
 def _match_to_previous(centroids, prev_centroids):
-    """현재 centroid를 이전 centroid에 greedy matching.
-
-    이전 순서를 최대한 유지하여 프레임 간 색 점프를 방지.
-    """
+    """현재 centroid를 이전 centroid에 greedy matching."""
     k = len(centroids)
     used = set()
     order = np.full(k, -1, dtype=np.int32)
