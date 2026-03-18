@@ -15,6 +15,18 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
   - 구역 수, 추출 방식, 스무딩, 색상 효과가 전부 그대로 작동
   - 하이브리드(D+A ON)에서도 동일: flowing 포함 모든 오디오 모드 적용
 
+[미디어 소스 자동판별 v3 — 미디어 변경 시점 기반]
+  미디어(곡/영상)가 바뀌면:
+  1. 초기 소스 = 앨범아트 (즉시 적용)
+  2. 판별 기간(DETECT_DURATION초) 동안 화면 MSE 측정
+  3. MSE가 높으면(영상) → 미러링으로 전환, 낮으면(음원) → 앨범아트 유지
+  4. 판별 완료 후 다음 미디어 변경까지 결과 유지
+  
+  media_source_override로 수동 오버라이드:
+  - "auto": 위 자동 판별
+  - "media": 항상 앨범아트
+  - "mirror": 항상 미러링
+
 [Refactor] _run_loop() 분해 + MirrorFrameResult 구조화
 - _run_loop(): 오케스트레이터 (~50줄) — 순서만 보여줌
 - _handle_runtime_param_changes(): 구역/밴드/색상 런타임 변경 처리
@@ -71,10 +83,11 @@ _STALE_THRESHOLD = 3.0
 _STALE_RECREATE_COOLDOWN = 3.0
 _STALE_LED_OFF_THRESHOLD = 10.0
 
-# ── ★ 화면 변화량 감지 상수 ──
-_SCREEN_DIFF_INTERVAL = 2.0    # 측정 주기 (초)
-_SCREEN_DIFF_THRESHOLD = 8.0   # MSE 임계값 — 이상이면 "영상"
-_SCREEN_DIFF_HOLD_FRAMES = 3   # 연속 N회 정적이어야 "정적"으로 전환 (오판 방지)
+# ── ★ 미디어 소스 자동판별 상수 (v3) ──
+MEDIA_DETECT_DURATION = 8.0       # 판별 기간 (초) — 미디어 변경 후 이 기간 동안 MSE 측정
+MEDIA_DETECT_INTERVAL = 0.3       # 판별 중 MSE 측정 주기 (초)
+MEDIA_DETECT_MSE_THRESHOLD = 500.0  # MSE 임계값 — 이상이면 "영상" (그리드 크기 프레임 기준)
+MEDIA_DETECT_DYNAMIC_COUNT = 5    # 연속 N회 MSE 초과 시 "영상"으로 확정
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -185,25 +198,28 @@ class UnifiedEngine(BaseEngine):
         self._media_provider: Optional[MediaFrameProvider] = None
         self._prev_media_enabled: bool = False
 
-        # ── ★ 화면 변화량 감지 (미디어 연동 video 판별) ──
-        self._screen_diff_prev_frame: Optional[np.ndarray] = None
-        self._screen_is_dynamic: bool = False      # True = 영상(미러링), False = 정적(앨범아트)
-        self._screen_diff_last_check: float = 0.0  # 마지막 측정 시각
+        # ── ★ 미디어 소스 자동판별 상태 (v3) ──
+        self._media_detect_state = "idle"       # "idle" | "detecting" | "decided"
+        self._media_detect_decision = "media"   # "media" | "mirror" — 현재 결정
+        self._media_detect_start_time = 0.0     # 판별 시작 시각
+        self._media_detect_last_check = 0.0     # 마지막 MSE 측정 시각
+        self._media_detect_dynamic_hits = 0     # 연속 MSE 초과 횟수
+        self._media_detect_prev_frame: Optional[np.ndarray] = None
+        self._media_detect_last_hash = 0        # 마지막 미디어 hash — 변경 감지용
 
     # ══════════════════════════════════════════════════════════════
-    #  ★ 캡처 소스 선택 — 미디어 연동의 핵심
+    #  ★ 캡처 소스 선택 — 미디어 연동의 핵심 (v3)
     # ══════════════════════════════════════════════════════════════
 
     def _grab_frame(self, ep):
         """현재 모드에 맞는 프레임을 가져온다.
 
-        [방법 3: SMTC PlaybackType + 화면 변화량 감지]
+        [v3: 미디어 변경 시점 기반 자동판별]
 
         미디어 연동 ON (ep.use_media_frame):
-          1) PlaybackType = Music → 무조건 앨범 아트
-          2) PlaybackType = Video/Unknown →
-             화면 캡처 diff 측정 → 정적이면 앨범 아트, 동적이면 미러링
-
+          1) 수동 오버라이드 체크 → "media"면 앨범아트, "mirror"면 화면 캡처
+          2) "auto" → _resolve_media_source()로 자동판별 결과 사용
+          
         미디어 연동 OFF → 화면 캡처
 
         Returns:
@@ -213,92 +229,133 @@ class UnifiedEngine(BaseEngine):
             media_frame = self._media_provider.get_frame()
 
             if media_frame is not None:
-                # PlaybackType 확인
-                info = self._media_provider.get_media_info()
-                playback_type = info.get("playback_type", "unknown") if info else "unknown"
-
-                if playback_type == "music":
-                    # ── DEBUG ──
-                    self.status_changed.emit(f"[DEBUG] type=music → MEDIA (앨범아트)")
+                # ── 수동 오버라이드 ──
+                override = ep.media_source_override
+                if override == "media":
                     return media_frame
+                elif override == "mirror":
+                    return self._capture.grab() if self._capture else None
 
-                # Video/Unknown → 화면 변화량으로 판별
-                use_media = self._should_use_media_frame()
-                if use_media:
+                # ── 자동 판별 (override == "auto") ──
+                source = self._resolve_media_source(media_frame)
+                if source == "media":
                     return media_frame
-                # 동적 화면(영상) → 아래의 화면 캡처로 폴백
-                return self._capture.grab() if self._capture else None
-            else:
-                # ── DEBUG ──
-                self.status_changed.emit("[DEBUG] media_frame=None → 화면 캡처 폴백")
+                else:
+                    return self._capture.grab() if self._capture else None
 
+        # 미디어 OFF 또는 프레임 없음
         if self._capture is not None:
             return self._capture.grab()
         return None
 
-    def _should_use_media_frame(self):
-        """화면 변화량을 측정하여 미디어 프레임 사용 여부를 판별.
+    def _resolve_media_source(self, media_frame):
+        """미디어 소스 자동판별 — 미디어 변경 시점 기반.
 
-        2초마다 캡처 프레임을 비교하여 정적/동적 판별.
-        정적(음원 영상) → True (앨범아트 사용)
-        동적(일반 영상) → False (미러링 사용)
+        [흐름]
+        1. 미디어 변경 감지 → 판별 시작 (초기값: "media" = 앨범아트)
+        2. DETECT_DURATION 동안 주기적으로 화면 MSE 측정
+        3. MSE가 높으면 "영상" hit 카운트 증가
+        4. 연속 DETECT_DYNAMIC_COUNT회 초과 → "mirror"로 확정
+        5. 판별 기간 종료 시 hit 부족 → "media" 유지
+        6. 다음 미디어 변경까지 결과 유지
 
         Returns:
-            bool — True면 앨범아트, False면 미러링
+            "media" 또는 "mirror"
         """
         now = time.monotonic()
 
-        # 측정 주기가 안 됐으면 캐시된 결과 반환
-        if now - self._screen_diff_last_check < _SCREEN_DIFF_INTERVAL:
-            return not self._screen_is_dynamic
+        # ── 미디어 변경 감지 ──
+        info = self._media_provider.get_media_info() if self._media_provider else None
+        current_hash = hash((info.get("title", ""), info.get("artist", ""))) if info else 0
 
-        self._screen_diff_last_check = now
+        if current_hash != self._media_detect_last_hash and current_hash != 0:
+            # 새 미디어 → 판별 시작
+            self._media_detect_last_hash = current_hash
+            self._media_detect_state = "detecting"
+            self._media_detect_decision = "media"  # 초기값: 앨범아트
+            self._media_detect_start_time = now
+            self._media_detect_last_check = 0.0
+            self._media_detect_dynamic_hits = 0
+            self._media_detect_prev_frame = None
 
-        # 화면 캡처 프레임 가져오기
+            self.status_changed.emit(
+                f"[미디어] 새 미디어 감지 — {MEDIA_DETECT_DURATION:.0f}초간 소스 판별 중..."
+            )
+
+        # ── 판별 완료 상태 → 결정 유지 ──
+        if self._media_detect_state == "decided":
+            return self._media_detect_decision
+
+        # ── idle (미디어 없음) → 앨범아트 ──
+        if self._media_detect_state == "idle":
+            return "media"
+
+        # ── detecting: 판별 기간 중 ──
+        elapsed = now - self._media_detect_start_time
+
+        # 판별 기간 종료
+        if elapsed >= MEDIA_DETECT_DURATION:
+            self._media_detect_state = "decided"
+            # decision은 이미 설정됨 (초기 "media" 또는 중간에 "mirror"로 변경)
+            source_label = "앨범아트" if self._media_detect_decision == "media" else "미러링"
+            self.status_changed.emit(
+                f"[미디어] 소스 판별 완료 → {source_label}"
+            )
+            return self._media_detect_decision
+
+        # 이미 "mirror"로 확정됐으면 기간 끝날 때까지 기다릴 필요 없음
+        if self._media_detect_decision == "mirror":
+            self._media_detect_state = "decided"
+            return "mirror"
+
+        # 측정 주기 체크
+        if now - self._media_detect_last_check < MEDIA_DETECT_INTERVAL:
+            return self._media_detect_decision
+
+        self._media_detect_last_check = now
+
+        # ── MSE 측정 ──
         if self._capture is None:
-            return True  # 캡처 없으면 앨범아트 사용
+            return self._media_detect_decision
 
-        current_frame = self._capture.grab()
-        if current_frame is None:
-            return True
+        current_capture = self._capture.grab()
+        if current_capture is None:
+            return self._media_detect_decision
 
-        # 이전 프레임이 없으면 저장만 하고 앨범아트 사용
-        if self._screen_diff_prev_frame is None:
-            self._screen_diff_prev_frame = current_frame.copy()
-            return True
+        if self._media_detect_prev_frame is None:
+            self._media_detect_prev_frame = current_capture.copy()
+            return self._media_detect_decision
 
-        # MSE 계산 (grid 크기 프레임이므로 매우 빠름)
         try:
-            prev = self._screen_diff_prev_frame.astype(np.float32)
-            curr = current_frame.astype(np.float32)
-            # 크기 불일치 대응
+            prev = self._media_detect_prev_frame.astype(np.float32)
+            curr = current_capture.astype(np.float32)
             if prev.shape != curr.shape:
-                self._screen_diff_prev_frame = current_frame.copy()
-                return True
+                self._media_detect_prev_frame = current_capture.copy()
+                return self._media_detect_decision
             mse = float(np.mean((curr - prev) ** 2))
         except Exception:
-            self._screen_diff_prev_frame = current_frame.copy()
-            return True
+            self._media_detect_prev_frame = current_capture.copy()
+            return self._media_detect_decision
 
-        self._screen_diff_prev_frame = current_frame.copy()
-        self._screen_diff_prev_frame = current_frame.copy()
+        self._media_detect_prev_frame = current_capture.copy()
 
-        # ── DEBUG: 상태바에 판별 정보 출력 ──
-        info = self._media_provider.get_media_info() if self._media_provider else None
-        pt = info.get("playback_type", "?") if info else "?"
-        decision = "MIRROR" if mse > _SCREEN_DIFF_THRESHOLD else "MEDIA"
-        self.status_changed.emit(
-            f"[DEBUG] type={pt} MSE={mse:.1f} thr={_SCREEN_DIFF_THRESHOLD} → {decision}"
-        )
-
-        if mse > _SCREEN_DIFF_THRESHOLD:
-            # 동적 — 영상 재생 중 → 미러링
-            self._screen_is_dynamic = True
+        # ── 판정 ──
+        if mse > MEDIA_DETECT_MSE_THRESHOLD:
+            self._media_detect_dynamic_hits += 1
+            self.status_changed.emit(
+                f"[미디어] 판별 중: MSE={mse:.0f} (hit {self._media_detect_dynamic_hits}/{MEDIA_DETECT_DYNAMIC_COUNT}) "
+                f"[{elapsed:.1f}/{MEDIA_DETECT_DURATION:.0f}s]"
+            )
+            if self._media_detect_dynamic_hits >= MEDIA_DETECT_DYNAMIC_COUNT:
+                self._media_detect_decision = "mirror"
+                self._media_detect_state = "decided"
+                self.status_changed.emit("[미디어] 영상 감지 → 미러링으로 전환")
+                return "mirror"
         else:
-            # 정적 — 음원 영상 또는 정지 화면 → 앨범아트
-            self._screen_is_dynamic = False
+            # MSE 낮음 → hit 리셋 (연속이어야 하므로)
+            self._media_detect_dynamic_hits = 0
 
-        return not self._screen_is_dynamic
+        return self._media_detect_decision
 
     # ══════════════════════════════════════════════════════════════
     #  초기화
@@ -588,9 +645,15 @@ class UnifiedEngine(BaseEngine):
                         grid_rows=self._active_grid_rows,
                     )
                     self._media_provider.start()
+                # 미디어 연동 ON → 판별 상태 리셋
+                self._media_detect_state = "idle"
+                self._media_detect_last_hash = 0
             elif self._media_provider is not None:
                 self._media_provider.stop()
                 self._media_provider = None
+                # 미디어 연동 OFF → 판별 상태 리셋
+                self._media_detect_state = "idle"
+                self._media_detect_last_hash = 0
 
         # ── 레이아웃 dirty ──
         if ep.display_enabled:
@@ -1268,7 +1331,7 @@ class UnifiedEngine(BaseEngine):
     # ══════════════════════════════════════════════════════════════
 
     def _frame_static(self, ep, current_time):
-        """양쪽 OFF — 정적/애니메이션 색상 출력. (v2: 미디어 분기 제거)"""
+        """양쪽 OFF — 정적/애니메이션 색상 출력."""
         n_leds = self._led_count
         n_bands = 16
 

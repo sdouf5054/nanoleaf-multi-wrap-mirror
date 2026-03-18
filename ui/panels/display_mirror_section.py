@@ -16,6 +16,10 @@
   → "소스: 화면 캡처" 또는 "소스: 미디어 (앨범아트)"
 - set_media_active(): tab_control에서 호출하여 상태 갱신
 
+[미디어 소스 오버라이드 v3 추가]
+- combo_media_source: 자동/앨범아트 강제/미러링 강제 선택
+  → 미디어 연동 ON 상태에서만 표시
+
 [Hotfix] flowing 모드 활성 시 미러링 설정 비활성화
 """
 
@@ -57,6 +61,14 @@ _INDEX_MIRROR_EFFECT = {
     2: COLOR_EFFECT_GRADIENT_CCW,
 }
 _MIRROR_EFFECT_TO_INDEX = {v: k for k, v in _INDEX_MIRROR_EFFECT.items()}
+
+# ── ★ 미디어 소스 오버라이드 ──
+_MEDIA_SOURCE_ITEMS = [
+    ("auto",   "자동 판별"),
+    ("media",  "앨범아트 강제"),
+    ("mirror", "미러링 강제"),
+]
+_MEDIA_SOURCE_KEYS = [k for k, _ in _MEDIA_SOURCE_ITEMS]
 
 # ── 레이아웃 상수 ──
 _GROUP_MARGINS = (6, 16, 6, 6)
@@ -116,6 +128,28 @@ class DisplayMirrorSection(QWidget):
 
         source_row.addStretch()
         gl.addLayout(source_row)
+
+        # ── ★ 미디어 소스 오버라이드 콤보 (미디어 ON 시에만 표시) ──
+        self._media_source_row = QWidget()
+        msr = QHBoxLayout(self._media_source_row)
+        msr.setContentsMargins(0, 0, 0, 0)
+        msr.addWidget(QLabel("소스 선택:"))
+        self.combo_media_source = QComboBox()
+        for key, label in _MEDIA_SOURCE_ITEMS:
+            self.combo_media_source.addItem(label, key)
+        self.combo_media_source.currentIndexChanged.connect(self._on_param_changed)
+        msr.addWidget(self.combo_media_source)
+
+        self.lbl_media_source_hint = QLabel(
+            "자동: 영상→미러링, 음원→앨범아트"
+        )
+        self.lbl_media_source_hint.setStyleSheet(
+            "color:#6a6a74;font-size:10px;font-style:italic;"
+        )
+        msr.addWidget(self.lbl_media_source_hint)
+        msr.addStretch()
+        gl.addWidget(self._media_source_row)
+        self._media_source_row.setVisible(False)  # 미디어 OFF 시 숨김
 
         # ── 색상 효과 ──
         effect_row = QHBoxLayout()
@@ -336,37 +370,17 @@ class DisplayMirrorSection(QWidget):
     # ── ★ flowing 모드 연동 ──────────────────────────────────────
 
     def set_flowing_active(self, active):
-        """flowing 모드 활성 시 미러링 설정 일부 비활성화.
-
-        비활성화 대상: 구역 수, 추출 방식, 스무딩
-        - flowing은 자체 K-means 5색 추출을 사용하므로 이 설정들이 무의미
-        - 비활성화된 상태에서도 값은 유지됨 (다른 모드로 돌아가면 복원)
-
-        유지 대상: 색상 효과(그라데이션), 고급 옵션(감쇠/페널티)
-        - 색상 효과는 flowing에서도 적용 가능 (향후 확장)
-        - 감쇠/페널티는 weight_matrix에 영향 → flowing의 입력 품질에 간접 영향
-        """
+        """flowing 모드 활성 시 미러링 설정 일부 비활성화."""
         self._flowing_active = active
-
-        # 구역 수 + 추출 방식 비활성화
         self.combo_zone_count.setEnabled(not active)
         self.combo_extract_mode.setEnabled(not active)
-
-        # 스무딩 비활성화
         self.slider_smoothing.setEnabled(not active)
-
-        # 힌트 라벨 표시
         self.lbl_flowing_hint.setVisible(active)
 
     # ── ★ 미디어 연동 소스 상태 ──────────────────────────────────
 
     def set_media_active(self, active):
-        """미디어 연동 활성 상태를 표시.
-
-        tab_control에서 미디어 토글이 변경될 때 호출.
-        소스 라벨만 갱신 — 옵션 비활성화는 하지 않음
-        (미디어 모드에서도 구역/추출/스무딩이 모두 작동하므로).
-        """
+        """미디어 연동 활성 상태를 표시 + 소스 오버라이드 콤보 표시/숨김."""
         self._media_active = active
         if active:
             self.lbl_media_source.setText("소스: 미디어 (앨범아트)")
@@ -374,19 +388,17 @@ class DisplayMirrorSection(QWidget):
                 "color:#a3d977;font-size:11px;font-weight:bold;padding:2px 0;"
             )
             self.lbl_media_thumbnail.setVisible(True)
+            self._media_source_row.setVisible(True)
         else:
             self.lbl_media_source.setText("소스: 화면 캡처")
             self.lbl_media_source.setStyleSheet(
                 "color:#888;font-size:11px;font-style:italic;padding:2px 0;"
             )
             self.lbl_media_thumbnail.setVisible(False)
+            self._media_source_row.setVisible(False)
 
     def update_media_thumbnail(self, frame):
-        """앨범아트 프레임을 썸네일로 표시 (비율 유지).
-
-        Args:
-            frame: (rows, cols, 3) uint8 RGB numpy 배열 또는 None
-        """
+        """앨범아트 프레임을 썸네일로 표시."""
         if frame is None or not self._media_active:
             return
         try:
@@ -408,7 +420,7 @@ class DisplayMirrorSection(QWidget):
 
     def collect_params(self):
         """현재 미러링 파라미터를 dict로 반환."""
-        return {
+        params = {
             "smoothing_factor": self.slider_smoothing.value() / 100.0,
             "mirror_n_zones": self.combo_zone_count.currentData() or N_ZONES_PER_LED,
             "color_extract_mode": self.combo_extract_mode.currentData() or "average",
@@ -417,6 +429,12 @@ class DisplayMirrorSection(QWidget):
             "gradient_hue_range": self.slider_gradient_hue.value() / 100.0 * 0.20,
             "gradient_sv_range": self.slider_gradient_sv.value() / 100.0,
         }
+        # ★ 미디어 소스 오버라이드 (미디어 ON 상태에서만 의미 있음)
+        if self._media_active:
+            params["media_source_override"] = (
+                self.combo_media_source.currentData() or "auto"
+            )
+        return params
 
     def get_layout_params(self):
         """감쇠/페널티 파라미터 반환."""
@@ -454,11 +472,13 @@ class DisplayMirrorSection(QWidget):
         else:
             m["decay_radius_per_side"] = {}
             m["parallel_penalty_per_side"] = {}
-        # 색상 효과 (미러링 전용 — mirror 키에 저장)
+        # 색상 효과
         m["color_effect"] = self._color_effect
         m["gradient_speed"] = self.slider_gradient_speed.value()
         m["gradient_hue"] = self.slider_gradient_hue.value()
         m["gradient_sv"] = self.slider_gradient_sv.value()
+        # ★ 미디어 소스 오버라이드
+        m["media_source_override"] = self.combo_media_source.currentData() or "auto"
 
     def load_from_config(self):
         """config에서 상태 복원."""
@@ -507,7 +527,7 @@ class DisplayMirrorSection(QWidget):
                 per_penalty.get(side, m.get("parallel_penalty", 5.0))
             )
 
-        # 색상 효과 (미러링: 3개만)
+        # 색상 효과
         saved_effect = m.get("color_effect", None)
         if saved_effect is None:
             state = self._config.get("options", {}).get("audio_state", {})
@@ -539,3 +559,12 @@ class DisplayMirrorSection(QWidget):
             m.get("gradient_sv", state.get("gradient_sv", 50)))
         self.slider_gradient_sv.blockSignals(False)
         self.lbl_gradient_sv.setText(f"{self.slider_gradient_sv.value()}%")
+
+        # ★ 미디어 소스 오버라이드 복원
+        saved_override = m.get("media_source_override", "auto")
+        self.combo_media_source.blockSignals(True)
+        for i in range(self.combo_media_source.count()):
+            if self.combo_media_source.itemData(i) == saved_override:
+                self.combo_media_source.setCurrentIndex(i)
+                break
+        self.combo_media_source.blockSignals(False)

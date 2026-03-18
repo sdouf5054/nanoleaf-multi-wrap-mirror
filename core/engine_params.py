@@ -12,6 +12,12 @@
   → True이면 화면 캡처 대신 앨범 아트 이미지를 파이프라인에 투입
   → 기존 미러링 옵션(구역, 추출, 스무딩, 색상효과)이 그대로 적용됨
 
+[미디어 소스 자동판별 + 수동 오버라이드]
+- media_source_override: str = "auto"
+  → "auto": 미디어 변경 시 MSE 기반 자동 판별
+  → "media": 항상 앨범아트 사용 (강제)
+  → "mirror": 항상 미러링 사용 (강제)
+
 [설계 원칙]
 - frozen=True: UI가 빌드한 스냅샷을 엔진이 atomic swap
 - 모든 필드에 안전한 기본값 → UI에서 부분 갱신 시에도 동작
@@ -40,6 +46,7 @@ class EngineParams:
     - 색상 (디스플레이 OFF 시): rainbow, base_color, color_effect 등
     - 오디오 계열: audio_mode, 감도, attack/release, 모드별 파라미터
     - flowing 전용: flowing_interval, flowing_speed
+    - 미디어 소스 제어: media_source_override
     """
 
     # ── 토글 상태 ──
@@ -80,6 +87,9 @@ class EngineParams:
     # ── Flowing 전용 (디스플레이+오디오 ON) ──
     flowing_interval: float = 3.0     # palette 갱신 주기 (초)
     flowing_speed: float = 0.08       # 기본 회전 속도
+
+    # ── ★ 미디어 소스 자동판별 + 수동 오버라이드 ──
+    media_source_override: str = "auto"  # "auto" | "media" | "mirror"
 
     # ══════════════════════════════════════════════════════════════
     #  편의 속성
