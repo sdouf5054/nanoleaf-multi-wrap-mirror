@@ -12,6 +12,10 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
 - GradientPhase 도입: gradient_speed 변경 시 색상 점프 방지
 - build_base_color_array_animated / apply_mirror_gradient_modulation에
   gradient_phase= 인자 전달
+
+[Hotfix] flowing 모드에서 미러링 설정(구역 분할/추출 방식/스무딩) 무시
+- _update_screen_colors()에서 flowing일 때 raw per_led_colors만 전달
+- 구역 분할, distinctive 추출, 스무딩은 flowing의 자체 K-means에 불필요
 """
 
 import time
@@ -924,6 +928,7 @@ class UnifiedEngine(BaseEngine):
                 raw_rgb = render_flowing(
                     self._clockwise_t, self._flow_palette,
                     bass, ep.master_brightness, mid=mid,
+                    min_brightness=ep.min_brightness,
                 )
                 self._flow_palette_colors = [
                     blob.color_current.tolist() for blob in self._flow_palette.blobs
@@ -966,14 +971,27 @@ class UnifiedEngine(BaseEngine):
         return raw_rgb, grb_data
 
     def _update_screen_colors(self, ep):
-        """화면 캡처 → per_led_colors 갱신 + base_colors 재빌드."""
+        """화면 캡처 → per_led_colors 갱신 + base_colors 재빌드.
+
+        ★ [Hotfix] flowing 모드에서는 구역 분할/추출 방식/스무딩을 건너뛰고
+        raw per_led_colors만 전달. flowing은 자체 K-means 5색 추출을 하므로
+        미러링 파이프라인의 후처리가 불필요하고 오히려 품질을 떨어뜨림.
+        """
         screen_frame = self._capture.grab()
         if screen_frame is None:
             return
 
         try:
             grid_flat = screen_frame.reshape(-1, 3).astype(np.float32)
-            self._per_led_colors = self._weight_matrix @ grid_flat
+            raw_per_led = self._weight_matrix @ grid_flat
+
+            # ★ flowing 모드: raw per_led_colors만 저장하고 즉시 리턴
+            if ep.audio_mode == AUDIO_FLOWING:
+                self._per_led_colors = raw_per_led
+                return
+
+            # ── 일반 모드: 기존 파이프라인 (distinctive/zone 분할 등) ──
+            self._per_led_colors = raw_per_led
 
             if ep.color_extract_mode == "distinctive":
                 self._per_led_colors, _, self._prev_ambient_color = boost_per_led_vivid(

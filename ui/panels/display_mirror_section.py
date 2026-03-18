@@ -10,6 +10,10 @@
 
 [Phase 7 변경]
 - per-LED 모드에서도 Distinctive 추출 허용
+
+[Hotfix] flowing 모드 활성 시 미러링 설정 비활성화
+- 구역 수, 추출 방식, 스무딩을 비활성화하여 사용자에게 시각적으로 안내
+- flowing은 자체 K-means 추출을 하므로 이 설정들이 적용되지 않음
 """
 
 from PySide6.QtWidgets import (
@@ -74,6 +78,7 @@ class DisplayMirrorSection(QWidget):
         self._config = config
         self._color_effect = COLOR_EFFECT_STATIC
         self._adv_open = False
+        self._flowing_active = False  # ★ flowing 모드 활성 상태
         self._build_ui()
         self.load_from_config()
 
@@ -164,6 +169,14 @@ class DisplayMirrorSection(QWidget):
         zone_row.addStretch()
         gl.addLayout(zone_row)
 
+        # ★ flowing 비활성 힌트 라벨
+        self.lbl_flowing_hint = QLabel("Flowing 모드에서는 자체 색 추출을 사용합니다")
+        self.lbl_flowing_hint.setStyleSheet(
+            "color:#e67e22;font-size:10px;font-style:italic;"
+        )
+        self.lbl_flowing_hint.setVisible(False)
+        gl.addWidget(self.lbl_flowing_hint)
+
         # ── 스무딩 (슬라이더 하나, 0=off) ──
         smooth_row = QHBoxLayout()
         smooth_row.addWidget(QLabel("스무딩 계수:"))
@@ -177,6 +190,9 @@ class DisplayMirrorSection(QWidget):
         self.lbl_smoothing.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         smooth_row.addWidget(self.lbl_smoothing)
         gl.addLayout(smooth_row)
+
+        # ★ 스무딩 행을 감싸는 컨테이너 (비활성화 대상)
+        self._smoothing_row_widgets = [self.slider_smoothing, self.lbl_smoothing]
 
         hint_smooth = QLabel("0 = 스무딩 꺼짐")
         hint_smooth.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
@@ -292,6 +308,31 @@ class DisplayMirrorSection(QWidget):
         self._adv_container.setVisible(self._adv_open)
         self.btn_advanced.setText("▼ 고급 옵션" if self._adv_open else "▶ 고급 옵션")
 
+    # ── ★ flowing 모드 연동 ──────────────────────────────────────
+
+    def set_flowing_active(self, active):
+        """flowing 모드 활성 시 미러링 설정 일부 비활성화.
+
+        비활성화 대상: 구역 수, 추출 방식, 스무딩
+        - flowing은 자체 K-means 5색 추출을 사용하므로 이 설정들이 무의미
+        - 비활성화된 상태에서도 값은 유지됨 (다른 모드로 돌아가면 복원)
+
+        유지 대상: 색상 효과(그라데이션), 고급 옵션(감쇠/페널티)
+        - 색상 효과는 flowing에서도 적용 가능 (향후 확장)
+        - 감쇠/페널티는 weight_matrix에 영향 → flowing의 입력 품질에 간접 영향
+        """
+        self._flowing_active = active
+
+        # 구역 수 + 추출 방식 비활성화
+        self.combo_zone_count.setEnabled(not active)
+        self.combo_extract_mode.setEnabled(not active)
+
+        # 스무딩 비활성화
+        self.slider_smoothing.setEnabled(not active)
+
+        # 힌트 라벨 표시
+        self.lbl_flowing_hint.setVisible(active)
+
     # ── collect / apply / load ───────────────────────────────────
 
     def collect_params(self):
@@ -396,12 +437,10 @@ class DisplayMirrorSection(QWidget):
             )
 
         # 색상 효과 (미러링: 3개만)
-        # mirror 키에 저장된 값 우선, 없으면 audio_state에서 폴백
         saved_effect = m.get("color_effect", None)
         if saved_effect is None:
             state = self._config.get("options", {}).get("audio_state", {})
             saved_effect = state.get("color_effect", COLOR_EFFECT_STATIC)
-        # 무지개(시간순회)는 미러링에서 지원 안 하므로 static으로 폴백
         if saved_effect == "rainbow_time":
             saved_effect = COLOR_EFFECT_STATIC
         effect_idx = _MIRROR_EFFECT_TO_INDEX.get(saved_effect, 0)
@@ -410,7 +449,7 @@ class DisplayMirrorSection(QWidget):
         self.combo_color_effect.blockSignals(False)
         self._on_color_effect_changed(effect_idx)
 
-        # 그라데이션 슬라이더 복원 (mirror 키 우선, 없으면 audio_state 폴백)
+        # 그라데이션 슬라이더 복원
         state = self._config.get("options", {}).get("audio_state", {})
         self.slider_gradient_speed.blockSignals(True)
         self.slider_gradient_speed.setValue(

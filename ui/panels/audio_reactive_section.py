@@ -31,6 +31,7 @@ from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.zone_balance import ZoneBalanceWidget
 from ui.widgets.flow_palette_preview import FlowPalettePreview
 from core.engine_utils import wave_speed_from_slider
+from core.config import save_config
 
 # ── 오디오 모드 ──
 _AUDIO_MODE_ITEMS = [
@@ -71,9 +72,13 @@ class AudioReactiveSection(QWidget):
 
     Signals:
         params_changed(): 오디오 파라미터가 변경되었을 때 emit
+        audio_mode_changed(str): 오디오 모드가 변경되었을 때 emit (모드 키 전달)
+        default_mode_saved(): 기본 모드가 즉시 저장되었을 때 emit (스냅샷 갱신용)
     """
 
     params_changed = Signal()
+    audio_mode_changed = Signal(str)
+    default_mode_saved = Signal()
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -372,6 +377,7 @@ class AudioReactiveSection(QWidget):
         self._load_mode_params(new_key)
         self._update_mode_visibility()
         if not self._updating:
+            self.audio_mode_changed.emit(new_key)
             self.params_changed.emit()
 
     def _on_param_changed(self, _=None):
@@ -381,10 +387,12 @@ class AudioReactiveSection(QWidget):
         self.params_changed.emit()
 
     def _on_set_default_mode(self):
-        """현재 선택된 모드를 기본 오디오 모드로 저장."""
+        """현재 선택된 모드를 기본 오디오 모드로 저장. ★ 즉시 config.json에 반영."""
         self._default_mode = self._mode_key
         state = self._config.setdefault("options", {}).setdefault("audio_state", {})
         state["default_audio_mode"] = self._mode_key
+        save_config(self._config)
+        self.default_mode_saved.emit()  # ★ 스냅샷 갱신 요청
         self._update_default_mode_hint()
         # 버튼 피드백
         self.btn_set_default_mode.setText("✅ 저장됨")

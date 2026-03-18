@@ -292,7 +292,8 @@ class FlowPalette:
 #  렌더링
 # ══════════════════════════════════════════════════════════════════
 
-def render_flowing(clockwise_t, palette, bass, brightness, mid=0.0):
+def render_flowing(clockwise_t, palette, bass, brightness, mid=0.0,
+                   min_brightness=0.05):
     """FlowPalette → (n_leds, 3) float32 RGB.
 
     [Hotfix] drift를 렌더링 시점에 적용:
@@ -305,6 +306,7 @@ def render_flowing(clockwise_t, palette, bass, brightness, mid=0.0):
         bass: float — 현재 bass 에너지 (0~1)
         brightness: float — UI 밝기 설정 (0~1)
         mid: float — 현재 mid 에너지 (0~1, drift 진폭 증가용)
+        min_brightness: float — 무음 시 최소 밝기 (0~1, 슬라이더 값)
 
     Returns:
         (n_leds, 3) float32 — 보정 전 raw RGB 0~255
@@ -336,8 +338,9 @@ def render_flowing(clockwise_t, palette, bass, brightness, mid=0.0):
         color_scaled = render_color * blob.brightness * influence[:, np.newaxis]
         rgb += color_scaled
 
-    # 5. 음악 반응
-    bass_mod = FLOW_BASS_BRIGHT_MIN + bass * FLOW_BASS_BRIGHT_RANGE
+    # 5. 음악 반응 — min_brightness가 무음 시 밝기 바닥을 결정
+    bass_floor = max(min_brightness, 0.02)  # 최소 보장
+    bass_mod = bass_floor + bass * FLOW_BASS_BRIGHT_RANGE
     rgb *= bass_mod * brightness
 
     # 6. Soft clamp (색조 보호)

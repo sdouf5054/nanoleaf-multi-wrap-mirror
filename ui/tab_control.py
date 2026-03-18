@@ -651,6 +651,8 @@ class ControlTab(QWidget):
         self.section_audio = AudioReactiveSection(self.config)
         self.section_audio.set_display_enabled(self._display_on)
         self.section_audio.params_changed.connect(self._on_audio_params_changed)
+        self.section_audio.audio_mode_changed.connect(self._on_audio_mode_changed)
+        self.section_audio.default_mode_saved.connect(self._on_default_mode_saved)
         lay.addWidget(self.section_audio)
 
         panel.set_content_layout(lay)
@@ -708,6 +710,9 @@ class ControlTab(QWidget):
     def _on_audio_toggled(self, checked):
         self._audio_on = checked
         self._update_toggle_panels(animate=True)
+        # ★ 오디오 OFF → flowing 비활성 상태 해제
+        if not checked and hasattr(self, 'section_mirror'):
+            self.section_mirror.set_flowing_active(False)
         if self._is_running:
             self._sync_config_from_ui()
             self.request_mode_switch.emit(self._get_engine_mode_string())
@@ -820,6 +825,20 @@ class ControlTab(QWidget):
         """오디오 파라미터 변경 → 실행 중이면 엔진에 전달."""
         if self._is_running:
             self._push_params_to_engine()
+
+    def _on_audio_mode_changed(self, mode_key):
+        """오디오 모드 변경 → 미러링 패널에 flowing 상태 전달."""
+        is_flowing = (mode_key == "flowing")
+        if hasattr(self, 'section_mirror'):
+            self.section_mirror.set_flowing_active(is_flowing)
+
+    def _on_default_mode_saved(self):
+        """오디오 기본 모드가 즉시 저장됨 → 스냅샷에도 반영하여 종료 시 덮어쓰기 방지."""
+        audio_state = self.config.get("options", {}).get("audio_state", {})
+        snap_state = (self._applied_snapshot
+                      .setdefault("options", {})
+                      .setdefault("audio_state", {}))
+        snap_state["default_audio_mode"] = audio_state.get("default_audio_mode", "pulse")
 
     def _on_preview_toggled(self, checked):
         self.monitor_preview.setVisible(checked)
