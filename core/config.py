@@ -11,6 +11,9 @@
 [Phase 8 변경]
 - _migrate_config: default_mode 마이그레이션 후 삭제 (중복 실행 방지)
 - auto_start_mirror → auto_start_engine 마이그레이션 추가
+
+[Phase 9 변경]
+- ★ 각 audio 모드에 min_brightness 기본값 추가 (모드별 독립 저장)
 """
 
 import json
@@ -66,8 +69,9 @@ DEFAULT_CONFIG = {
         "zone_count": -1,
         "color_extract_mode": "average",      # ★ Phase 3에서 추가됨
     },
-    # ── 오디오 모드별 파라미터 ──
+    # ── 오디오 모드별 파라미터 (★ min_brightness 모드별 독립) ──
     "audio_pulse": {
+        "min_brightness": 5,
         "bass_sens": 100,
         "mid_sens": 100,
         "high_sens": 100,
@@ -80,6 +84,7 @@ DEFAULT_CONFIG = {
         "zone_high": 34,
     },
     "audio_spectrum": {
+        "min_brightness": 5,
         "bass_sens": 100,
         "mid_sens": 100,
         "high_sens": 100,
@@ -92,6 +97,7 @@ DEFAULT_CONFIG = {
         "zone_high": 34,
     },
     "audio_bass_detail": {
+        "min_brightness": 5,
         "bass_sens": 100,
         "mid_sens": 100,
         "high_sens": 100,
@@ -104,6 +110,7 @@ DEFAULT_CONFIG = {
         "zone_high": 26,
     },
     "audio_wave": {                           # ★ 신규
+        "min_brightness": 5,
         "bass_sens": 120,
         "mid_sens": 100,
         "high_sens": 100,
@@ -116,6 +123,7 @@ DEFAULT_CONFIG = {
         "zone_high": 34,
     },
     "audio_dynamic": {                        # ★ 신규
+        "min_brightness": 5,
         "bass_sens": 110,
         "mid_sens": 110,
         "high_sens": 120,
@@ -127,6 +135,7 @@ DEFAULT_CONFIG = {
         "zone_high": 34,
     },
     "audio_flowing": {                        # ★ 신규
+        "min_brightness": 5,
         "bass_sens": 100,
         "mid_sens": 100,
         "high_sens": 100,
@@ -150,9 +159,10 @@ DEFAULT_CONFIG = {
         # ★ 통합: 기존 audio_state + hybrid_state → audio_state 하나로
         "audio_state": {
             "sub_mode": "pulse",
+            "default_audio_mode": "pulse",    # ★ 오디오 기본 모드
             "color_rainbow": True,
             "color_rgb": [255, 0, 80],
-            "min_brightness": 2,
+            "min_brightness": 5,
             "color_effect": "static",
             "gradient_speed": 50,
             "gradient_hue": 40,

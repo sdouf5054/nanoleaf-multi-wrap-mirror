@@ -15,13 +15,16 @@
    - Wave: wave 속도
    - Spectrum/BassDetail: 대역 비율
    - Flowing: palette 프리뷰 + 갱신 주기 + 흐름 속도
+
+[변경]
+- ★ min_brightness를 모드별로 독립 저장/로드
 """
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
-    QComboBox, QFrame, QProgressBar, QGridLayout,
+    QComboBox, QFrame, QProgressBar, QGridLayout, QPushButton,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
@@ -48,14 +51,14 @@ _BASS_ONLY_MODES = {"pulse", "wave", "dynamic"}
 # 대역 비율이 의미 있는 모드
 _BANDED_MODES = {"spectrum", "bass_detail"}
 
-# ── 모드별 기본값 ──
+# ── 모드별 기본값 (★ min_brightness 포함) ──
 _AUDIO_DEFAULTS = {
-    "pulse":       {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
-    "spectrum":    {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
-    "bass_detail": {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 10, "release": 70, "zone_bass": 48, "zone_mid": 26, "zone_high": 26},
-    "wave":        {"bass_sens": 120, "mid_sens": 100, "high_sens": 100, "attack": 60, "release": 40, "wave_speed": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
-    "dynamic":     {"bass_sens": 110, "mid_sens": 110, "high_sens": 120, "attack": 55, "release": 45, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
-    "flowing":     {"bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 40, "release": 60, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    "pulse":       {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    "spectrum":    {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    "bass_detail": {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 10, "release": 70, "zone_bass": 48, "zone_mid": 26, "zone_high": 26},
+    "wave":        {"min_brightness": 5, "bass_sens": 120, "mid_sens": 100, "high_sens": 100, "attack": 60, "release": 40, "wave_speed": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    "dynamic":     {"min_brightness": 5, "bass_sens": 110, "mid_sens": 110, "high_sens": 120, "attack": 55, "release": 45, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
+    "flowing":     {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 40, "release": 60, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
 }
 
 # ── 레이아웃 상수 ──
@@ -76,6 +79,7 @@ class AudioReactiveSection(QWidget):
         super().__init__(parent)
         self._config = config
         self._mode_key = "pulse"
+        self._default_mode = config.get("options", {}).get("audio_state", {}).get("default_audio_mode", "pulse")
         self._display_enabled = False
         self._updating = False  # 재귀 시그널 방지
         self._build_ui()
@@ -131,6 +135,27 @@ class AudioReactiveSection(QWidget):
         self.combo_audio_mode.currentIndexChanged.connect(self._on_mode_changed)
         mode_row.addWidget(self.combo_audio_mode, 1)
         gl.addLayout(mode_row)
+
+        # ── 기본 모드 설정 버튼 + 힌트 (같은 행) ──
+        default_row = QHBoxLayout()
+        self.btn_set_default_mode = QPushButton("현재 모드를 기본으로 설정")
+        self.btn_set_default_mode.setFixedHeight(24)
+        self.btn_set_default_mode.setStyleSheet(
+            "QPushButton{background:#444;color:#bbb;font-size:11px;"
+            "border-radius:4px;padding:2px 10px;}"
+            "QPushButton:hover{background:#555;color:#eee;}"
+        )
+        self.btn_set_default_mode.clicked.connect(self._on_set_default_mode)
+        default_row.addWidget(self.btn_set_default_mode)
+
+        self.lbl_default_mode_hint = QLabel("")
+        self.lbl_default_mode_hint.setStyleSheet(
+            "color:#6a6a74;font-size:10px;font-style:italic;"
+        )
+        default_row.addWidget(self.lbl_default_mode_hint)
+        default_row.addStretch()
+        gl.addLayout(default_row)
+        self._update_default_mode_hint()
 
         # ── 구분선 ──
         gl.addWidget(self._make_sep())
@@ -355,6 +380,28 @@ class AudioReactiveSection(QWidget):
         self._update_labels()
         self.params_changed.emit()
 
+    def _on_set_default_mode(self):
+        """현재 선택된 모드를 기본 오디오 모드로 저장."""
+        self._default_mode = self._mode_key
+        state = self._config.setdefault("options", {}).setdefault("audio_state", {})
+        state["default_audio_mode"] = self._mode_key
+        self._update_default_mode_hint()
+        # 버튼 피드백
+        self.btn_set_default_mode.setText("✅ 저장됨")
+        QTimer.singleShot(2000, lambda: self.btn_set_default_mode.setText(
+            "현재 모드를 기본으로 설정"
+        ))
+
+    def _update_default_mode_hint(self):
+        """기본 모드 힌트 라벨 갱신."""
+        mode_name = dict(_AUDIO_MODE_ITEMS).get(self._default_mode, self._default_mode)
+        # 짧은 이름으로 표시 (설명 부분 제거)
+        short_name = mode_name.split("—")[0].strip() if "—" in mode_name else mode_name
+        hint = f"기본 모드: {short_name}"
+        if self._default_mode == "flowing":
+            hint += "  (디스플레이 OFF 시 Pulse로 대체)"
+        self.lbl_default_mode_hint.setText(hint)
+
     def _update_labels(self):
         """모든 슬라이더 라벨 갱신."""
         self.lbl_min_brightness.setText(f"{self.slider_min_brightness.value()}%")
@@ -406,11 +453,16 @@ class AudioReactiveSection(QWidget):
         if item:
             if enabled:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEnabled)
+                # ★ 디스플레이 ON + flowing이 기본 모드 → 자동 전환
+                if (self._default_mode == "flowing"
+                        and self._mode_key != "flowing"):
+                    self.combo_audio_mode.setCurrentIndex(flowing_idx)
             else:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
                 # 현재 flowing 선택 상태인데 디스플레이 꺼지면 pulse로 복귀
                 if self._mode_key == "flowing":
                     self.combo_audio_mode.setCurrentIndex(0)
+        self._update_default_mode_hint()
 
     # ══════════════════════════════════════════════════════════════
     #  에너지 / 스펙트럼 갱신 (엔진에서 호출)
@@ -435,6 +487,7 @@ class AudioReactiveSection(QWidget):
     def _save_mode_params(self, mode_name):
         """현재 공통 슬라이더 값을 config의 해당 모드 키에 저장."""
         d = self._config.setdefault(f"audio_{mode_name}", {})
+        d["min_brightness"] = self.slider_min_brightness.value()  # ★ 모드별 저장
         d["bass_sens"] = self.slider_bass_sens.value()
         d["mid_sens"] = self.slider_mid_sens.value()
         d["high_sens"] = self.slider_high_sens.value()
@@ -453,6 +506,7 @@ class AudioReactiveSection(QWidget):
         df = _AUDIO_DEFAULTS.get(mode_name, _AUDIO_DEFAULTS["pulse"])
         d = self._config.get(f"audio_{mode_name}", df)
 
+        self.slider_min_brightness.setValue(d.get("min_brightness", df["min_brightness"]))  # ★ 모드별 로드
         self.slider_bass_sens.setValue(d.get("bass_sens", df["bass_sens"]))
         self.slider_mid_sens.setValue(d.get("mid_sens", df["mid_sens"]))
         self.slider_high_sens.setValue(d.get("high_sens", df["high_sens"]))
@@ -503,28 +557,37 @@ class AudioReactiveSection(QWidget):
         self._save_mode_params(self._mode_key)
         state = self._config.setdefault("options", {}).setdefault("audio_state", {})
         state["sub_mode"] = self._mode_key
+        state["default_audio_mode"] = self._default_mode  # ★ 기본 모드 저장
         state["min_brightness"] = self.slider_min_brightness.value()
         state["flowing_interval"] = self.slider_flowing_interval.value()
         state["flowing_speed"] = self.slider_flowing_speed.value()
 
     def load_from_config(self):
-        """config에서 상태 복원."""
+        """config에서 상태 복원.
+
+        ★ 기본 모드(default_audio_mode) 기반으로 초기 모드 결정.
+        sub_mode는 마지막 사용 모드(세션 복원용)이고,
+        default_audio_mode는 사용자가 명시적으로 설정한 기본 모드.
+        기본 모드가 있으면 기본 모드를, 없으면 sub_mode를 사용.
+
+        flowing이 기본인데 디스플레이 OFF면 pulse로 폴백.
+        """
         state = self._config.get("options", {}).get("audio_state", {})
 
-        # 모드 복원
-        saved_mode = state.get("sub_mode", "pulse")
-        if saved_mode not in _MODE_KEYS:
-            saved_mode = "pulse"
-        self._mode_key = saved_mode
-        self.combo_audio_mode.blockSignals(True)
-        self.combo_audio_mode.setCurrentIndex(_MODE_TO_INDEX.get(saved_mode, 0))
-        self.combo_audio_mode.blockSignals(False)
+        # ★ 기본 모드 복원
+        self._default_mode = state.get("default_audio_mode", "pulse")
+        if self._default_mode not in _MODE_KEYS:
+            self._default_mode = "pulse"
 
-        # 최소 밝기
-        min_b = state.get("min_brightness", 5)
-        self.slider_min_brightness.blockSignals(True)
-        self.slider_min_brightness.setValue(min_b)
-        self.slider_min_brightness.blockSignals(False)
+        # 초기 모드 결정: 기본 모드 우선, flowing 폴백 처리
+        initial_mode = self._default_mode
+        if initial_mode == "flowing" and not self._display_enabled:
+            initial_mode = "pulse"
+
+        self._mode_key = initial_mode
+        self.combo_audio_mode.blockSignals(True)
+        self.combo_audio_mode.setCurrentIndex(_MODE_TO_INDEX.get(initial_mode, 0))
+        self.combo_audio_mode.blockSignals(False)
 
         # flowing 슬라이더
         self.slider_flowing_interval.blockSignals(True)
@@ -534,10 +597,11 @@ class AudioReactiveSection(QWidget):
         self.slider_flowing_speed.setValue(state.get("flowing_speed", 50))
         self.slider_flowing_speed.blockSignals(False)
 
-        # 모드별 파라미터
-        self._load_mode_params(saved_mode)
+        # ★ 모드별 파라미터 로드 (min_brightness 포함)
+        self._load_mode_params(initial_mode)
         self._update_mode_visibility()
         self._update_labels()
+        self._update_default_mode_hint()
 
     def cleanup(self):
         """종료 시 현재 모드 파라미터 저장."""

@@ -18,6 +18,9 @@
   request_engine_pause()      — 일시정지 토글
   request_mode_switch(str)    — 실행 중 모드 전환 요청
   config_applied()            — config 저장됨
+
+[변경]
+- ★ 토글 기본값 버튼 옆에 현재 기본값 힌트 라벨 추가
 """
 
 import os
@@ -232,7 +235,7 @@ class ToggleSwitch(QCheckBox):
         # ── 텍스트 ──
         text = self.text()
         if text:
-            painter.setPen(QColor("#d0d0d0"))
+            painter.setPen(QColor("#000000"))
             font = self.font()
             painter.setFont(font)
             text_x = tw + self._SPACING
@@ -453,7 +456,8 @@ class ControlTab(QWidget):
         toggle_row.addStretch()
         lay.addLayout(toggle_row)
 
-        # 기본값 설정 버튼
+        # ★ 기본값 설정 버튼 + 힌트 (같은 행)
+        default_toggle_row = QHBoxLayout()
         self.btn_set_default = QPushButton("현재 토글 설정을 기본값으로 설정")
         self.btn_set_default.setFixedHeight(24)
         self.btn_set_default.setStyleSheet(
@@ -462,7 +466,16 @@ class ControlTab(QWidget):
             "QPushButton:hover{background:#555;color:#eee;}"
         )
         self.btn_set_default.clicked.connect(self._on_set_default_toggles)
-        lay.addWidget(self.btn_set_default, alignment=Qt.AlignmentFlag.AlignLeft)
+        default_toggle_row.addWidget(self.btn_set_default)
+
+        self.lbl_toggle_default_hint = QLabel("")
+        self.lbl_toggle_default_hint.setStyleSheet(
+            "color:#6a6a74;font-size:10px;font-style:italic;"
+        )
+        default_toggle_row.addWidget(self.lbl_toggle_default_hint)
+        default_toggle_row.addStretch()
+        lay.addLayout(default_toggle_row)
+        self._update_toggle_default_hint()
 
         # 구분선
         lay.addWidget(self._make_separator())
@@ -748,10 +761,22 @@ class ControlTab(QWidget):
         self._applied_snapshot.setdefault("options", {})["default_display_enabled"] = self._display_on
         self._applied_snapshot.setdefault("options", {})["default_audio_enabled"] = self._audio_on
         self.config_applied.emit()
+        self._update_toggle_default_hint()
         self.btn_set_default.setText("✅ 저장됨")
         QTimer.singleShot(2000, lambda: self.btn_set_default.setText(
             "현재 토글 설정을 기본값으로 설정"
         ))
+
+    def _update_toggle_default_hint(self):
+        """★ 토글 기본값 힌트 라벨 갱신."""
+        opts = self.config.get("options", {})
+        d_on = opts.get("default_display_enabled", False)
+        a_on = opts.get("default_audio_enabled", False)
+        d_str = "ON" if d_on else "OFF"
+        a_str = "ON" if a_on else "OFF"
+        self.lbl_toggle_default_hint.setText(
+            f"기본값: 디스플레이 {d_str} / 오디오 {a_str}"
+        )
 
     # ══════════════════════════════════════════════════════════════
     #  기타 이벤트
@@ -857,6 +882,8 @@ class ControlTab(QWidget):
         self.section_mirror.load_from_config()
         # Phase 3: 오디오 패널
         self.section_audio.load_from_config()
+        # ★ 토글 기본값 힌트 갱신
+        self._update_toggle_default_hint()
 
     # ══════════════════════════════════════════════════════════════
     #  외부 인터페이스 (MainWindow, 엔진에서 호출)

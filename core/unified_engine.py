@@ -541,7 +541,7 @@ class UnifiedEngine(BaseEngine):
         new_last_good = time.monotonic()
         new_led_off = False
         if led_turned_off:
-            self.status_changed.emit("미러링 실행 중")
+            self.status_changed.emit("디스플레이 미러링 실행 중")
 
         # ── 해상도 변경 감지 ──
         try:
@@ -1092,10 +1092,10 @@ class UnifiedEngine(BaseEngine):
     def _emit_status_message(self, ep):
         """토글 조합에 따른 상태 메시지."""
         if ep.display_enabled and ep.audio_enabled:
-            self.status_changed.emit("하이브리드 비주얼라이저 실행 중")
+            self.status_changed.emit("디스플레이 + 오디오 실행 중")
         elif ep.display_enabled:
-            self.status_changed.emit("미러링 실행 중")
+            self.status_changed.emit("디스플레이 미러링 실행 중")
         elif ep.audio_enabled:
-            self.status_changed.emit("오디오 비주얼라이저 실행 중")
+            self.status_changed.emit("오디오 반응 실행 중")
         else:
             self.status_changed.emit("정적 LED 실행 중")
