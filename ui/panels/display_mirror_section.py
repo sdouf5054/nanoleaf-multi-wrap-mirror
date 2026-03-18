@@ -95,6 +95,7 @@ class DisplayMirrorSection(QWidget):
         self._adv_open = False
         self._flowing_active = False
         self._media_active = False  # ★ 미디어 연동 활성 상태
+        self._media_toggle_count = 0  # ★ 판별 결과 수동 반전 트리거 카운트
         self._build_ui()
         self.load_from_config()
 
@@ -139,6 +140,19 @@ class DisplayMirrorSection(QWidget):
             self.combo_media_source.addItem(label, key)
         self.combo_media_source.currentIndexChanged.connect(self._on_param_changed)
         msr.addWidget(self.combo_media_source)
+
+        # ── ★ 판별 결과 수동 반전 버튼 (자동 모드일 때만 활성) ──
+        self.btn_toggle_source = QPushButton("🔁 전환")
+        self.btn_toggle_source.setToolTip(
+            "자동 판별 결과가 틀렸을 때, 이번 곡에 한해 소스를 반대로 뒤집습니다.\n"
+            "다음 곡이 재생되면 다시 자동 판별이 시작됩니다."
+        )
+        self.btn_toggle_source.setStyleSheet(
+            "QPushButton { padding: 2px 8px; font-size: 11px; }"
+        )
+        self.btn_toggle_source.setEnabled(False)  # 초기값: 자동이 아니면 비활성
+        self.btn_toggle_source.clicked.connect(self._on_toggle_source_clicked)
+        msr.addWidget(self.btn_toggle_source)
 
         self.lbl_media_source_hint = QLabel(
             "자동: 영상→미러링, 음원→앨범아트"
@@ -356,6 +370,19 @@ class DisplayMirrorSection(QWidget):
         self.lbl_gradient_hue.setText(f"{self.slider_gradient_hue.value()}%")
         self.lbl_gradient_sv.setText(f"{self.slider_gradient_sv.value()}%")
         self.lbl_smoothing.setText(f"{self.slider_smoothing.value() / 100:.2f}")
+        # ★ 소스 선택이 '자동'일 때만 전환 버튼 활성화
+        if hasattr(self, "btn_toggle_source"):
+            is_auto = self.combo_media_source.currentData() == "auto"
+            self.btn_toggle_source.setEnabled(is_auto)
+        self.params_changed.emit()
+
+    def _on_toggle_source_clicked(self):
+        """전환 버튼 클릭 — 엔진의 현재 자동 판별 결과를 즉시 반전시키는 트리거를 보냄.
+
+        콤보박스는 '자동 판별' 그대로 유지되며, 다음 곡이 재생되면
+        자동으로 새 판별이 시작됩니다.
+        """
+        self._media_toggle_count += 1
         self.params_changed.emit()
 
     def _on_per_side_toggled(self, state):
@@ -389,6 +416,10 @@ class DisplayMirrorSection(QWidget):
             )
             self.lbl_media_thumbnail.setVisible(True)
             self._media_source_row.setVisible(True)
+            # ★ row가 표시될 때 버튼 활성화 상태 동기화
+            self.btn_toggle_source.setEnabled(
+                self.combo_media_source.currentData() == "auto"
+            )
         else:
             self.lbl_media_source.setText("소스: 화면 캡처")
             self.lbl_media_source.setStyleSheet(
@@ -434,6 +465,8 @@ class DisplayMirrorSection(QWidget):
             params["media_source_override"] = (
                 self.combo_media_source.currentData() or "auto"
             )
+            # ★ 자동 판별 결과 반전 트리거 카운트 전달
+            params["media_decision_toggle_count"] = self._media_toggle_count
         return params
 
     def get_layout_params(self):
@@ -568,3 +601,9 @@ class DisplayMirrorSection(QWidget):
                 self.combo_media_source.setCurrentIndex(i)
                 break
         self.combo_media_source.blockSignals(False)
+
+        # ★ 버튼 활성화 상태 초기 동기화 (blockSignals로 인해 _on_param_changed가 미호출되므로)
+        if hasattr(self, "btn_toggle_source"):
+            self.btn_toggle_source.setEnabled(
+                self.combo_media_source.currentData() == "auto"
+            )

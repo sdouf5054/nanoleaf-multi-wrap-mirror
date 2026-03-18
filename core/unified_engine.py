@@ -15,12 +15,15 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
   - 구역 수, 추출 방식, 스무딩, 색상 효과가 전부 그대로 작동
   - 하이브리드(D+A ON)에서도 동일: flowing 포함 모든 오디오 모드 적용
 
-[미디어 소스 자동판별 v3 — 미디어 변경 시점 기반]
-  미디어(곡/영상)가 바뀌면:
-  1. 초기 소스 = 앨범아트 (즉시 적용)
-  2. 판별 기간(DETECT_DURATION초) 동안 화면 MSE 측정
-  3. MSE가 높으면(영상) → 미러링으로 전환, 낮으면(음원) → 앨범아트 유지
-  4. 판별 완료 후 다음 미디어 변경까지 결과 유지
+[미디어 소스 자동판별 v5 — 2-phase]
+  Phase 1: 미디어 변경 직후 빠른 1차 판별 (초기값: 앨범아트)
+    - DETECT_DURATION(3초) 동안 MSE 측정
+    - 연속 PHASE1_DYNAMIC_COUNT(12회) 초과 → 미러링 확정
+    - 기간 종료까지 미확정 → 앨범아트 확정
+    - 확정 후 Phase 2 진입
+  Phase 2: 판별 완료 후 지속 모니터링
+    - 앨범아트 상태: 연속 PHASE2_DYNAMIC_COUNT(20회) 초과 → 미러링 전환
+    - 미러링 상태: 연속 PHASE2_STATIC_COUNT(10회) 미만 → 앨범아트 전환
   
   media_source_override로 수동 오버라이드:
   - "auto": 위 자동 판별
@@ -83,11 +86,18 @@ _STALE_THRESHOLD = 3.0
 _STALE_RECREATE_COOLDOWN = 3.0
 _STALE_LED_OFF_THRESHOLD = 10.0
 
-# ── ★ 미디어 소스 자동판별 상수 (v3) ──
-MEDIA_DETECT_DURATION = 8.0       # 판별 기간 (초) — 미디어 변경 후 이 기간 동안 MSE 측정
-MEDIA_DETECT_INTERVAL = 0.3       # 판별 중 MSE 측정 주기 (초)
-MEDIA_DETECT_MSE_THRESHOLD = 500.0  # MSE 임계값 — 이상이면 "영상" (그리드 크기 프레임 기준)
-MEDIA_DETECT_DYNAMIC_COUNT = 5    # 연속 N회 MSE 초과 시 "영상"으로 확정
+# ── ★ 미디어 소스 자동판별 상수 (v5: 2-phase) ──
+MEDIA_DETECT_INTERVAL = 0.1       # MSE 측정 주기 (초) — 전 phase 공통
+
+# Phase 1: 미디어 변경 직후 빠른 1차 판별 (초기값: 앨범아트)
+MEDIA_DETECT_DURATION = 3.0                  # Phase 1 판별 기간 (초)
+MEDIA_DETECT_PHASE1_MSE_THRESHOLD = 8.0      # MSE 이상이면 동적 hit
+MEDIA_DETECT_PHASE1_DYNAMIC_COUNT = 8       # 연속 N회 → 미러링으로 확정 (약 1.2초)
+
+# Phase 2: 판별 완료 후 지속 모니터링 (상황 변화 감지)
+MEDIA_DETECT_PHASE2_MSE_THRESHOLD = 50.0    # Phase 2 공통 MSE 임계값
+MEDIA_DETECT_PHASE2_DYNAMIC_COUNT = 12       # 연속 N회 초과 → 미러링 전환 (약 2.0초)
+MEDIA_DETECT_PHASE2_STATIC_COUNT  = 18       # 연속 N회 미만 → 앨범아트 전환 (약 1.0초)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -199,13 +209,16 @@ class UnifiedEngine(BaseEngine):
         self._prev_media_enabled: bool = False
 
         # ── ★ 미디어 소스 자동판별 상태 (v3) ──
-        self._media_detect_state = "idle"       # "idle" | "detecting" | "decided"
+        self._media_detect_state = "idle"       # "idle" | "phase1" | "holding" | "phase2"
         self._media_detect_decision = "media"   # "media" | "mirror" — 현재 결정
         self._media_detect_start_time = 0.0     # 판별 시작 시각
         self._media_detect_last_check = 0.0     # 마지막 MSE 측정 시각
-        self._media_detect_dynamic_hits = 0     # 연속 MSE 초과 횟수
+        self._media_detect_phase1_dynamic_hits = 0  # Phase 1: 연속 동적 hit
+        self._media_detect_phase2_dynamic_hits = 0  # Phase 2: 연속 동적 hit (미러링 전환용)
+        self._media_detect_phase2_static_hits  = 0  # Phase 2: 연속 정적 hit (앨범아트 전환용)
         self._media_detect_prev_frame: Optional[np.ndarray] = None
         self._media_detect_last_hash = 0        # 마지막 미디어 hash — 변경 감지용
+        self._prev_media_toggle_count = 0       # ★ 수동 판별 반전 트리거 감지용
 
     # ══════════════════════════════════════════════════════════════
     #  ★ 캡처 소스 선택 — 미디어 연동의 핵심 (v3)
@@ -249,15 +262,18 @@ class UnifiedEngine(BaseEngine):
         return None
 
     def _resolve_media_source(self, media_frame):
-        """미디어 소스 자동판별 — 미디어 변경 시점 기반.
+        """미디어 소스 자동판별 — 2-phase (v5).
 
-        [흐름]
-        1. 미디어 변경 감지 → 판별 시작 (초기값: "media" = 앨범아트)
-        2. DETECT_DURATION 동안 주기적으로 화면 MSE 측정
-        3. MSE가 높으면 "영상" hit 카운트 증가
-        4. 연속 DETECT_DYNAMIC_COUNT회 초과 → "mirror"로 확정
-        5. 판별 기간 종료 시 hit 부족 → "media" 유지
-        6. 다음 미디어 변경까지 결과 유지
+        [Phase 1] 미디어 변경 직후 빠른 1차 판별
+          초기값: "media" (앨범아트)
+          MEDIA_DETECT_DURATION 동안 MSE 측정
+          연속 PHASE1_DYNAMIC_COUNT회 초과 → "mirror" 확정 → Phase 2로
+          기간 종료까지 미확정 → "media" 확정 → Phase 2로
+
+        [Phase 2] 판별 완료 후 지속 모니터링
+          현재 "media": 연속 PHASE2_DYNAMIC_COUNT회 초과 → "mirror" 전환
+          현재 "mirror": 연속 PHASE2_STATIC_COUNT회 미만 → "media" 전환
+          전환 시 상대방 카운터 리셋
 
         Returns:
             "media" 또는 "mirror"
@@ -269,46 +285,24 @@ class UnifiedEngine(BaseEngine):
         current_hash = hash((info.get("title", ""), info.get("artist", ""))) if info else 0
 
         if current_hash != self._media_detect_last_hash and current_hash != 0:
-            # 새 미디어 → 판별 시작
             self._media_detect_last_hash = current_hash
-            self._media_detect_state = "detecting"
-            self._media_detect_decision = "media"  # 초기값: 앨범아트
+            self._media_detect_state = "phase1"
+            self._media_detect_decision = "media"   # 초기값: 앨범아트
             self._media_detect_start_time = now
             self._media_detect_last_check = 0.0
-            self._media_detect_dynamic_hits = 0
+            self._media_detect_phase1_dynamic_hits = 0
+            self._media_detect_phase2_dynamic_hits = 0
+            self._media_detect_phase2_static_hits  = 0
             self._media_detect_prev_frame = None
-
             self.status_changed.emit(
-                f"[미디어] 새 미디어 감지 — {MEDIA_DETECT_DURATION:.0f}초간 소스 판별 중..."
+                f"[미디어] 새 미디어 감지 — Phase 1 판별 시작 ({MEDIA_DETECT_DURATION:.0f}초)..."
             )
 
-        # ── 판별 완료 상태 → 결정 유지 ──
-        if self._media_detect_state == "decided":
-            return self._media_detect_decision
-
-        # ── idle (미디어 없음) → 앨범아트 ──
+        # ── idle → 앨범아트 ──
         if self._media_detect_state == "idle":
             return "media"
 
-        # ── detecting: 판별 기간 중 ──
-        elapsed = now - self._media_detect_start_time
-
-        # 판별 기간 종료
-        if elapsed >= MEDIA_DETECT_DURATION:
-            self._media_detect_state = "decided"
-            # decision은 이미 설정됨 (초기 "media" 또는 중간에 "mirror"로 변경)
-            source_label = "앨범아트" if self._media_detect_decision == "media" else "미러링"
-            self.status_changed.emit(
-                f"[미디어] 소스 판별 완료 → {source_label}"
-            )
-            return self._media_detect_decision
-
-        # 이미 "mirror"로 확정됐으면 기간 끝날 때까지 기다릴 필요 없음
-        if self._media_detect_decision == "mirror":
-            self._media_detect_state = "decided"
-            return "mirror"
-
-        # 측정 주기 체크
+        # ── 측정 주기 체크 (phase1/phase2 공통) ──
         if now - self._media_detect_last_check < MEDIA_DETECT_INTERVAL:
             return self._media_detect_decision
 
@@ -339,23 +333,92 @@ class UnifiedEngine(BaseEngine):
 
         self._media_detect_prev_frame = current_capture.copy()
 
-        # ── 판정 ──
-        if mse > MEDIA_DETECT_MSE_THRESHOLD:
-            self._media_detect_dynamic_hits += 1
-            self.status_changed.emit(
-                f"[미디어] 판별 중: MSE={mse:.0f} (hit {self._media_detect_dynamic_hits}/{MEDIA_DETECT_DYNAMIC_COUNT}) "
-                f"[{elapsed:.1f}/{MEDIA_DETECT_DURATION:.0f}s]"
-            )
-            if self._media_detect_dynamic_hits >= MEDIA_DETECT_DYNAMIC_COUNT:
-                self._media_detect_decision = "mirror"
-                self._media_detect_state = "decided"
-                self.status_changed.emit("[미디어] 영상 감지 → 미러링으로 전환")
-                return "mirror"
-        else:
-            # MSE 낮음 → hit 리셋 (연속이어야 하므로)
-            self._media_detect_dynamic_hits = 0
+        # ════════════════════════════════════════
+        #  Holding: 수동 전환 후 대기 → phase2 진입
+        # ════════════════════════════════════════
+        if self._media_detect_state == "holding":
+            elapsed = now - self._media_detect_start_time
+            if elapsed >= MEDIA_DETECT_DURATION:
+                self._media_detect_state = "phase2"
+                self._media_detect_phase2_dynamic_hits = 0
+                self._media_detect_phase2_static_hits  = 0
+                lbl = "앨범아트" if self._media_detect_decision == "media" else "미러링"
+                self.status_changed.emit(f"[미디어] 유지 완료 → Phase 2 진입 ({lbl})")
+            return self._media_detect_decision
+
+        # ════════════════════════════════════════
+        #  Phase 1: 빠른 1차 판별
+        # ════════════════════════════════════════
+        if self._media_detect_state == "phase1":
+            elapsed = now - self._media_detect_start_time
+
+            if mse >= MEDIA_DETECT_PHASE1_MSE_THRESHOLD:
+                self._media_detect_phase1_dynamic_hits += 1
+                self.status_changed.emit(
+                    f"[미디어] Phase 1: MSE={mse:.1f} "
+                    f"(dynamic {self._media_detect_phase1_dynamic_hits}/{MEDIA_DETECT_PHASE1_DYNAMIC_COUNT}) "
+                    f"[{elapsed:.1f}/{MEDIA_DETECT_DURATION:.0f}s]"
+                )
+                if self._media_detect_phase1_dynamic_hits >= MEDIA_DETECT_PHASE1_DYNAMIC_COUNT:
+                    self._media_detect_decision = "mirror"
+                    self._media_detect_state = "phase2"
+                    self._media_detect_phase2_dynamic_hits = 0
+                    self._media_detect_phase2_static_hits  = 0
+                    self.status_changed.emit("[미디어] Phase 1 완료 → 미러링 확정, Phase 2 진입")
+            else:
+                # MSE 낮음 → 연속 hit 리셋
+                self._media_detect_phase1_dynamic_hits = 0
+
+            # Phase 1 기간 종료 → 앨범아트로 확정, Phase 2 진입
+            if self._media_detect_state == "phase1" and elapsed >= MEDIA_DETECT_DURATION:
+                self._media_detect_decision = "media"
+                self._media_detect_state = "phase2"
+                self._media_detect_phase2_dynamic_hits = 0
+                self._media_detect_phase2_static_hits  = 0
+                self.status_changed.emit("[미디어] Phase 1 완료 → 앨범아트 확정, Phase 2 진입")
+
+            return self._media_detect_decision
+
+        # ════════════════════════════════════════
+        #  Phase 2: 지속 모니터링
+        # ════════════════════════════════════════
+        if self._media_detect_state == "phase2":
+            if self._media_detect_decision == "media":
+                # 현재 앨범아트 → 동적 hit 누적 시 미러링 전환
+                if mse >= MEDIA_DETECT_PHASE2_MSE_THRESHOLD:
+                    self._media_detect_phase2_dynamic_hits += 1
+                    self._media_detect_phase2_static_hits  = 0
+                    self.status_changed.emit(
+                        f"[미디어] Phase 2 (앨범아트): MSE={mse:.1f} "
+                        f"(dynamic {self._media_detect_phase2_dynamic_hits}/{MEDIA_DETECT_PHASE2_DYNAMIC_COUNT})"
+                    )
+                    if self._media_detect_phase2_dynamic_hits >= MEDIA_DETECT_PHASE2_DYNAMIC_COUNT:
+                        self._media_detect_decision = "mirror"
+                        self._media_detect_phase2_dynamic_hits = 0
+                        self._media_detect_phase2_static_hits  = 0
+                        self.status_changed.emit("[미디어] Phase 2 → 화면 활동 감지, 미러링으로 전환")
+                else:
+                    self._media_detect_phase2_dynamic_hits = 0
+
+            else:  # "mirror"
+                # 현재 미러링 → 정적 hit 누적 시 앨범아트 전환
+                if mse < MEDIA_DETECT_PHASE2_MSE_THRESHOLD:
+                    self._media_detect_phase2_static_hits  += 1
+                    self._media_detect_phase2_dynamic_hits = 0
+                    self.status_changed.emit(
+                        f"[미디어] Phase 2 (미러링): MSE={mse:.1f} "
+                        f"(static {self._media_detect_phase2_static_hits}/{MEDIA_DETECT_PHASE2_STATIC_COUNT})"
+                    )
+                    if self._media_detect_phase2_static_hits >= MEDIA_DETECT_PHASE2_STATIC_COUNT:
+                        self._media_detect_decision = "media"
+                        self._media_detect_phase2_dynamic_hits = 0
+                        self._media_detect_phase2_static_hits  = 0
+                        self.status_changed.emit("[미디어] Phase 2 → 화면 정적 감지, 앨범아트로 전환")
+                else:
+                    self._media_detect_phase2_static_hits = 0
 
         return self._media_detect_decision
+
 
     # ══════════════════════════════════════════════════════════════
     #  초기화
@@ -654,6 +717,26 @@ class UnifiedEngine(BaseEngine):
                 # 미디어 연동 OFF → 판별 상태 리셋
                 self._media_detect_state = "idle"
                 self._media_detect_last_hash = 0
+
+        # ── ★ 자동 판별 결과 수동 반전 처리 (버튼 클릭 감지) ──
+        if (ep.media_source_override == "auto"
+                and ep.media_decision_toggle_count != self._prev_media_toggle_count):
+            self._prev_media_toggle_count = ep.media_decision_toggle_count
+            # 결과 반전 후 phase1로 재진입 — 3초 유지 뒤 phase2로 자동 전환
+            if self._media_detect_decision == "media":
+                self._media_detect_decision = "mirror"
+            else:
+                self._media_detect_decision = "media"
+            self._media_detect_state = "holding"
+            self._media_detect_start_time = time.monotonic()
+            self._media_detect_phase1_dynamic_hits = 0
+            self._media_detect_phase2_dynamic_hits = 0
+            self._media_detect_phase2_static_hits  = 0
+            self._media_detect_prev_frame = None
+            lbl = "앨범아트" if self._media_detect_decision == "media" else "미러링"
+            self.status_changed.emit(
+                f"[미디어] 수동 전환 → {lbl} ({MEDIA_DETECT_DURATION:.0f}초 유지 후 Phase 2 진입)"
+            )
 
         # ── 레이아웃 dirty ──
         if ep.display_enabled:

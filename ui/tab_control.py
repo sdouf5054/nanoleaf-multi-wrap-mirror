@@ -638,6 +638,10 @@ class ControlTab(QWidget):
         self.panel_display_on.set_expanded(self._display_on, animate=animate)
         self.panel_audio_on.set_expanded(self._audio_on, animate=animate)
 
+        # ★ 미러링 패널 소스 상태 동기화 (초기 로드 시 포함)
+        if hasattr(self, 'section_mirror'):
+            self.section_mirror.set_media_active(self._media_on and self._display_on)
+
     def _on_set_default_toggles(self):
         opts = self.config.setdefault("options", {})
         opts["default_display_enabled"] = self._display_on

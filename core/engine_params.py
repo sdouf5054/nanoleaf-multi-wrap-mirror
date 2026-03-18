@@ -90,6 +90,7 @@ class EngineParams:
 
     # ── ★ 미디어 소스 자동판별 + 수동 오버라이드 ──
     media_source_override: str = "auto"  # "auto" | "media" | "mirror"
+    media_decision_toggle_count: int = 0  # ★ 자동 판별 결과 수동 플립용 트리거 (증가할 때마다 반전)
 
     # ══════════════════════════════════════════════════════════════
     #  편의 속성
