@@ -124,3 +124,59 @@ class ColorPipeline:
         grb[:, 2] = rgb_u8[:, 2]  # B
 
         return grb.tobytes(), rgb
+
+    def process_raw(self, raw_rgb, prev_colors=None):
+        """이미 weight_matrix를 거친 raw RGB에 보정 파이프라인 적용.
+ 
+        process()와 동일한 감마/WB/밝기/채널믹싱/스무딩/GRB 변환을 적용하되,
+        다운샘플과 행렬곱 단계를 건너뜀.
+ 
+        미러링 그라데이션 효과에서 사용:
+        weight_matrix 결과에 HSV 변조를 적용한 후,
+        process()와 동일한 보정 경로를 보장.
+ 
+        Args:
+            raw_rgb: (n_leds, 3) float32 — RGB 0~255 (변조된 LED 색상)
+            prev_colors: (n_leds, 3) float32 또는 None — 이전 프레임 (스무딩용)
+ 
+        Returns:
+            (grb_bytes, rgb_float) — process()와 동일한 형식
+        """
+        rgb = raw_rgb.copy()
+ 
+        # 2. 감마 (LUT take)
+        idx = np.clip(rgb, 0, 255).astype(np.uint8)
+        R = np.take(self._lut_r_gamma, idx[:, 0])
+        G = np.take(self._lut_g_gamma, idx[:, 1])
+        B = np.take(self._lut_b_full,  idx[:, 2])
+ 
+        # 3. 채널 믹싱 (G→R bleed)
+        if self.green_red_bleed > 0:
+            bleed = np.maximum(0, G - R)
+            bleed *= self.green_red_bleed
+            R += bleed
+ 
+        # 4. WB + 밝기 (R, G만)
+        R *= self._wb_bright_r
+        G *= self._wb_bright_g
+ 
+        # 5. rgb 배열 재조립
+        rgb[:, 0] = R
+        rgb[:, 1] = G
+        rgb[:, 2] = B
+ 
+        # 6. 스무딩
+        if prev_colors is not None and self.smoothing_enabled and self.smoothing > 0:
+            rgb *= (1.0 - self.smoothing)
+            rgb += prev_colors * self.smoothing
+ 
+        # 7. clamp + GRB 변환
+        np.clip(rgb, 0, 255, out=rgb)
+        rgb_u8 = rgb.astype(np.uint8)
+ 
+        grb = self._grb_buf
+        grb[:, 0] = rgb_u8[:, 1]  # G
+        grb[:, 1] = rgb_u8[:, 0]  # R
+        grb[:, 2] = rgb_u8[:, 2]  # B
+ 
+        return grb.tobytes(), rgb

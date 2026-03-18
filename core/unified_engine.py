@@ -47,6 +47,8 @@ from core.engine_utils import (
     DynamicRipple, dynamic_tick_ripples,
     AUDIO_PULSE, AUDIO_SPECTRUM, AUDIO_BASS_DETAIL,
     AUDIO_WAVE, AUDIO_DYNAMIC, AUDIO_FLOWING,
+    apply_mirror_gradient_modulation,
+    _has_mirror_gradient_effect,
 )
 from core.color_extract import extract_zone_dominant
 from core.vivid_extract import (
@@ -578,38 +580,105 @@ class UnifiedEngine(BaseEngine):
                 return None
 
         # ── 색상 연산 ──
+ 
+        # ★ 그라데이션 효과가 실질적으로 활성화되어 있는지 판단
+        #   슬라이더 0%이거나 정적이면 False → 기존 경로 그대로
+        _gradient_active = _has_mirror_gradient_effect(
+            ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range
+        )
+ 
         if self._zone_map is not None:
-            # N구역 모드
+            # ── N구역 모드 ──
             try:
                 grb_data, raw_preview = self._compute_mirror_zone_colors(frame, ep)
+                if _gradient_active:
+                    raw_preview = apply_mirror_gradient_modulation(
+                        raw_preview, self._clockwise_t, time.monotonic(),
+                        color_effect=ep.color_effect,
+                        gradient_speed=ep.gradient_speed,
+                        gradient_hue_range=ep.gradient_hue_range,
+                        gradient_sv_range=ep.gradient_sv_range,
+                    )
+                    leds_mod = raw_preview.copy()
+                    self._mirror_cc.apply(leds_mod)
+                    grb_data = leds_to_grb(leds_mod)
                 new_prev = None
             except (ValueError, IndexError, FloatingPointError):
                 return None
+ 
         elif ep.color_extract_mode == "distinctive":
-            # per-LED + distinctive: vivid boost 직접 적용 (ColorPipeline 우회)
+            # ── per-LED + distinctive ──
             try:
                 grb_data, raw_preview, new_prev = self._compute_mirror_per_led_distinctive(
                     frame, ep, prev_colors
                 )
+                if _gradient_active:
+                    raw_preview = apply_mirror_gradient_modulation(
+                        raw_preview, self._clockwise_t, time.monotonic(),
+                        color_effect=ep.color_effect,
+                        gradient_speed=ep.gradient_speed,
+                        gradient_hue_range=ep.gradient_hue_range,
+                        gradient_sv_range=ep.gradient_sv_range,
+                    )
+                    leds_mod = raw_preview.copy()
+                    self._mirror_cc.apply(leds_mod)
+                    grb_data = leds_to_grb(leds_mod)
             except (ValueError, IndexError, FloatingPointError):
                 return None
+ 
         else:
-            # per-LED + average: ColorPipeline (스무딩 포함)
-            try:
-                grb_data, rgb_colors = pipeline.process(frame, prev_colors)
-                new_prev = rgb_colors
-            except (ValueError, IndexError, FloatingPointError):
-                return None
-
-            # 프리뷰용 raw RGB
-            if frame_count % 3 == 0:
+            # ── per-LED + average ──
+            if not _gradient_active:
+                # ★ 정적 또는 변조 없음: 기존 pipeline 경로 그대로
                 try:
-                    grid_flat = frame.reshape(-1, 3).astype(np.float32)
-                    raw_preview = self._weight_matrix @ grid_flat
-                except Exception:
+                    grb_data, rgb_colors = pipeline.process(frame, prev_colors)
+                    new_prev = rgb_colors
+                except (ValueError, IndexError, FloatingPointError):
+                    return None
+ 
+                if frame_count % 3 == 0:
+                    try:
+                        grid_flat = frame.reshape(-1, 3).astype(np.float32)
+                        raw_preview = self._weight_matrix @ grid_flat
+                    except Exception:
+                        raw_preview = rgb_colors
+                else:
                     raw_preview = rgb_colors
+ 
             else:
-                raw_preview = rgb_colors
+                # ★ 그라데이션 활성: raw RGB에 변조 → pipeline.process_raw()
+                try:
+                    import cv2
+                    # pipeline.process()의 1단계: 다운샘플 + 행렬곱
+                    grid = cv2.resize(
+                        frame,
+                        (pipeline.grid_cols, pipeline.grid_rows),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
+                    grid_flat = grid.reshape(-1, 3).astype(np.float32)
+                    raw_rgb = pipeline.weight_matrix @ grid_flat
+                except (ValueError, IndexError):
+                    return None
+ 
+                # HSV 변조 (보정 전 raw RGB에 적용)
+                modulated = apply_mirror_gradient_modulation(
+                    raw_rgb, self._clockwise_t, time.monotonic(),
+                    color_effect=ep.color_effect,
+                    gradient_speed=ep.gradient_speed,
+                    gradient_hue_range=ep.gradient_hue_range,
+                    gradient_sv_range=ep.gradient_sv_range,
+                )
+ 
+                # pipeline과 동일한 보정 경로 (process_raw)
+                try:
+                    grb_data, rgb_colors = pipeline.process_raw(
+                        modulated, prev_colors
+                    )
+                    new_prev = rgb_colors
+                except (ValueError, IndexError, FloatingPointError):
+                    return None
+ 
+                raw_preview = modulated  # 프리뷰는 변조 후/보정 전
 
         return raw_preview, grb_data, new_prev, new_last_good, new_led_off
 
@@ -805,7 +874,26 @@ class UnifiedEngine(BaseEngine):
                 gradient_hue_range=ep.gradient_hue_range,
                 gradient_sv_range=ep.gradient_sv_range,
             )
-
+    
+        # ── ★ 하이브리드 그라데이션: 프레임 단위 복사본에 변조 ──
+        # _cached_base_colors를 직접 변조하면 3프레임 주기로 누적되어 점멸.
+        # 복사본을 만들어 변조하고, 이번 프레임의 렌더링에만 사용.
+        if (ep.display_enabled
+                and _has_mirror_gradient_effect(
+                    ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range)
+                and self._cached_base_colors is not None
+                and ep.audio_mode != AUDIO_FLOWING):
+            frame_base_colors = apply_mirror_gradient_modulation(
+                self._cached_base_colors.copy(),  # ★ .copy() — 원본 보존
+                self._clockwise_t, loop_start,
+                color_effect=ep.color_effect,
+                gradient_speed=ep.gradient_speed,
+                gradient_hue_range=ep.gradient_hue_range,
+                gradient_sv_range=ep.gradient_sv_range,
+            )
+        else:
+            frame_base_colors = self._cached_base_colors
+ 
         # ── 오디오 모드별 렌더링 ──
         audio_mode = ep.audio_mode
 
@@ -818,7 +906,7 @@ class UnifiedEngine(BaseEngine):
             )
             self._wave_prev_bass = bass
             raw_rgb = vectorized_render_wave(
-                self._cached_base_colors, self._led_norm_y,
+                frame_base_colors, self._led_norm_y,
                 self._wave_pulses,
                 ep.min_brightness, ep.master_brightness,
                 speed=ep.wave_speed,
@@ -841,7 +929,7 @@ class UnifiedEngine(BaseEngine):
             self._dyn_prev_bass = bass
             self._dyn_prev_raw_bass = raw_bass
             raw_rgb = vectorized_render_dynamic(
-                self._cached_base_colors, self._dyn_clockwise_t,
+                frame_base_colors, self._dyn_clockwise_t,
                 self._dyn_ripples, high,
                 ep.min_brightness, ep.master_brightness,
             )
@@ -867,26 +955,26 @@ class UnifiedEngine(BaseEngine):
             else:
                 # fallback
                 raw_rgb = vectorized_render_pulse(
-                    self._cached_base_colors, bass, mid, high,
+                    frame_base_colors, bass, mid, high,
                     ep.min_brightness, ep.master_brightness,
                 )
 
         elif audio_mode == AUDIO_BASS_DETAIL:
             bd_spec = self._process_bass_detail(eng, atk, rel, ep)
             raw_rgb = vectorized_render_spectrum(
-                self._cached_base_colors, self._led_band_indices,
+                frame_base_colors, self._led_band_indices,
                 bd_spec, ep.min_brightness, ep.master_brightness,
             )
 
         elif audio_mode == AUDIO_SPECTRUM:
             raw_rgb = vectorized_render_spectrum(
-                self._cached_base_colors, self._led_band_indices,
+                frame_base_colors, self._led_band_indices,
                 spec, ep.min_brightness, ep.master_brightness,
             )
 
         else:  # AUDIO_PULSE (또는 flowing + D=OFF → pulse fallback)
             raw_rgb = vectorized_render_pulse(
-                self._cached_base_colors, bass, mid, high,
+                frame_base_colors, bass, mid, high,
                 ep.min_brightness, ep.master_brightness,
             )
 

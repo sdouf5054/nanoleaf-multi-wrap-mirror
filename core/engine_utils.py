@@ -1079,3 +1079,79 @@ def build_base_color_array_animated(
         led_band_indices, n_bands,
         rainbow=rainbow, solid_color=solid_color,
     )
+
+
+def _has_mirror_gradient_effect(color_effect, gradient_sv_range, gradient_hue_range):
+    """미러링 그라데이션 효과가 실질적으로 활성화되어 있는지 판단.
+ 
+    unified_engine.py에서 "대체 보정 경로를 탈지 말지"를 결정하는 데 사용.
+    변조량이 0이면 False → 기존 pipeline 경로를 그대로 사용.
+    """
+    if color_effect == COLOR_EFFECT_STATIC:
+        return False
+    if color_effect not in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW):
+        return False
+    if gradient_sv_range < 0.001 and gradient_hue_range < 0.001:
+        return False
+    return True
+ 
+ 
+def apply_mirror_gradient_modulation(
+    per_led_rgb, clockwise_t, current_time,
+    color_effect="static",
+    gradient_speed=1.0, gradient_hue_range=0.08, gradient_sv_range=0.5,
+):
+    """미러링 전용 모드에서 화면 색상에 그라데이션 S/V/H 물결 변조 적용.
+ 
+    호출 전에 _has_mirror_gradient_effect()로 실제 변조 여부를 확인하고,
+    True일 때만 호출하는 것을 권장. (불필요한 HSV 왕복 변환 방지)
+ 
+    Args:
+        per_led_rgb: (n_leds, 3) float32 — RGB 0~255
+        clockwise_t: (n_leds,) float64 — LED 둘레 좌표 (0~1)
+        current_time: float — time.monotonic
+        color_effect: "static" | "gradient_cw" | "gradient_ccw"
+        gradient_speed: float — 효과 속도 배수
+        gradient_hue_range: float — hue shift 범위 (0~0.25)
+        gradient_sv_range: float — S/V 변동 강도 (0~1)
+ 
+    Returns:
+        (n_leds, 3) float32 — 변조된 RGB 0~255
+    """
+    # 안전장치: 호출자가 체크를 안 했을 경우 대비
+    if not _has_mirror_gradient_effect(color_effect, gradient_sv_range, gradient_hue_range):
+        return per_led_rgb
+ 
+    ct = np.asarray(clockwise_t, dtype=np.float64)
+    direction = 1.0 if color_effect == COLOR_EFFECT_GRADIENT_CW else -1.0
+ 
+    # S/V 변동 범위
+    sv = max(0.0, min(1.0, gradient_sv_range))
+    s_min = 1.0 - sv * 0.8
+    s_range = sv * 0.8
+    v_min = 1.0 - sv * 0.7
+    v_range = sv * 0.7
+ 
+    hue_range = max(0.0, min(0.25, gradient_hue_range))
+ 
+    # RGB → HSV
+    h, s, v = _rgb_array_to_hsv(per_led_rgb)
+ 
+    phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
+ 
+    # S 변조
+    s_mod = s_min + s_range * (0.5 + 0.5 * np.sin(phase))
+    s = np.clip(s * s_mod, 0, 1)
+ 
+    # V 변조
+    v_mod = v_min + v_range * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
+    v = np.clip(v * v_mod, 0, 1)
+ 
+    # H 변조
+    if hue_range > 0.001:
+        hue_phase = (ct * 2.0 * np.pi * _GRADIENT_HUE_FREQ
+                     + current_time * gradient_speed * direction * 0.5)
+        h_shift = hue_range * np.sin(hue_phase)
+        h = (h + h_shift) % 1.0
+ 
+    return _hsv_to_rgb_array(h, s, v)
