@@ -11,9 +11,12 @@
 [Phase 7 변경]
 - per-LED 모드에서도 Distinctive 추출 허용
 
+[미디어 연동 v2 추가]
+- lbl_media_source: 현재 소스 상태 표시 라벨
+  → "소스: 화면 캡처" 또는 "소스: 미디어 (앨범아트)"
+- set_media_active(): tab_control에서 호출하여 상태 갱신
+
 [Hotfix] flowing 모드 활성 시 미러링 설정 비활성화
-- 구역 수, 추출 방식, 스무딩을 비활성화하여 사용자에게 시각적으로 안내
-- flowing은 자체 K-means 추출을 하므로 이 설정들이 적용되지 않음
 """
 
 from PySide6.QtWidgets import (
@@ -78,7 +81,8 @@ class DisplayMirrorSection(QWidget):
         self._config = config
         self._color_effect = COLOR_EFFECT_STATIC
         self._adv_open = False
-        self._flowing_active = False  # ★ flowing 모드 활성 상태
+        self._flowing_active = False
+        self._media_active = False  # ★ 미디어 연동 활성 상태
         self._build_ui()
         self.load_from_config()
 
@@ -92,6 +96,27 @@ class DisplayMirrorSection(QWidget):
         gl.setSpacing(_GROUP_SPACING)
         gl.setContentsMargins(*_GROUP_MARGINS)
 
+        # ── ★ 소스 상태 라벨 + 썸네일 프리뷰 ──
+        source_row = QHBoxLayout()
+        self.lbl_media_source = QLabel("소스: 화면 캡처")
+        self.lbl_media_source.setStyleSheet(
+            "color:#888;font-size:11px;font-style:italic;padding:2px 0;"
+        )
+        source_row.addWidget(self.lbl_media_source)
+
+        self.lbl_media_thumbnail = QLabel()
+        self.lbl_media_thumbnail.setMaximumSize(64, 64)
+        self.lbl_media_thumbnail.setMinimumSize(32, 32)
+        self.lbl_media_thumbnail.setStyleSheet(
+            "border:1px solid #555;border-radius:4px;background:#2b2b2b;"
+        )
+        self.lbl_media_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_media_thumbnail.setVisible(False)
+        source_row.addWidget(self.lbl_media_thumbnail)
+
+        source_row.addStretch()
+        gl.addLayout(source_row)
+
         # ── 색상 효과 ──
         effect_row = QHBoxLayout()
         effect_row.addWidget(QLabel("색상 효과:"))
@@ -102,7 +127,7 @@ class DisplayMirrorSection(QWidget):
         effect_row.addStretch()
         gl.addLayout(effect_row)
 
-        # 효과 슬라이더들 (static이 아닐 때)
+        # 효과 슬라이더들
         self._row_speed = QWidget()
         rs = QHBoxLayout(self._row_speed)
         rs.setContentsMargins(0, 0, 0, 0)
@@ -332,6 +357,52 @@ class DisplayMirrorSection(QWidget):
 
         # 힌트 라벨 표시
         self.lbl_flowing_hint.setVisible(active)
+
+    # ── ★ 미디어 연동 소스 상태 ──────────────────────────────────
+
+    def set_media_active(self, active):
+        """미디어 연동 활성 상태를 표시.
+
+        tab_control에서 미디어 토글이 변경될 때 호출.
+        소스 라벨만 갱신 — 옵션 비활성화는 하지 않음
+        (미디어 모드에서도 구역/추출/스무딩이 모두 작동하므로).
+        """
+        self._media_active = active
+        if active:
+            self.lbl_media_source.setText("소스: 미디어 (앨범아트)")
+            self.lbl_media_source.setStyleSheet(
+                "color:#a3d977;font-size:11px;font-weight:bold;padding:2px 0;"
+            )
+            self.lbl_media_thumbnail.setVisible(True)
+        else:
+            self.lbl_media_source.setText("소스: 화면 캡처")
+            self.lbl_media_source.setStyleSheet(
+                "color:#888;font-size:11px;font-style:italic;padding:2px 0;"
+            )
+            self.lbl_media_thumbnail.setVisible(False)
+
+    def update_media_thumbnail(self, frame):
+        """앨범아트 프레임을 썸네일로 표시 (비율 유지).
+
+        Args:
+            frame: (rows, cols, 3) uint8 RGB numpy 배열 또는 None
+        """
+        if frame is None or not self._media_active:
+            return
+        try:
+            from PySide6.QtGui import QImage, QPixmap
+            h, w = frame.shape[:2]
+            bytes_per_line = 3 * w
+            qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+            scaled = pixmap.scaled(
+                60, 60,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.lbl_media_thumbnail.setPixmap(scaled)
+        except Exception:
+            pass
 
     # ── collect / apply / load ───────────────────────────────────
 

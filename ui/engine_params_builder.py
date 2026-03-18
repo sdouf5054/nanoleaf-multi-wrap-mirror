@@ -8,12 +8,16 @@ collect 함수들이 반환한 dict를 받아 EngineParams를 빌드합니다.
   - tab_control.py가 UI 조립에만 집중
   - 파라미터 변환 로직을 한 곳에서 관리
 
+[미디어 연동 추가]
+  - build()에 media_color_enabled 파라미터 추가
+
 사용법:
     builder = EngineParamsBuilder()
     ep = builder.build(
         display_enabled=True,
         audio_enabled=False,
         master_brightness=0.8,
+        media_color_enabled=True,
         display_params=section_mirror.collect_params(),
         color_params=section_color.collect_params(),
         audio_params=section_audio.collect_params(),
@@ -34,6 +38,7 @@ class EngineParamsBuilder:
     _VALID_FIELDS = {f.name for f in EngineParams.__dataclass_fields__.values()}
 
     def build(self, display_enabled, audio_enabled, master_brightness,
+              media_color_enabled=False,
               display_params=None, color_params=None, audio_params=None):
         """EngineParams를 빌드합니다.
 
@@ -41,6 +46,7 @@ class EngineParamsBuilder:
             display_enabled: bool — 디스플레이 토글 상태
             audio_enabled: bool — 오디오 토글 상태
             master_brightness: float — 0~1
+            media_color_enabled: bool — 미디어 연동 토글 상태
             display_params: dict — DisplayMirrorSection.collect_params() (D=ON)
             color_params: dict — DisplayColorSection.collect_params() (D=OFF)
             audio_params: dict — AudioReactiveSection.collect_params() (A=ON)
@@ -51,6 +57,7 @@ class EngineParamsBuilder:
         raw = {
             "display_enabled": display_enabled,
             "audio_enabled": audio_enabled,
+            "media_color_enabled": media_color_enabled,
             "master_brightness": master_brightness,
         }
 

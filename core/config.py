@@ -14,6 +14,9 @@
 
 [Phase 9 변경]
 - ★ 각 audio 모드에 min_brightness 기본값 추가 (모드별 독립 저장)
+
+[미디어 연동 추가]
+- options에 default_media_enabled: False 추가
 """
 
 import json
@@ -156,6 +159,7 @@ DEFAULT_CONFIG = {
         # ★ 신규: 토글 기본값 (기존 default_mode 대체)
         "default_display_enabled": False,
         "default_audio_enabled": False,
+        "default_media_enabled": False,       # ★ 미디어 연동 기본값
         # ★ 통합: 기존 audio_state + hybrid_state → audio_state 하나로
         "audio_state": {
             "sub_mode": "pulse",

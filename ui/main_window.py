@@ -14,6 +14,9 @@
 - 잠금 복귀 폴백 모드: "audio" → "unified"
 - ★ _on_error: 창이 숨겨진 상태(트레이 모드)에서 QMessageBox 대신
   트레이 알림 사용 — QMessageBox가 부모 창을 자동 show하는 문제 방지
+
+[미디어 연동 추가]
+- _CONTROL_OPTION_KEYS에 "default_media_enabled" 추가
 """
 
 import ctypes
@@ -417,9 +420,11 @@ class MainWindow(QMainWindow):
             if key in saved:
                 final[key] = copy.deepcopy(saved[key])
 
+        # ★ default_media_enabled 추가
         _CONTROL_OPTION_KEYS = (
             "audio_state", "audio_device_index",
             "default_display_enabled", "default_audio_enabled",
+            "default_media_enabled",
         )
         saved_opts = saved.get("options", {})
         final_opts = final.setdefault("options", {})

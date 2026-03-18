@@ -8,6 +8,13 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
   D=OFF, A=ON   → 오디오 비주얼라이저 (사용자 색상 + 오디오 반응)
   D=ON,  A=ON   → 하이브리드 (화면 색 + 오디오 반응)
 
+[미디어 연동 v2 — 캡처 소스 교체 방식]
+  media_color_enabled = True (display_enabled=True 필수):
+  - 화면 캡처 프레임 대신 앨범 아트 이미지 프레임을 파이프라인에 투입
+  - _grab_frame(ep)로 소스 선택 → 이후 파이프라인 완전 동일
+  - 구역 수, 추출 방식, 스무딩, 색상 효과가 전부 그대로 작동
+  - 하이브리드(D+A ON)에서도 동일: flowing 포함 모든 오디오 모드 적용
+
 [Refactor] _run_loop() 분해 + MirrorFrameResult 구조화
 - _run_loop(): 오케스트레이터 (~50줄) — 순서만 보여줌
 - _handle_runtime_param_changes(): 구역/밴드/색상 런타임 변경 처리
@@ -56,6 +63,9 @@ from core.vivid_extract import (
 )
 from core.flowing import FlowPalette, render_flowing
 
+# ★ 미디어 연동 import (v2: 프레임 제공 방식)
+from core.media_session import MediaFrameProvider, HAS_MEDIA_SESSION
+
 # ── stale detection 상수 ──
 _STALE_THRESHOLD = 3.0
 _STALE_RECREATE_COOLDOWN = 3.0
@@ -63,7 +73,7 @@ _STALE_LED_OFF_THRESHOLD = 10.0
 
 
 # ══════════════════════════════════════════════════════════════════
-#  MirrorFrameResult — _frame_mirror_only 반환값 구조화
+#  MirrorFrameResult
 # ══════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -89,7 +99,7 @@ def _ar(current, target, attack_rate, release_rate):
 
 
 class UnifiedEngine(BaseEngine):
-    """통합 엔진 — display_enabled/audio_enabled 플래그로 4가지 조합 처리."""
+    """통합 엔진 — display_enabled/audio_enabled/media_color_enabled 조합 처리."""
 
     mode = "unified"
 
@@ -100,11 +110,11 @@ class UnifiedEngine(BaseEngine):
         self._audio_engine: AudioCapture | None = None
         self._cc: ColorCorrection | None = None
 
-        # ── 둘레 좌표 (모든 모드에서 사용) ──
+        # ── 둘레 좌표 ──
         self._perimeter_t = None
         self._clockwise_t = None
 
-        # ── 밴드 매핑 (오디오 ON) ──
+        # ── 밴드 매핑 ──
         self._led_band_indices = None
         self._led_order = []
 
@@ -125,7 +135,7 @@ class UnifiedEngine(BaseEngine):
         self._zone_colors = None
         self._prev_zone_dominant = None
 
-        # ── 미러링 전용 (D=ON, A=OFF) ──
+        # ── 미러링 전용 ──
         self._mirror_cc = None
         self._last_brightness = -1.0
 
@@ -154,17 +164,44 @@ class UnifiedEngine(BaseEngine):
         self._dyn_side_t_ranges = None
         self._dyn_clockwise_t = None
 
-        # ── Flowing 모드 (D+A ON) ──
+        # ── Flowing 모드 ──
         self._flow_palette = None
         self._flow_last_update = 0.0
         self._flow_palette_colors = None
         self._flow_palette_ratios = None
 
-        # ── 정적 모드 색상 캐시 (D=OFF, A=OFF) ──
+        # ── 정적 모드 색상 캐시 ──
         self._static_dirty = True
 
         # ── 그라데이션 누적 위상 ──
         self._gradient_phase = GradientPhase()
+
+        # ── ★ 미디어 연동 리소스 (v2: 프레임 제공) ──
+        self._media_provider: Optional[MediaFrameProvider] = None
+        self._prev_media_enabled: bool = False
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★ 캡처 소스 선택 — 미디어 연동의 핵심
+    # ══════════════════════════════════════════════════════════════
+
+    def _grab_frame(self, ep):
+        """현재 모드에 맞는 프레임을 가져온다.
+
+        미디어 연동 ON (ep.use_media_frame) → 앨범 아트 프레임
+        미디어 연동 OFF 또는 프레임 없음 → 화면 캡처 프레임 (폴백)
+
+        Returns:
+            numpy 프레임 또는 None
+        """
+        if ep.use_media_frame and self._media_provider is not None:
+            media_frame = self._media_provider.get_frame()
+            if media_frame is not None:
+                return media_frame
+            # 미디어 프레임 없음 → 화면 캡처로 폴백
+
+        if self._capture is not None:
+            return self._capture.grab()
+        return None
 
     # ══════════════════════════════════════════════════════════════
     #  초기화
@@ -190,6 +227,15 @@ class UnifiedEngine(BaseEngine):
             self._init_audio_resources(ep)
         if not ep.display_enabled:
             self._rebuild_base_colors_for_color_panel(ep)
+
+        # ★ 미디어 연동 초기화 (v2: 프레임 제공)
+        self._prev_media_enabled = ep.media_color_enabled
+        if ep.use_media_frame and HAS_MEDIA_SESSION:
+            self._media_provider = MediaFrameProvider(
+                grid_cols=self._active_grid_cols,
+                grid_rows=self._active_grid_rows,
+            )
+            self._media_provider.start()
 
     def _init_display_resources(self, ep):
         self._init_capture()
@@ -359,6 +405,11 @@ class UnifiedEngine(BaseEngine):
                 self._check_and_handle_session_resume()
                 if self._display_change_flag.is_set():
                     self._handle_display_change()
+                    # ★ 미디어 프레임 grid 크기도 갱신
+                    if self._media_provider is not None:
+                        self._media_provider.update_grid_size(
+                            self._active_grid_cols, self._active_grid_rows
+                        )
                     if not ep.audio_enabled:
                         prev_colors = None
                     last_good_frame_time = time.monotonic()
@@ -423,11 +474,27 @@ class UnifiedEngine(BaseEngine):
 
     def _handle_runtime_param_changes(self, ep, prev_n_zones, prev_zone_weights,
                                        prev_colors):
-        """구역 수/밴드/레이아웃/색상 변경을 감지하고 처리.
+        """구역/밴드/레이아웃/미디어 변경 감지 및 처리.
 
         Returns:
             (new_prev_n_zones, new_prev_zone_weights)
         """
+
+        # ── ★ 미디어 연동 토글 런타임 변경 ──
+        current_media = ep.use_media_frame
+        if current_media != self._prev_media_enabled:
+            self._prev_media_enabled = current_media
+            if current_media and HAS_MEDIA_SESSION:
+                if self._media_provider is None:
+                    self._media_provider = MediaFrameProvider(
+                        grid_cols=self._active_grid_cols,
+                        grid_rows=self._active_grid_rows,
+                    )
+                    self._media_provider.start()
+            elif self._media_provider is not None:
+                self._media_provider.stop()
+                self._media_provider = None
+
         # ── 레이아웃 dirty ──
         if ep.display_enabled:
             with self._layout_lock:
@@ -577,8 +644,8 @@ class UnifiedEngine(BaseEngine):
                            led_turned_off, frame_count):
         """미러링 전용 프레임 처리.
 
-        Returns:
-            MirrorFrameResult 또는 None (프레임 없음)
+        ★ v2: _grab_frame()로 소스 선택 — 미디어 ON이면 앨범아트,
+        OFF이면 화면 캡처. 이후 파이프라인 완전 동일.
         """
         pipeline = self._pipeline
 
@@ -589,8 +656,8 @@ class UnifiedEngine(BaseEngine):
         pipeline.smoothing = ep.smoothing_factor
         pipeline.smoothing_enabled = ep.smoothing_enabled
 
-        # ── 캡처 ──
-        frame = self._capture.grab()
+        # ── ★ 캡처 소스 선택 ──
+        frame = self._grab_frame(ep)
         if frame is None:
             return None
 
@@ -599,38 +666,39 @@ class UnifiedEngine(BaseEngine):
         if led_turned_off:
             self.status_changed.emit("디스플레이 미러링 실행 중")
 
-        # ── 해상도 변경 감지 ──
-        try:
-            current_h, current_w = frame.shape[:2]
-        except (AttributeError, ValueError):
-            return None
-
-        if not getattr(self, '_native_capture', False):
-            if current_h != self._active_h or current_w != self._active_w:
-                self._active_w, self._active_h = current_w, current_h
-                self._capture.screen_w = current_w
-                self._capture.screen_h = current_h
-                new_gc, new_gr = self._resolve_grid_size(current_w, current_h)
-                if (new_gc != self._active_grid_cols
-                        or new_gr != self._active_grid_rows):
-                    self._display_change_flag.set()
-                    return None
-                try:
-                    self._weight_matrix = self._build_layout(current_w, current_h)
-                    self._rebuild_pipeline()
-                    pipeline = self._pipeline
-                    prev_colors = None
-                except (ValueError, IndexError, np.linalg.LinAlgError):
-                    pass
-        else:
-            cap_w = self._capture.screen_w
-            cap_h = self._capture.screen_h
-            if (cap_w > 0 and cap_h > 0
-                    and (cap_w != self._active_w or cap_h != self._active_h)):
-                self._display_change_flag.set()
+        # ── 해상도 변경 감지 (미디어 모드에서는 스킵) ──
+        if not ep.use_media_frame:
+            try:
+                current_h, current_w = frame.shape[:2]
+            except (AttributeError, ValueError):
                 return None
 
-        # ── 색상 연산 ──
+            if not getattr(self, '_native_capture', False):
+                if current_h != self._active_h or current_w != self._active_w:
+                    self._active_w, self._active_h = current_w, current_h
+                    self._capture.screen_w = current_w
+                    self._capture.screen_h = current_h
+                    new_gc, new_gr = self._resolve_grid_size(current_w, current_h)
+                    if (new_gc != self._active_grid_cols
+                            or new_gr != self._active_grid_rows):
+                        self._display_change_flag.set()
+                        return None
+                    try:
+                        self._weight_matrix = self._build_layout(current_w, current_h)
+                        self._rebuild_pipeline()
+                        pipeline = self._pipeline
+                        prev_colors = None
+                    except (ValueError, IndexError, np.linalg.LinAlgError):
+                        pass
+            else:
+                cap_w = self._capture.screen_w
+                cap_h = self._capture.screen_h
+                if (cap_w > 0 and cap_h > 0
+                        and (cap_w != self._active_w or cap_h != self._active_h)):
+                    self._display_change_flag.set()
+                    return None
+
+        # ── 색상 연산 (미디어/화면 캡처 구분 없이 동일 파이프라인) ──
         _gradient_active = _has_mirror_gradient_effect(
             ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range
         )
@@ -862,7 +930,8 @@ class UnifiedEngine(BaseEngine):
         high = self._smooth_high
         spec = self._smooth_spectrum
 
-        # ── 화면 색상 갱신 (D=ON일 때만) ──
+        # ── 화면/미디어 색상 갱신 (D=ON일 때만) ──
+        # ★ v2: _update_screen_colors 내부에서 _grab_frame() 사용
         if (ep.display_enabled
                 and self._capture is not None
                 and self._weight_matrix is not None
@@ -886,7 +955,7 @@ class UnifiedEngine(BaseEngine):
                 gradient_phase=self._gradient_phase,
             )
 
-        # ── D=ON + animated 효과 (화면 색 미사용 시에만) ──
+        # ── D=ON + animated (화면/미디어 색 미사용 시에만) ──
         if (ep.color_effect != COLOR_EFFECT_STATIC
                 and ep.display_enabled
                 and not (self._per_led_colors is not None
@@ -1008,7 +1077,7 @@ class UnifiedEngine(BaseEngine):
 
     def _render_flowing_mode(self, ep, bass, mid, high,
                              frame_interval, loop_start, frame_base_colors):
-        """Flowing 모드 렌더링."""
+        """Flowing 모드 — ★ 미디어 모드에서도 per_led_colors 기반으로 동작."""
         if (self._per_led_colors is not None
                 and self._per_led_colors.sum() > 0
                 and self._flow_palette is not None
@@ -1043,8 +1112,11 @@ class UnifiedEngine(BaseEngine):
         return raw_rgb
 
     def _update_screen_colors(self, ep):
-        """화면 캡처 → per_led_colors 갱신 + base_colors 재빌드."""
-        screen_frame = self._capture.grab()
+        """화면/미디어 프레임 → per_led_colors 갱신 + base_colors 재빌드.
+
+        ★ v2: _grab_frame()으로 소스 선택 — 미디어/화면 구분 없이 동일 처리.
+        """
+        screen_frame = self._grab_frame(ep)
         if screen_frame is None:
             return
 
@@ -1099,7 +1171,7 @@ class UnifiedEngine(BaseEngine):
     # ══════════════════════════════════════════════════════════════
 
     def _frame_static(self, ep, current_time):
-        """양쪽 OFF — 정적/애니메이션 색상 출력."""
+        """양쪽 OFF — 정적/애니메이션 색상 출력. (v2: 미디어 분기 제거)"""
         n_leds = self._led_count
         n_bands = 16
 
@@ -1170,14 +1242,29 @@ class UnifiedEngine(BaseEngine):
         if self._audio_engine:
             self._audio_engine.stop()
             self._audio_engine = None
+        # ★ 미디어 연동 정리
+        if self._media_provider:
+            self._media_provider.stop()
+            self._media_provider = None
 
     def _emit_status_message(self, ep):
         """토글 조합에 따른 상태 메시지."""
+        media_suffix = ""
+        if ep.use_media_frame:
+            if self._media_provider is not None:
+                info = self._media_provider.get_media_info()
+                if info:
+                    media_suffix = f" · ♪ {info.get('artist', '')} — {info.get('title', '')}"
+                else:
+                    media_suffix = " · 미디어 대기"
+            else:
+                media_suffix = " · 미디어 연동"
+
         if ep.display_enabled and ep.audio_enabled:
-            self.status_changed.emit("디스플레이 + 오디오 실행 중")
+            self.status_changed.emit("디스플레이 + 오디오 실행 중" + media_suffix)
         elif ep.display_enabled:
-            self.status_changed.emit("디스플레이 미러링 실행 중")
+            self.status_changed.emit("디스플레이 미러링 실행 중" + media_suffix)
         elif ep.audio_enabled:
-            self.status_changed.emit("오디오 반응 실행 중")
+            self.status_changed.emit("오디오 반응 실행 중" + media_suffix)
         else:
-            self.status_changed.emit("정적 LED 실행 중")
+            self.status_changed.emit("정적 LED 실행 중" + media_suffix)

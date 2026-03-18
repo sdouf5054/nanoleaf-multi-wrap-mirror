@@ -6,6 +6,12 @@
 - 호환 속성(brightness, smoothing_enabled, color_source, n_zones) 유지
   — UnifiedEngine 내부에서 직접 참조하는 편의 속성
 
+[미디어 연동 추가]
+- media_color_enabled: bool = False
+  → display_enabled=True일 때만 유효
+  → True이면 화면 캡처 대신 앨범 아트 이미지를 파이프라인에 투입
+  → 기존 미러링 옵션(구역, 추출, 스무딩, 색상효과)이 그대로 적용됨
+
 [설계 원칙]
 - frozen=True: UI가 빌드한 스냅샷을 엔진이 atomic swap
 - 모든 필드에 안전한 기본값 → UI에서 부분 갱신 시에도 동작
@@ -28,7 +34,7 @@ class EngineParams:
     엔진 스레드가 프레임 시작 시 _swap_params()로 교체.
 
     필드 그룹:
-    - 토글: display_enabled, audio_enabled
+    - 토글: display_enabled, audio_enabled, media_color_enabled
     - 공용: master_brightness
     - 디스플레이 계열: smoothing, 구역, 추출, 감쇠/페널티
     - 색상 (디스플레이 OFF 시): rainbow, base_color, color_effect 등
@@ -39,6 +45,7 @@ class EngineParams:
     # ── 토글 상태 ──
     display_enabled: bool = False
     audio_enabled: bool = False
+    media_color_enabled: bool = False  # ★ 미디어 연동 (display_enabled=True 시에만 유효)
 
     # ── 공용 ──
     master_brightness: float = 1.0    # 0~1. 모든 모드의 최대 밝기.
@@ -90,13 +97,28 @@ class EngineParams:
 
     @property
     def color_source(self) -> str:
-        """디스플레이 ON → "screen", OFF → "solid"."""
-        return "screen" if self.display_enabled else "solid"
+        """디스플레이 소스 결정.
+
+        display_enabled=True + media_color_enabled=True → "media"
+        display_enabled=True → "screen"
+        display_enabled=False → "solid"
+        """
+        if self.display_enabled:
+            return "media" if self.media_color_enabled else "screen"
+        return "solid"
 
     @property
     def n_zones(self) -> int:
         """mirror_n_zones 별칭."""
         return self.mirror_n_zones
+
+    @property
+    def use_media_frame(self) -> bool:
+        """미디어 프레임을 사용해야 하는지 여부.
+
+        display_enabled=True이고 media_color_enabled=True일 때만 True.
+        """
+        return self.display_enabled and self.media_color_enabled
 
 
 # ══════════════════════════════════════════════════════════════════
