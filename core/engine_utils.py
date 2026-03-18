@@ -9,6 +9,11 @@
 - build_base_color_array_animated(): 시간 기반 색상 효과 (gradient/rainbow_time)
 - HSV ↔ RGB 벡터화 헬퍼 함수
 
+[Phase 8] GradientPhase 누적 위상 도입
+- gradient_speed 변경 시 색상 점프 방지
+- build_base_color_array_animated / apply_mirror_gradient_modulation에
+  current_time*speed 대신 accumulated phase 사용
+
 순수 numpy 모듈. Qt 의존성 없음.
 """
 
@@ -983,29 +988,74 @@ def _rgb_array_to_hsv(rgb):
     return h, s, v
 
 
+# ══════════════════════════════════════════════════════════════════
+#  [Phase 8] GradientPhase — 누적 위상 관리
+# ══════════════════════════════════════════════════════════════════
+
+class GradientPhase:
+    """그라데이션/무지개 효과의 누적 위상 관리.
+
+    기존 문제: phase = current_time × speed → speed 변경 시 phase 점프
+    해결: 매 프레임 dt × speed를 누적 → speed 변경해도 현재 위치에서 부드럽게 이어짐
+
+    사용법:
+        gp = GradientPhase()
+        # 매 프레임:
+        gp.tick(dt, gradient_speed)
+        phase = gp.phase          # S/V/무지개 회전에 사용
+        hue_phase = gp.hue_phase  # hue shift에 사용
+    """
+    __slots__ = ("phase", "hue_phase")
+
+    def __init__(self):
+        self.phase = 0.0
+        self.hue_phase = 0.0
+
+    def tick(self, dt, speed=1.0):
+        """프레임 간 위상 누적.
+
+        Args:
+            dt: 프레임 시간 (초)
+            speed: 효과 속도 배수 (gradient_speed_from_slider 결과)
+        """
+        self.phase += dt * speed
+        # hue shift는 S/V와 다른 속도 — 기존 비율(0.5) 유지
+        self.hue_phase += dt * speed * 0.5
+
+    def reset(self):
+        """효과 모드 전환 시 위상 리셋."""
+        self.phase = 0.0
+        self.hue_phase = 0.0
+
+
 def build_base_color_array_animated(
     led_band_indices, n_bands, clockwise_t, current_time,
     color_effect="static",
     rainbow=True, solid_color=None, screen_colors=None,
     gradient_speed=1.0, gradient_hue_range=0.08, gradient_sv_range=0.5,
+    gradient_phase=None,
 ):
     """시간 기반 색상 효과가 적용된 base_colors 생성.
 
     color_effect가 "static"이면 기존 build_base_color_array()와 동일.
     그 외는 매 프레임 호출되어야 함 (시간 의존).
 
+    [Phase 8] gradient_phase가 전달되면 current_time*speed 대신
+    누적 위상을 사용하여 speed 변경 시 색상 점프를 방지.
+
     Args:
         led_band_indices: (n_leds,) float64 — LED별 밴드 인덱스
         n_bands: 총 밴드 수
         clockwise_t: (n_leds,) float64 — LED 둘레 좌표 (0~1, 시계방향)
-        current_time: float — 현재 시간 (time.monotonic)
+        current_time: float — 현재 시간 (gradient_phase 없을 때 폴백용)
         color_effect: "static" | "gradient_cw" | "gradient_ccw" | "rainbow_time"
         rainbow: bool — 무지개 모드
         solid_color: (3,) float32 — 단색 RGB 0~255
         screen_colors: (n_leds, 3) float32 — 화면 색상 (하이브리드)
-        gradient_speed: float — 효과 속도 배수
+        gradient_speed: float — 효과 속도 배수 (gradient_phase 없을 때만 사용)
         gradient_hue_range: float — hue shift 범위 (0=없음, 0.20=넓음)
         gradient_sv_range: float — S/V 변동 강도 (0=없음, 1.0=최대)
+        gradient_phase: GradientPhase 또는 None — 누적 위상 (Phase 8)
 
     Returns:
         (n_leds, 3) float32 — LED별 RGB 0~255
@@ -1023,8 +1073,16 @@ def build_base_color_array_animated(
     n_leds = len(led_band_indices)
     ct = np.asarray(clockwise_t, dtype=np.float64)
 
+    # ★ Phase 8: 누적 위상 사용 (있으면) / 없으면 기존 방식 폴백
+    if gradient_phase is not None:
+        main_phase = gradient_phase.phase
+        hue_phase_val = gradient_phase.hue_phase
+    else:
+        main_phase = current_time * gradient_speed
+        hue_phase_val = current_time * gradient_speed * 0.5
+
     if color_effect == COLOR_EFFECT_RAINBOW_TIME:
-        hue = (current_time * _RAINBOW_TIME_SPEED * gradient_speed) % 1.0
+        hue = (main_phase * _RAINBOW_TIME_SPEED) % 1.0
         rgb = _hsv_to_rgb_single(hue, 1.0, 1.0)
         return np.broadcast_to(rgb, (n_leds, 3)).copy()
 
@@ -1032,24 +1090,26 @@ def build_base_color_array_animated(
         direction = 1.0 if color_effect == COLOR_EFFECT_GRADIENT_CW else -1.0
 
         # ★ S/V 범위를 gradient_sv_range(0~1)로 스케일링
-        # sv_range=0 → S/V 변동 없음 (정적), sv_range=1 → 최대 변동
         sv = max(0.0, min(1.0, gradient_sv_range))
-        s_min = 1.0 - sv * 0.8       # sv=0→1.0, sv=0.5→0.6, sv=1→0.2
-        s_range = sv * 0.8            # sv=0→0.0, sv=0.5→0.4, sv=1→0.8
-        v_min = 1.0 - sv * 0.7       # sv=0→1.0, sv=0.5→0.65, sv=1→0.3
-        v_range = sv * 0.7            # sv=0→0.0, sv=0.5→0.35, sv=1→0.7
+        s_min = 1.0 - sv * 0.8
+        s_range = sv * 0.8
+        v_min = 1.0 - sv * 0.7
+        v_range = sv * 0.7
 
         # ★ hue range를 gradient_hue_range에서 직접 사용
         hue_range = max(0.0, min(0.25, gradient_hue_range))
 
+        # ★ Phase 8: 누적 위상 기반 phase 계산
+        phase = ct * 2.0 * np.pi + main_phase * direction
+        hue_p = ct * 2.0 * np.pi * _GRADIENT_HUE_FREQ + hue_phase_val * direction
+
         if rainbow:
             # 무지개 + 그라데이션 — 위치별 무지개 회전 + S/V 물결 변조
-            rainbow_offset = current_time * _RAINBOW_ROTATION_SPEED * gradient_speed * direction
+            rainbow_offset = main_phase * _RAINBOW_ROTATION_SPEED * direction
             t = (led_band_indices / max(1, n_bands - 1) + rainbow_offset) % 1.0
             base_rgb = band_color_vectorized(t)
             h, s, v = _rgb_array_to_hsv(base_rgb)
 
-            phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
             s_mod = s_min + s_range * (0.5 + 0.5 * np.sin(phase))
             v_mod = v_min + v_range * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
             s = np.clip(s * s_mod, 0, 1)
@@ -1061,13 +1121,11 @@ def build_base_color_array_animated(
                 solid_color = np.array([255, 0, 80], dtype=np.float32)
             base_h, base_s, base_v = _rgb_to_hsv_single(solid_color)
 
-            phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
             s_mod = s_min + s_range * (0.5 + 0.5 * np.sin(phase))
             v_mod = v_min + v_range * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
 
-            # hue shift: 인접색으로 왔다갔다 (S/V와 다른 주파수)
-            hue_phase = ct * 2.0 * np.pi * _GRADIENT_HUE_FREQ + current_time * gradient_speed * direction * 0.5
-            h_shift = hue_range * np.sin(hue_phase)
+            # hue shift
+            h_shift = hue_range * np.sin(hue_p)
 
             h = (base_h + h_shift) % 1.0
             s = np.clip(base_s * s_mod, 0, 1)
@@ -1082,11 +1140,7 @@ def build_base_color_array_animated(
 
 
 def _has_mirror_gradient_effect(color_effect, gradient_sv_range, gradient_hue_range):
-    """미러링 그라데이션 효과가 실질적으로 활성화되어 있는지 판단.
- 
-    unified_engine.py에서 "대체 보정 경로를 탈지 말지"를 결정하는 데 사용.
-    변조량이 0이면 False → 기존 pipeline 경로를 그대로 사용.
-    """
+    """미러링 그라데이션 효과가 실질적으로 활성화되어 있는지 판단."""
     if color_effect == COLOR_EFFECT_STATIC:
         return False
     if color_effect not in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW):
@@ -1094,64 +1148,72 @@ def _has_mirror_gradient_effect(color_effect, gradient_sv_range, gradient_hue_ra
     if gradient_sv_range < 0.001 and gradient_hue_range < 0.001:
         return False
     return True
- 
- 
+
+
 def apply_mirror_gradient_modulation(
     per_led_rgb, clockwise_t, current_time,
     color_effect="static",
     gradient_speed=1.0, gradient_hue_range=0.08, gradient_sv_range=0.5,
+    gradient_phase=None,
 ):
     """미러링 전용 모드에서 화면 색상에 그라데이션 S/V/H 물결 변조 적용.
- 
-    호출 전에 _has_mirror_gradient_effect()로 실제 변조 여부를 확인하고,
-    True일 때만 호출하는 것을 권장. (불필요한 HSV 왕복 변환 방지)
- 
+
+    [Phase 8] gradient_phase가 전달되면 누적 위상 사용.
+
     Args:
         per_led_rgb: (n_leds, 3) float32 — RGB 0~255
         clockwise_t: (n_leds,) float64 — LED 둘레 좌표 (0~1)
-        current_time: float — time.monotonic
+        current_time: float — time.monotonic (폴백용)
         color_effect: "static" | "gradient_cw" | "gradient_ccw"
-        gradient_speed: float — 효과 속도 배수
+        gradient_speed: float — 효과 속도 배수 (gradient_phase 없을 때만 사용)
         gradient_hue_range: float — hue shift 범위 (0~0.25)
         gradient_sv_range: float — S/V 변동 강도 (0~1)
- 
+        gradient_phase: GradientPhase 또는 None — 누적 위상 (Phase 8)
+
     Returns:
         (n_leds, 3) float32 — 변조된 RGB 0~255
     """
-    # 안전장치: 호출자가 체크를 안 했을 경우 대비
     if not _has_mirror_gradient_effect(color_effect, gradient_sv_range, gradient_hue_range):
         return per_led_rgb
- 
+
     ct = np.asarray(clockwise_t, dtype=np.float64)
     direction = 1.0 if color_effect == COLOR_EFFECT_GRADIENT_CW else -1.0
- 
+
     # S/V 변동 범위
     sv = max(0.0, min(1.0, gradient_sv_range))
     s_min = 1.0 - sv * 0.8
     s_range = sv * 0.8
     v_min = 1.0 - sv * 0.7
     v_range = sv * 0.7
- 
+
     hue_range = max(0.0, min(0.25, gradient_hue_range))
- 
+
+    # ★ Phase 8: 누적 위상 사용
+    if gradient_phase is not None:
+        main_phase = gradient_phase.phase
+        hue_phase_val = gradient_phase.hue_phase
+    else:
+        main_phase = current_time * gradient_speed
+        hue_phase_val = current_time * gradient_speed * 0.5
+
     # RGB → HSV
     h, s, v = _rgb_array_to_hsv(per_led_rgb)
- 
-    phase = ct * 2.0 * np.pi + current_time * gradient_speed * direction
- 
+
+    phase = ct * 2.0 * np.pi + main_phase * direction
+
     # S 변조
     s_mod = s_min + s_range * (0.5 + 0.5 * np.sin(phase))
     s = np.clip(s * s_mod, 0, 1)
- 
+
     # V 변조
     v_mod = v_min + v_range * (0.5 + 0.5 * np.sin(phase + _GRADIENT_V_PHASE_OFFSET))
     v = np.clip(v * v_mod, 0, 1)
- 
+
     # H 변조
     if hue_range > 0.001:
-        hue_phase = (ct * 2.0 * np.pi * _GRADIENT_HUE_FREQ
-                     + current_time * gradient_speed * direction * 0.5)
-        h_shift = hue_range * np.sin(hue_phase)
+        hue_p = (ct * 2.0 * np.pi * _GRADIENT_HUE_FREQ
+                 + hue_phase_val * direction)
+        h_shift = hue_range * np.sin(hue_p)
         h = (h + h_shift) % 1.0
- 
+
     return _hsv_to_rgb_array(h, s, v)

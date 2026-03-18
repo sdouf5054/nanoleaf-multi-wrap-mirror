@@ -7,6 +7,10 @@
 - options.hybrid_state → options.audio_state로 통합 (마이그레이션)
 - master_brightness를 mirror 섹션에 추가
 - _migrate_config(): 기존 config.json을 새 구조로 안전하게 변환
+
+[Phase 8 변경]
+- _migrate_config: default_mode 마이그레이션 후 삭제 (중복 실행 방지)
+- auto_start_mirror → auto_start_engine 마이그레이션 추가
 """
 
 import json
@@ -159,7 +163,7 @@ DEFAULT_CONFIG = {
             "flowing_interval": 30,
             "flowing_speed": 50,
         },
-        "auto_start_mirror": True,
+        "auto_start_engine": False,
         "turn_off_on_lock": True,
     },
 }
@@ -194,25 +198,23 @@ def _migrate_config(config):
     [1] default_mode → default_display_enabled + default_audio_enabled
     [2] hybrid_state → audio_state로 통합
     [3] mirror.brightness → mirror.master_brightness (없으면 복사)
+    [4] auto_start_mirror → auto_start_engine (키 이름 변경)
     """
     opts = config.get("options", {})
 
     # ── [1] default_mode → 토글 기본값 ──
-    #   default_mode이 존재하면 항상 변환 (deep_merge가 새 키를 이미 넣었더라도
-    #   default_mode의 값이 사용자 의도이므로 우선 적용)
+    #   ★ 마이그레이션 후 삭제하여 다음 로드 시 재실행 방지
     if "default_mode" in opts:
         mode = opts["default_mode"]
         opts["default_display_enabled"] = mode in ("mirror", "hybrid")
         opts["default_audio_enabled"] = mode in ("audio", "hybrid")
+        del opts["default_mode"]
 
     # ── [2] hybrid_state → audio_state 통합 ──
-    #   hybrid_state의 고유 필드를 audio_state에 병합.
-    #   충돌 시 hybrid_state 값 우선 (하이브리드가 더 많은 필드를 가짐).
     if "hybrid_state" in opts:
         hybrid = opts["hybrid_state"]
         audio = opts.setdefault("audio_state", {})
 
-        # hybrid_state에만 있는 필드를 audio_state에 이식
         _hybrid_only_keys = (
             "zone_count", "color_extract_mode",
             "flowing_interval", "flowing_speed",
@@ -221,29 +223,28 @@ def _migrate_config(config):
             if key in hybrid and key not in audio:
                 audio[key] = hybrid[key]
 
-        # sub_mode: hybrid_state의 값이 더 정확할 수 있음 (마지막 사용 모드)
-        # 단, audio_state에 이미 있으면 건드리지 않음
         if "sub_mode" in hybrid and "sub_mode" not in audio:
             audio["sub_mode"] = hybrid["sub_mode"]
 
-        # min_brightness: hybrid_state 값이 있으면 audio_state에 반영
         if "min_brightness" in hybrid and "min_brightness" not in audio:
             audio["min_brightness"] = hybrid["min_brightness"]
 
-        # 색상 효과 (Phase 2에서 추가된 필드)
         _effect_keys = ("color_effect", "gradient_speed", "gradient_hue", "gradient_sv")
         for key in _effect_keys:
             if key in hybrid and key not in audio:
                 audio[key] = hybrid[key]
 
-        # hybrid_state 삭제하지 않음 — 이전 버전과의 호환을 위해 유지
-        # (다음 저장 시 새 구조로 덮어쓰여도, 이전 버전 앱이 읽을 수 있음)
-
     # ── [3] master_brightness 초기화 ──
     mirror = config.get("mirror", {})
     if "master_brightness" not in mirror:
-        # 기존 mirror brightness를 master_brightness로 복사
         mirror["master_brightness"] = mirror.get("brightness", 1.0)
+
+    # ── [4] auto_start_mirror → auto_start_engine ──
+    #   ★ 키 이름 변경: 기존 값을 새 키로 이전 후 삭제
+    if "auto_start_mirror" in opts and "auto_start_engine" not in opts:
+        opts["auto_start_engine"] = opts["auto_start_mirror"]
+    if "auto_start_mirror" in opts:
+        del opts["auto_start_mirror"]
 
     return config
 

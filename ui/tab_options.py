@@ -1,6 +1,12 @@
 """옵션 탭 — 시스템 트레이, 글로벌 핫키, 시작프로그램 설정 (PySide6)
 
 [ADR-032] PowerShell .lnk 대신 winreg Registry Run key 사용 (RETHINK→C)
+
+[Phase 8 변경]
+- "미러링" 표현 → 모드 중립적 표현으로 전면 교체
+- auto_start_mirror → auto_start_engine 키 이름 변경
+- 시작프로그램 헬퍼 메시지 현행화
+- 잠금 화면 설명 현행화
 """
 
 import os
@@ -137,7 +143,7 @@ class OptionsTab(QWidget):
         tray_group = QGroupBox("시스템 트레이"); tray_layout = QVBoxLayout(tray_group)
         self.chk_tray = QCheckBox("시스템 트레이 아이콘 표시"); self.chk_tray.setChecked(self.opt.get("tray_enabled", True))
         self.chk_tray.stateChanged.connect(self._on_tray_changed); tray_layout.addWidget(self.chk_tray)
-        self.chk_minimize = QCheckBox("미러링 중 창 닫기 시 트레이로 최소화"); self.chk_minimize.setChecked(self.opt.get("minimize_to_tray", True))
+        self.chk_minimize = QCheckBox("실행 중 창 닫기 시 트레이로 최소화"); self.chk_minimize.setChecked(self.opt.get("minimize_to_tray", True))
         tray_layout.addWidget(self.chk_minimize); layout.addWidget(tray_group)
 
         # 글로벌 핫키
@@ -148,7 +154,7 @@ class OptionsTab(QWidget):
         hotkey_layout.addWidget(hint)
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFrameShadow(QFrame.Shadow.Sunken); hotkey_layout.addWidget(line)
         form = QFormLayout(); form.setLabelAlignment(Qt.AlignmentFlag.AlignRight); form.setSpacing(8)
-        self.edit_toggle = HotkeyEdit(); self.edit_toggle.setText(self.opt.get("hotkey_toggle", "ctrl+shift+o")); form.addRow("미러링 On/Off :", self.edit_toggle)
+        self.edit_toggle = HotkeyEdit(); self.edit_toggle.setText(self.opt.get("hotkey_toggle", "ctrl+shift+o")); form.addRow("엔진 On/Off :", self.edit_toggle)
         self.edit_bright_up = HotkeyEdit(); self.edit_bright_up.setText(self.opt.get("hotkey_bright_up", "ctrl+shift+up")); form.addRow("밝기 +10% :", self.edit_bright_up)
         self.edit_bright_down = HotkeyEdit(); self.edit_bright_down.setText(self.opt.get("hotkey_bright_down", "ctrl+shift+down")); form.addRow("밝기 -10% :", self.edit_bright_down)
         hotkey_layout.addLayout(form)
@@ -157,7 +163,7 @@ class OptionsTab(QWidget):
 
         # 잠금 화면
         lock_group = QGroupBox("잠금 화면 동작"); lock_layout = QVBoxLayout(lock_group)
-        self.chk_lock_stop = QCheckBox("잠금 화면(Win+L) 시 미러링 자동 중지 및 LED 소등"); self.chk_lock_stop.setChecked(self.opt.get("turn_off_on_lock", True))
+        self.chk_lock_stop = QCheckBox("잠금 화면(Win+L) 시 엔진 자동 중지 및 LED 소등"); self.chk_lock_stop.setChecked(self.opt.get("turn_off_on_lock", True))
         lock_layout.addWidget(self.chk_lock_stop)
         lock_note = QLabel("• 체크 시: 잠금 화면 진입 시 LED가 꺼지고, 잠금 해제 후 자동으로 재시작됩니다."); lock_note.setStyleSheet("color:#888;"); lock_note.setWordWrap(True)
         lock_layout.addWidget(lock_note); layout.addWidget(lock_group)
@@ -166,9 +172,14 @@ class OptionsTab(QWidget):
         startup_group = QGroupBox("Windows 시작프로그램"); startup_layout = QVBoxLayout(startup_group)
         self.chk_startup = QCheckBox("Windows 시작 시 자동 실행"); self.chk_startup.setChecked(_is_startup_registered())
         startup_layout.addWidget(self.chk_startup)
-        self.chk_auto_mirror = QCheckBox("실행 시 미러링 자동 시작"); self.chk_auto_mirror.setChecked(self.opt.get("auto_start_mirror", False))
-        startup_layout.addWidget(self.chk_auto_mirror)
-        startup_note = QLabel("※ 시작프로그램 등록 시 창 없이 트레이로 바로 실행됩니다."); startup_note.setStyleSheet("color:#888;"); startup_note.setWordWrap(True)
+        self.chk_auto_engine = QCheckBox("실행 시 기본값 설정으로 엔진 자동 시작")
+        self.chk_auto_engine.setChecked(self.opt.get("auto_start_engine", self.opt.get("auto_start_mirror", False)))
+        startup_layout.addWidget(self.chk_auto_engine)
+        startup_note = QLabel(
+            "※ 시작프로그램 등록 시 창 없이 트레이로 바로 실행됩니다.\n"
+            "※ 엔진 자동 시작 시 컨트롤 탭의 기본값 토글 설정을 사용합니다."
+        )
+        startup_note.setStyleSheet("color:#888;"); startup_note.setWordWrap(True)
         startup_layout.addWidget(startup_note); layout.addWidget(startup_group)
 
         # 저장
@@ -188,11 +199,15 @@ class OptionsTab(QWidget):
         self.opt["tray_enabled"] = self.chk_tray.isChecked()
         self.opt["hotkey_enabled"] = self.chk_hotkey.isChecked()
         self.opt["minimize_to_tray"] = self.chk_minimize.isChecked()
-        self.opt["auto_start_mirror"] = self.chk_auto_mirror.isChecked()
+        self.opt["auto_start_engine"] = self.chk_auto_engine.isChecked()
         self.opt["turn_off_on_lock"] = self.chk_lock_stop.isChecked()
         self.opt["hotkey_toggle"] = self.edit_toggle.text().strip()
         self.opt["hotkey_bright_up"] = self.edit_bright_up.text().strip()
         self.opt["hotkey_bright_down"] = self.edit_bright_down.text().strip()
+
+        # ★ 구 키가 남아 있으면 정리
+        self.opt.pop("auto_start_mirror", None)
+
         save_config(self.config)
 
         if self.chk_startup.isChecked():

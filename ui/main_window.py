@@ -7,6 +7,13 @@
 - _on_tray_brightness_delta: master_brightness 슬라이더 동기화
 - 기존 panel_mirror/panel_audio/panel_hybrid 직접 참조 제거
 - _shutdown: 새 _CONTROL_TAB_KEYS에 맞게 스냅샷 저장
+
+[Phase 8 변경]
+- "미러링" 표현 → 모드 중립적 표현으로 교체
+- auto_start_mirror → auto_start_engine 참조 변경
+- 잠금 복귀 폴백 모드: "audio" → "unified"
+- ★ _on_error: 창이 숨겨진 상태(트레이 모드)에서 QMessageBox 대신
+  트레이 알림 사용 — QMessageBox가 부모 창을 자동 show하는 문제 방지
 """
 
 import ctypes
@@ -234,7 +241,7 @@ class MainWindow(QMainWindow):
         slider = self.tab_control.slider_master_brightness
         current = slider.value()
         new_val = max(0, min(100, current + delta))
-        slider.setValue(new_val)  # valueChanged → _on_master_brightness_changed 자동 호출
+        slider.setValue(new_val)
 
     def _on_tray_brightness_set(self, pct):
         """트레이 밝기 절대값."""
@@ -249,8 +256,29 @@ class MainWindow(QMainWindow):
         self.tray.update_status(text)
 
     def _on_error(self, msg, severity="critical"):
+        """엔진 에러 처리.
+
+        ★ Phase 8: 창이 숨겨진 상태(트레이 모드)에서는 QMessageBox 대신
+        트레이 알림을 사용. QMessageBox(parent=self)가 숨겨진 부모 창을
+        자동으로 show하는 Qt 동작 때문에, 시작프로그램(--startup)으로
+        트레이 실행 시 의도치 않게 창이 나타나는 문제를 방지.
+        """
         if severity == "critical":
-            QMessageBox.warning(self, "오류", msg)
+            if self.isVisible():
+                # 창이 보이는 상태: 기존대로 QMessageBox 사용
+                QMessageBox.warning(self, "오류", msg)
+            else:
+                # 창이 숨겨진 상태(트레이 모드): 트레이 알림으로 대체
+                if self.tray.isVisible():
+                    self.tray.showMessage(
+                        "Nanoleaf Mirror — 오류",
+                        msg,
+                        QSystemTrayIcon.MessageIcon.Warning,
+                        5000,
+                    )
+                # 상태바 + 트레이 상태 텍스트도 갱신
+                self.statusBar().showMessage(f"⚠ {msg}")
+                self.tray.update_status(f"⚠ {msg}")
         else:
             self.statusBar().showMessage(f"⚠ {msg}")
             self.tray.update_status(f"⚠ {msg}")
@@ -300,7 +328,7 @@ class MainWindow(QMainWindow):
         elif event == "unlock":
             if self._was_running_before_lock:
                 self._was_running_before_lock = False
-                mode = self._lock_restart_mode or "audio"
+                mode = self._lock_restart_mode or "unified"
                 QTimer.singleShot(3000, lambda: self.start_engine(mode))
                 self.statusBar().showMessage("잠금 해제 — 3초 후 재시작")
 
@@ -378,12 +406,9 @@ class MainWindow(QMainWindow):
             pass
 
         # ── 종료 시 config 저장 ──
-        # 저장 범위(세부 설정)는 마지막 저장 스냅샷 사용
-        # 저장 범위 밖(master_brightness, 토글 기본값)은 현재 UI 값 사용
         saved = self.tab_control.saved_config
         final = copy.deepcopy(self.config)
 
-        # 저장 범위 키: 스냅샷에서 복원
         _CONTROL_TAB_KEYS = (
             "mirror", "audio_pulse", "audio_spectrum", "audio_bass_detail",
             "audio_wave", "audio_dynamic", "audio_flowing",
@@ -402,10 +427,13 @@ class MainWindow(QMainWindow):
             if key in saved_opts:
                 final_opts[key] = copy.deepcopy(saved_opts[key])
 
-        # 저장 범위 밖: 현재 UI 값 반영 (master_brightness)
         final.setdefault("mirror", {})["master_brightness"] = (
             self.tab_control.slider_master_brightness.value() / 100.0
         )
+
+        # ★ 구 키 정리
+        final_opts.pop("default_mode", None)
+        final_opts.pop("auto_start_mirror", None)
 
         save_config(final)
         QApplication.instance().quit()

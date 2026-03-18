@@ -8,18 +8,10 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
   D=OFF, A=ON   → 오디오 비주얼라이저 (사용자 색상 + 오디오 반응)
   D=ON,  A=ON   → 하이브리드 (화면 색 + 오디오 반응)
 
-[통합 원칙]
-- 디스플레이 ON이면 항상: 캡처, weight_matrix, vivid boost, 구역/추출 적용
-- 오디오 ON이면 항상: AudioCapture, attack/release, 모드별 렌더링
-- 디스플레이 ON + 오디오 OFF이면: ColorPipeline 사용 (per-LED 스무딩 포함)
-- 디스플레이 ON + 오디오 ON이면: weight_matrix 직접 사용 (오디오가 밝기 변조)
-- 양쪽 OFF이면: 정적/그라데이션/무지개 색상 출력
-
-[기존 엔진 대비 통일]
-- MirrorEngine의 stale detection / LED-off 타이머 → 디스플레이 ON 공통
-- AudioModeEngine의 밴드 매핑 / 모드별 렌더링 → 오디오 ON 공통
-- HybridEngine의 화면 색 + 오디오 조합 → D+A ON
-- 프리뷰(screen_colors_updated): 모든 모드에서 3프레임마다 emit
+[Phase 8 변경]
+- GradientPhase 도입: gradient_speed 변경 시 색상 점프 방지
+- build_base_color_array_animated / apply_mirror_gradient_modulation에
+  gradient_phase= 인자 전달
 """
 
 import time
@@ -49,6 +41,7 @@ from core.engine_utils import (
     AUDIO_WAVE, AUDIO_DYNAMIC, AUDIO_FLOWING,
     apply_mirror_gradient_modulation,
     _has_mirror_gradient_effect,
+    GradientPhase,
 )
 from core.color_extract import extract_zone_dominant
 from core.vivid_extract import (
@@ -146,6 +139,9 @@ class UnifiedEngine(BaseEngine):
 
         # ── 정적 모드 색상 캐시 (D=OFF, A=OFF) ──
         self._static_dirty = True
+
+        # ── ★ Phase 8: 그라데이션 누적 위상 ──
+        self._gradient_phase = GradientPhase()
 
     # ══════════════════════════════════════════════════════════════
     #  초기화
@@ -251,13 +247,9 @@ class UnifiedEngine(BaseEngine):
     # ══════════════════════════════════════════════════════════════
 
     def _rebuild_base_colors_for_color_panel(self, ep):
-        """색상 패널 설정(무지개/단색)에서 base_colors 빌드.
-
-        D=OFF 모드에서 사용: 정적 모드와 오디오 모드 모두.
-        """
+        """색상 패널 설정(무지개/단색)에서 base_colors 빌드."""
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
         if self._led_band_indices is None:
-            # 오디오 없는 경우에도 밴드 인덱스 필요 (무지개 색상 매핑)
             self._led_band_indices = _compute_led_band_mapping(
                 self._perimeter_t, n_bands, ep.zone_weights
             )
@@ -273,21 +265,15 @@ class UnifiedEngine(BaseEngine):
         self._static_dirty = False
 
     def _rebuild_base_colors_for_audio(self, ep):
-        """오디오 모드용 base_colors 빌드.
-
-        D=OFF: 색상 패널 설정 기반
-        D=ON: 화면 색상 기반 (per-LED 또는 구역 평균)
-        """
+        """오디오 모드용 base_colors 빌드."""
         n_bands = self._audio_engine.n_bands if self._audio_engine else 16
 
-        # Flowing 모드는 자체 palette로 RGB 생성
         if ep.audio_mode == AUDIO_FLOWING:
             return
 
         if (ep.display_enabled
                 and self._per_led_colors is not None
                 and self._per_led_colors.sum() > 0):
-            # 화면 색상 기반
             if (ep.mirror_n_zones != N_ZONES_PER_LED
                     and self._zone_map is not None):
                 if ep.color_extract_mode == "distinctive":
@@ -305,7 +291,6 @@ class UnifiedEngine(BaseEngine):
             else:
                 self._cached_base_colors = self._per_led_colors.copy()
         else:
-            # 사용자 색상 기반
             self._cached_base_colors = build_base_color_array(
                 self._led_band_indices, n_bands,
                 rainbow=ep.rainbow,
@@ -347,10 +332,13 @@ class UnifiedEngine(BaseEngine):
         prev_n_zones = ep.mirror_n_zones
 
         # 미러링 stale detection 상태
-        prev_colors = None          # ColorPipeline 스무딩용 (D=ON, A=OFF per-LED)
+        prev_colors = None
         last_good_frame_time = time.monotonic()
         last_recreate_time = 0.0
         led_turned_off = False
+
+        # ★ Phase 8: 이전 루프 시각 (dt 계산용)
+        prev_loop_time = time.monotonic()
 
         # 모니터 워처 (디스플레이 ON)
         if ep.display_enabled:
@@ -362,9 +350,17 @@ class UnifiedEngine(BaseEngine):
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
 
+            # ★ Phase 8: dt 계산 + 그라데이션 위상 누적
+            dt = loop_start - prev_loop_time
+            prev_loop_time = loop_start
+
             # ── 파라미터 스냅샷 교체 ──
             self._swap_params()
             ep = self._current_params
+
+            # ★ Phase 8: 그라데이션 위상 누적 (모든 모드에서, static이 아니면)
+            if ep.color_effect != COLOR_EFFECT_STATIC:
+                self._gradient_phase.tick(dt, ep.gradient_speed)
 
             if self._paused:
                 if stop_wait(timeout=0.05):
@@ -384,7 +380,6 @@ class UnifiedEngine(BaseEngine):
             if ep.display_enabled and self._display_change_flag.is_set():
                 self._handle_display_change()
                 if not ep.audio_enabled:
-                    # mirror-only: pipeline 재빌드 + 스무딩 리셋
                     prev_colors = None
                 last_good_frame_time = time.monotonic()
                 led_turned_off = False
@@ -439,14 +434,12 @@ class UnifiedEngine(BaseEngine):
             grb_data = None
 
             if ep.display_enabled and not ep.audio_enabled:
-                # ── 경로 A: 미러링 전용 (D=ON, A=OFF) ──
                 result = self._frame_mirror_only(
                     ep, prev_colors,
                     last_good_frame_time, last_recreate_time, led_turned_off,
                     frame_count,
                 )
                 if result is None:
-                    # stale: sleep 후 continue
                     last_good_frame_time, last_recreate_time, led_turned_off = (
                         self._handle_stale_frame(
                             last_good_frame_time, last_recreate_time,
@@ -459,7 +452,6 @@ class UnifiedEngine(BaseEngine):
                 raw_rgb, grb_data, prev_colors, last_good_frame_time, led_turned_off = result
 
             elif ep.audio_enabled:
-                # ── 경로 B: 오디오 ON (D 유무 무관) ──
                 raw_rgb, grb_data = self._frame_audio(
                     ep, loop_start, frame_count,
                     last_good_frame_time, last_recreate_time, led_turned_off,
@@ -469,7 +461,6 @@ class UnifiedEngine(BaseEngine):
                     led_turned_off = False
 
             else:
-                # ── 경로 C: 양쪽 OFF → 정적/애니메이션 색상 ──
                 raw_rgb, grb_data = self._frame_static(ep, loop_start)
 
             # ── USB 전송 ──
@@ -499,8 +490,7 @@ class UnifiedEngine(BaseEngine):
                         self.spectrum_updated.emit(self._bd_smooth.copy())
                     elif self._smooth_spectrum is not None:
                         self.spectrum_updated.emit(self._smooth_spectrum.copy())
- 
-                    # ★ Flowing 팔레트 프리뷰 전달
+
                     if (ep.audio_mode == AUDIO_FLOWING
                             and self._flow_palette_colors is not None):
                         self.spectrum_updated.emit(
@@ -508,7 +498,7 @@ class UnifiedEngine(BaseEngine):
                              "colors": self._flow_palette_colors,
                              "ratios": self._flow_palette_ratios}
                         )
- 
+
                 if raw_rgb is not None:
                     self.screen_colors_updated.emit(raw_rgb.tolist())
 
@@ -532,13 +522,7 @@ class UnifiedEngine(BaseEngine):
     def _frame_mirror_only(self, ep, prev_colors,
                            last_good_frame_time, last_recreate_time,
                            led_turned_off, frame_count):
-        """미러링 전용 프레임 처리.
-
-        Returns:
-            None — stale 프레임 (호출자가 stale 처리)
-            (raw_rgb, grb_data, new_prev_colors,
-             new_last_good_time, new_led_turned_off) — 성공
-        """
+        """미러링 전용 프레임 처리."""
         pipeline = self._pipeline
 
         # ── 밝기 / 스무딩 반영 ──
@@ -552,7 +536,7 @@ class UnifiedEngine(BaseEngine):
         frame = self._capture.grab()
 
         if frame is None:
-            return None  # stale — 호출자가 처리
+            return None
 
         new_last_good = time.monotonic()
         new_led_off = False
@@ -591,15 +575,12 @@ class UnifiedEngine(BaseEngine):
                 return None
 
         # ── 색상 연산 ──
- 
-        # ★ 그라데이션 효과가 실질적으로 활성화되어 있는지 판단
-        #   슬라이더 0%이거나 정적이면 False → 기존 경로 그대로
+
         _gradient_active = _has_mirror_gradient_effect(
             ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range
         )
- 
+
         if self._zone_map is not None:
-            # ── N구역 모드 ──
             try:
                 grb_data, raw_preview = self._compute_mirror_zone_colors(frame, ep)
                 if _gradient_active:
@@ -609,6 +590,7 @@ class UnifiedEngine(BaseEngine):
                         gradient_speed=ep.gradient_speed,
                         gradient_hue_range=ep.gradient_hue_range,
                         gradient_sv_range=ep.gradient_sv_range,
+                        gradient_phase=self._gradient_phase,
                     )
                     leds_mod = raw_preview.copy()
                     self._mirror_cc.apply(leds_mod)
@@ -616,9 +598,8 @@ class UnifiedEngine(BaseEngine):
                 new_prev = None
             except (ValueError, IndexError, FloatingPointError):
                 return None
- 
+
         elif ep.color_extract_mode == "distinctive":
-            # ── per-LED + distinctive ──
             try:
                 grb_data, raw_preview, new_prev = self._compute_mirror_per_led_distinctive(
                     frame, ep, prev_colors
@@ -630,23 +611,22 @@ class UnifiedEngine(BaseEngine):
                         gradient_speed=ep.gradient_speed,
                         gradient_hue_range=ep.gradient_hue_range,
                         gradient_sv_range=ep.gradient_sv_range,
+                        gradient_phase=self._gradient_phase,
                     )
                     leds_mod = raw_preview.copy()
                     self._mirror_cc.apply(leds_mod)
                     grb_data = leds_to_grb(leds_mod)
             except (ValueError, IndexError, FloatingPointError):
                 return None
- 
+
         else:
-            # ── per-LED + average ──
             if not _gradient_active:
-                # ★ 정적 또는 변조 없음: 기존 pipeline 경로 그대로
                 try:
                     grb_data, rgb_colors = pipeline.process(frame, prev_colors)
                     new_prev = rgb_colors
                 except (ValueError, IndexError, FloatingPointError):
                     return None
- 
+
                 if frame_count % 3 == 0:
                     try:
                         grid_flat = frame.reshape(-1, 3).astype(np.float32)
@@ -655,12 +635,10 @@ class UnifiedEngine(BaseEngine):
                         raw_preview = rgb_colors
                 else:
                     raw_preview = rgb_colors
- 
+
             else:
-                # ★ 그라데이션 활성: raw RGB에 변조 → pipeline.process_raw()
                 try:
                     import cv2
-                    # pipeline.process()의 1단계: 다운샘플 + 행렬곱
                     grid = cv2.resize(
                         frame,
                         (pipeline.grid_cols, pipeline.grid_rows),
@@ -670,17 +648,16 @@ class UnifiedEngine(BaseEngine):
                     raw_rgb = pipeline.weight_matrix @ grid_flat
                 except (ValueError, IndexError):
                     return None
- 
-                # HSV 변조 (보정 전 raw RGB에 적용)
+
                 modulated = apply_mirror_gradient_modulation(
                     raw_rgb, self._clockwise_t, time.monotonic(),
                     color_effect=ep.color_effect,
                     gradient_speed=ep.gradient_speed,
                     gradient_hue_range=ep.gradient_hue_range,
                     gradient_sv_range=ep.gradient_sv_range,
+                    gradient_phase=self._gradient_phase,
                 )
- 
-                # pipeline과 동일한 보정 경로 (process_raw)
+
                 try:
                     grb_data, rgb_colors = pipeline.process_raw(
                         modulated, prev_colors
@@ -688,19 +665,18 @@ class UnifiedEngine(BaseEngine):
                     new_prev = rgb_colors
                 except (ValueError, IndexError, FloatingPointError):
                     return None
- 
-                raw_preview = modulated  # 프리뷰는 변조 후/보정 전
+
+                raw_preview = modulated
 
         return raw_preview, grb_data, new_prev, new_last_good, new_led_off
 
     def _compute_mirror_zone_colors(self, frame, ep):
-        """N구역 미러링 색상 계산 — MirrorEngine._compute_zone_colors 통합."""
+        """N구역 미러링 색상 계산."""
         grid_flat = frame.reshape(-1, 3).astype(np.float32)
         per_led_raw = self._weight_matrix @ grid_flat
 
         extract_mode = ep.color_extract_mode
 
-        # 채도 우선순위 v2
         if extract_mode == "distinctive":
             per_led_raw, _, self._prev_ambient_color = boost_per_led_vivid(
                 grid_flat, self._weight_matrix, per_led_raw,
@@ -735,31 +711,21 @@ class UnifiedEngine(BaseEngine):
         return leds_to_grb(leds), raw_preview
 
     def _compute_mirror_per_led_distinctive(self, frame, ep, prev_colors):
-        """per-LED + distinctive 미러링 — vivid boost + 스무딩 직접 적용.
-
-        ColorPipeline 대신 weight_matrix 직접 사용하여 채도 우선순위를 적용.
-        스무딩은 EMA로 직접 처리.
-
-        Returns:
-            (grb_data, raw_preview, new_prev_colors)
-        """
+        """per-LED + distinctive 미러링."""
         grid_flat = frame.reshape(-1, 3).astype(np.float32)
         per_led_raw = self._weight_matrix @ grid_flat
 
-        # 채도 우선순위 v2: vivid boost + ambient
         per_led_raw, _, self._prev_ambient_color = boost_per_led_vivid(
             grid_flat, self._weight_matrix, per_led_raw,
             region_masks=self._vivid_region_masks,
             blend=0.4, ambient_blend=0.2,
             prev_ambient_color=self._prev_ambient_color,
         )
-        # per-LED 적응형 스무딩
         per_led_raw = smooth_per_led(
             per_led_raw, self._prev_per_led_vivid, smoothing=0.5,
         )
         self._prev_per_led_vivid = per_led_raw.copy()
 
-        # 프레임 간 스무딩 (ColorPipeline.process()의 EMA에 대응)
         if prev_colors is not None and ep.smoothing_factor > 0:
             s = ep.smoothing_factor
             per_led_raw = per_led_raw * (1.0 - s) + prev_colors * s
@@ -775,7 +741,7 @@ class UnifiedEngine(BaseEngine):
 
     def _handle_stale_frame(self, last_good_frame_time, last_recreate_time,
                             led_turned_off, stop_wait):
-        """stale 프레임 처리 — LED off / recreate 시도."""
+        """stale 프레임 처리."""
         now = time.monotonic()
         stale_duration = now - last_good_frame_time
 
@@ -809,11 +775,7 @@ class UnifiedEngine(BaseEngine):
 
     def _frame_audio(self, ep, loop_start, frame_count,
                      last_good_frame_time, last_recreate_time, led_turned_off):
-        """오디오 ON 프레임 처리.
-
-        D=OFF: 사용자 색상(무지개/단색) + 오디오 변조
-        D=ON:  화면 색상 + 오디오 변조 (하이브리드)
-        """
+        """오디오 ON 프레임 처리."""
         frame_interval = 1.0 / self.config["mirror"].get("target_fps", 60)
 
         # ── 오디오 엔진 파라미터 반영 ──
@@ -866,6 +828,7 @@ class UnifiedEngine(BaseEngine):
                 gradient_speed=ep.gradient_speed,
                 gradient_hue_range=ep.gradient_hue_range,
                 gradient_sv_range=ep.gradient_sv_range,
+                gradient_phase=self._gradient_phase,
             )
 
         # ── D=ON + animated 효과 (화면 색 미사용 시에만 적용) ──
@@ -884,27 +847,27 @@ class UnifiedEngine(BaseEngine):
                 gradient_speed=ep.gradient_speed,
                 gradient_hue_range=ep.gradient_hue_range,
                 gradient_sv_range=ep.gradient_sv_range,
+                gradient_phase=self._gradient_phase,
             )
-    
+
         # ── ★ 하이브리드 그라데이션: 프레임 단위 복사본에 변조 ──
-        # _cached_base_colors를 직접 변조하면 3프레임 주기로 누적되어 점멸.
-        # 복사본을 만들어 변조하고, 이번 프레임의 렌더링에만 사용.
         if (ep.display_enabled
                 and _has_mirror_gradient_effect(
                     ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range)
                 and self._cached_base_colors is not None
                 and ep.audio_mode != AUDIO_FLOWING):
             frame_base_colors = apply_mirror_gradient_modulation(
-                self._cached_base_colors.copy(),  # ★ .copy() — 원본 보존
+                self._cached_base_colors.copy(),
                 self._clockwise_t, loop_start,
                 color_effect=ep.color_effect,
                 gradient_speed=ep.gradient_speed,
                 gradient_hue_range=ep.gradient_hue_range,
                 gradient_sv_range=ep.gradient_sv_range,
+                gradient_phase=self._gradient_phase,
             )
         else:
             frame_base_colors = self._cached_base_colors
- 
+
         # ── 오디오 모드별 렌더링 ──
         audio_mode = ep.audio_mode
 
@@ -952,7 +915,7 @@ class UnifiedEngine(BaseEngine):
                     and (loop_start - self._flow_last_update) > ep.flowing_interval):
                 self._flow_palette.update_from_screen(self._per_led_colors)
                 self._flow_last_update = loop_start
- 
+
             if self._flow_palette is not None:
                 self._flow_palette.tick(
                     frame_interval, bass, mid, high,
@@ -962,7 +925,6 @@ class UnifiedEngine(BaseEngine):
                     self._clockwise_t, self._flow_palette,
                     bass, ep.master_brightness, mid=mid,
                 )
-                # ★ 팔레트 프리뷰용 색상 저장
                 self._flow_palette_colors = [
                     blob.color_current.tolist() for blob in self._flow_palette.blobs
                 ]
@@ -1013,7 +975,6 @@ class UnifiedEngine(BaseEngine):
             grid_flat = screen_frame.reshape(-1, 3).astype(np.float32)
             self._per_led_colors = self._weight_matrix @ grid_flat
 
-            # 채도 우선순위 v2
             if ep.color_extract_mode == "distinctive":
                 self._per_led_colors, _, self._prev_ambient_color = boost_per_led_vivid(
                     grid_flat, self._weight_matrix,
@@ -1029,7 +990,6 @@ class UnifiedEngine(BaseEngine):
                 )
                 self._prev_per_led_vivid = self._per_led_colors.copy()
 
-            # N구역 모드
             if (ep.mirror_n_zones != N_ZONES_PER_LED
                     and self._zone_map is not None):
                 if ep.color_extract_mode == "distinctive":
@@ -1046,7 +1006,6 @@ class UnifiedEngine(BaseEngine):
                         self._zone_map, ep.mirror_n_zones,
                     )
 
-            # 화면 색상 갱신 → base_colors 재빌드
             self._rebuild_base_colors_for_audio(ep)
 
         except (ValueError, IndexError):
@@ -1057,25 +1016,17 @@ class UnifiedEngine(BaseEngine):
     # ══════════════════════════════════════════════════════════════
 
     def _frame_static(self, ep, current_time):
-        """양쪽 OFF — 정적/애니메이션 색상 출력.
-
-        정적(static) 모드: 단색/무지개 고정 출력
-        애니메이션 모드: 그라데이션/무지개(시간 순회) 매 프레임 갱신
-
-        Returns:
-            (raw_rgb, grb_data)
-        """
+        """양쪽 OFF — 정적/애니메이션 색상 출력."""
         n_leds = self._led_count
         n_bands = 16
 
         if ep.color_effect == COLOR_EFFECT_STATIC:
-            # 정적: 색상 변경 시에만 재계산
             if self._static_dirty or self._cached_base_colors is None:
                 self._rebuild_base_colors_for_color_panel(ep)
             raw_rgb = self._cached_base_colors.copy()
             raw_rgb *= ep.master_brightness
         else:
-            # 애니메이션: 매 프레임 갱신
+            # 애니메이션: 매 프레임 갱신 — ★ Phase 8: 누적 위상 사용
             raw_rgb = build_base_color_array_animated(
                 self._led_band_indices if self._led_band_indices is not None
                     else _compute_led_band_mapping(self._perimeter_t, n_bands, ep.zone_weights),
@@ -1088,6 +1039,7 @@ class UnifiedEngine(BaseEngine):
                 gradient_speed=ep.gradient_speed,
                 gradient_hue_range=ep.gradient_hue_range,
                 gradient_sv_range=ep.gradient_sv_range,
+                gradient_phase=self._gradient_phase,
             )
             raw_rgb = raw_rgb * ep.master_brightness
 

@@ -11,6 +11,8 @@ Nanoleaf Screen Mirror — GUI 앱 진입점 (PySide6)
   - 수동 DPI 재조정 코드 40줄 제거
 
 [Phase 7] auto_start: default_mode → 토글 기본값 기반으로 변경
+[Phase 8] auto_start_mirror → auto_start_engine 키 이름 변경
+         startup 모드 트레이 안정성 강화 (부팅 시 트레이 지연 대응)
 """
 
 import sys
@@ -135,13 +137,28 @@ def main():
         y = (screen_geo.height() - window.height()) // 2
         window.move(max(0, x), max(0, y))
 
-    if not start_to_tray:
+    # === 10) startup 모드: 트레이로 시작, 아니면 창 표시 ===
+    if start_to_tray:
+        # ★ 부팅 시 시스템 트레이 영역이 아직 준비 안 됐을 수 있으므로
+        #    약간의 지연 후 트레이 아이콘이 정상 표시되는지 확인.
+        #    창은 숨긴 상태로 유지.
+        window.hide()
+    else:
         window.show()
 
-    # === 10) 자동 시작 (Phase 7: 토글 기본값 기반) ===
-    if config.get("options", {}).get("auto_start_mirror", False):
+    # === 11) 자동 엔진 시작 (Phase 8: auto_start_engine) ===
+    #   기본값 토글 설정을 바탕으로 엔진을 자동 시작합니다.
+    #   startup 모드(부팅 시 자동 실행)이거나 옵션에서 활성화된 경우.
+    auto_start = config.get("options", {}).get(
+        "auto_start_engine",
+        config.get("options", {}).get("auto_start_mirror", False)  # 구 키 폴백
+    )
+    if auto_start:
+        # startup 모드에서는 OS 부팅 직후이므로 USB 디바이스 등이
+        # 아직 준비되지 않았을 수 있어 더 긴 지연을 줌.
+        delay = 3000 if start_to_tray else 1000
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(1000, lambda: window.start_engine())
+        QTimer.singleShot(delay, lambda: window.start_engine())
 
     sys.exit(app.exec())
 
