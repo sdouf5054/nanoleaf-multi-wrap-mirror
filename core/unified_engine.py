@@ -243,6 +243,7 @@ class UnifiedEngine(BaseEngine):
         self._media_detect_audio_idle_hits = 0      # ★ Phase 2: 연속 오디오 idle hit
         self._media_detect_prev_frame: Optional[np.ndarray] = None
         self._media_detect_last_hash = 0        # 마지막 미디어 hash — 변경 감지용
+        self._media_detect_last_confirmed = None # ★ 직전 확정 판별값 (None = 최초 → "media" 기본)
         self._prev_media_toggle_count = 0       # ★ 수동 판별 반전 트리거 감지용
 
     # ══════════════════════════════════════════════════════════════
@@ -344,7 +345,12 @@ class UnifiedEngine(BaseEngine):
         if current_hash != self._media_detect_last_hash and current_hash != 0:
             self._media_detect_last_hash = current_hash
             self._media_detect_state = "phase1"
-            self._media_detect_decision = "media"   # 초기값: 앨범아트
+            # ★ 직전 확정값이 있으면 유지, 없으면(최초) 앨범아트
+            self._media_detect_decision = (
+                self._media_detect_last_confirmed
+                if self._media_detect_last_confirmed is not None
+                else "media"
+            )
             self._media_detect_start_time = now
             self._media_detect_last_check = 0.0
             self._media_detect_phase1_dynamic_hits = 0
@@ -368,7 +374,11 @@ class UnifiedEngine(BaseEngine):
             total_energy = self._get_audio_energy_total()
             if total_energy is not None and total_energy >= MEDIA_AUDIO_RESUME_THRESHOLD:
                 self._media_detect_state = "phase1"
-                self._media_detect_decision = "media"  # 초기값: 앨범아트
+                self._media_detect_decision = (
+                    self._media_detect_last_confirmed
+                    if self._media_detect_last_confirmed is not None
+                    else "media"
+                )
                 self._media_detect_start_time = now
                 self._media_detect_last_check = 0.0
                 self._media_detect_phase1_dynamic_hits = 0
@@ -439,6 +449,7 @@ class UnifiedEngine(BaseEngine):
                 )
                 if self._media_detect_phase1_dynamic_hits >= MEDIA_DETECT_PHASE1_DYNAMIC_COUNT:
                     self._media_detect_decision = "mirror"
+                    self._media_detect_last_confirmed = "mirror"  # ★
                     self._media_detect_state = "phase2"
                     self._media_detect_phase2_dynamic_hits = 0
                     self._media_detect_phase2_static_hits  = 0
@@ -451,6 +462,7 @@ class UnifiedEngine(BaseEngine):
             # Phase 1 기간 종료 → 앨범아트로 확정, Phase 2 진입
             if self._media_detect_state == "phase1" and elapsed >= MEDIA_DETECT_DURATION:
                 self._media_detect_decision = "media"
+                self._media_detect_last_confirmed = "media"  # ★
                 self._media_detect_state = "phase2"
                 self._media_detect_phase2_dynamic_hits = 0
                 self._media_detect_phase2_static_hits  = 0
@@ -474,6 +486,7 @@ class UnifiedEngine(BaseEngine):
                     )
                     if self._media_detect_phase2_dynamic_hits >= MEDIA_DETECT_PHASE2_DYNAMIC_COUNT:
                         self._media_detect_decision = "mirror"
+                        self._media_detect_last_confirmed = "mirror"  # ★
                         self._media_detect_phase2_dynamic_hits = 0
                         self._media_detect_phase2_static_hits  = 0
                         self._media_detect_audio_idle_hits = 0
@@ -493,6 +506,7 @@ class UnifiedEngine(BaseEngine):
                             )
                         if self._media_detect_audio_idle_hits >= MEDIA_AUDIO_IDLE_COUNT:
                             self._media_detect_decision = "mirror"
+                            self._media_detect_last_confirmed = "mirror"  # ★
                             self._media_detect_state = "audio_idle"
                             self._media_debug(
                                 "[미디어] 오디오 무음 감지 → 미러링으로 복귀 (audio_idle)"
@@ -511,6 +525,7 @@ class UnifiedEngine(BaseEngine):
                     )
                     if self._media_detect_phase2_static_hits >= MEDIA_DETECT_PHASE2_STATIC_COUNT:
                         self._media_detect_decision = "media"
+                        self._media_detect_last_confirmed = "media"  # ★
                         self._media_detect_phase2_dynamic_hits = 0
                         self._media_detect_phase2_static_hits  = 0
                         self._media_detect_audio_idle_hits = 0
