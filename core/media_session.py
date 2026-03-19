@@ -331,6 +331,18 @@ class MediaFrameProvider:
             self._clear_cache()
             return
 
+        # ★ 재생 상태 확인 — 정지/닫힘이면 캐시 클리어
+        try:
+            playback_info = session.get_playback_info()
+            if playback_info is not None:
+                status = playback_info.playback_status
+                # Closed=0, Opened=1, Changing=2, Stopped=3, Playing=4, Paused=5
+                if status is not None and status.value in (0, 3):  # Closed or Stopped
+                    self._clear_cache()
+                    return
+        except Exception:
+            pass
+
         title, artist, thumbnail_ref = await _get_media_properties(session)
         if title is None:
             self._clear_cache()

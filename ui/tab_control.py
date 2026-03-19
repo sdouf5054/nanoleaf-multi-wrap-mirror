@@ -680,7 +680,16 @@ class ControlTab(QWidget):
         # ★ 미러링 패널의 앨범아트 썸네일 갱신
         if hasattr(self, 'section_mirror'):
             frame = provider.get_frame()
-            self.section_mirror.update_media_thumbnail(frame)
+            if frame is not None:
+                self.section_mirror.update_media_thumbnail(frame)
+            else:
+                # ★ 프레임 없음 → 썸네일 플레이스홀더 복귀
+                self.section_mirror.lbl_media_thumbnail.clear()
+                self.section_mirror.lbl_media_thumbnail.setText("🎵")
+                self.section_mirror.lbl_media_thumbnail.setStyleSheet(
+                    "border:1px solid #555;border-radius:4px;background:#1a1a1e;"
+                    "color:#555;font-size:20px;"
+                )
 
         # ★ 곡 정보를 카드 라벨 + 썸네일 툴팁에 설정
         info = provider.get_media_info()
@@ -698,9 +707,17 @@ class ControlTab(QWidget):
                 song_text = "재생 중인 미디어 없음"
             self.section_mirror.lbl_media_song.setText(song_text)
             self.section_mirror.lbl_media_thumbnail.setToolTip(song_text)
+            
+            # ★ 미디어 없으면 소스 라벨 초기 상태로
+            if not info:
+                self.section_mirror.lbl_media_source.setText("미디어 연동 활성")
+                self.section_mirror.lbl_media_source.setStyleSheet(
+                    "color:#a3d977;font-size:11px;font-weight:bold;"
+                    "border:none;background:transparent;"
+                )
 
-        # ★ 현재 소스 판별 결과를 미러링 패널에 전달
-        if hasattr(self, 'section_mirror'):
+        # ★ 현재 소스 판별 결과를 미러링 패널에 전달 (미디어 있을 때만)
+        if hasattr(self, 'section_mirror') and info:
             decision = getattr(engine, '_media_detect_decision', "media")
             state = getattr(engine, '_media_detect_state', "idle")
             self.section_mirror.update_current_source(decision, state)
@@ -718,6 +735,14 @@ class ControlTab(QWidget):
         # 미디어 해시를 0으로 리셋 → 다음 폴링에서 강제 재추출
         with provider._lock:
             provider._media_hash = 0
+
+        # 판별 상태 초기화 → Phase 1부터 재시작
+        engine._media_detect_state = "phase1"
+        engine._media_detect_decision = "media"
+        engine._media_detect_start_time = __import__('time').monotonic()
+        engine._media_detect_last_hash = 0
+        engine._media_detect_phase1_dynamic_hits = 0
+        engine._media_detect_prev_frame = None
 
         # 즉시 썸네일 갱신 시도
         self._update_media_thumbnail()
