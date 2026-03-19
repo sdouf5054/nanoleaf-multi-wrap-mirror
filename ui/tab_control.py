@@ -684,15 +684,18 @@ class ControlTab(QWidget):
 
         # ★ 곡 정보를 카드 라벨 + 썸네일 툴팁에 설정
         info = provider.get_media_info()
-        if info and hasattr(self, 'section_mirror'):
-            artist = info.get("artist", "")
-            title = info.get("title", "")
-            if artist and title:
-                song_text = f"♪ {artist} — {title}"
-            elif title:
-                song_text = f"♪ {title}"
+        if hasattr(self, 'section_mirror'):
+            if info:
+                artist = info.get("artist", "")
+                title = info.get("title", "")
+                if artist and title:
+                    song_text = f"♪ {artist} — {title}"
+                elif title:
+                    song_text = f"♪ {title}"
+                else:
+                    song_text = "재생 중인 미디어 없음"
             else:
-                song_text = ""
+                song_text = "재생 중인 미디어 없음"
             self.section_mirror.lbl_media_song.setText(song_text)
             self.section_mirror.lbl_media_thumbnail.setToolTip(song_text)
 

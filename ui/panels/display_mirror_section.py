@@ -465,7 +465,15 @@ class DisplayMirrorSection(QWidget):
             self._lbl_source_off.setVisible(False)
             self.lbl_media_source.setText("미디어 연동 활성")
             self.lbl_media_source.setStyleSheet(
-                "color:#a3d977;font-size:11px;font-weight:bold;border:none;background:transparent;"
+                "color:#a3d977;font-size:11px;font-weight:bold;"
+                "border:none;background:transparent;"
+            )
+            self.lbl_media_song.setText("미디어 정보 대기 중...")
+            # 썸네일 플레이스홀더 (아직 앨범아트 없을 때)
+            self.lbl_media_thumbnail.setText("🎵")
+            self.lbl_media_thumbnail.setStyleSheet(
+                "border:1px solid #555;border-radius:4px;background:#1a1a1e;"
+                "color:#555;font-size:20px;"
             )
             self._media_source_row.setVisible(True)
             self.btn_toggle_source.setEnabled(
@@ -474,6 +482,7 @@ class DisplayMirrorSection(QWidget):
         else:
             self._media_card.setVisible(False)
             self._lbl_source_off.setVisible(True)
+            self.lbl_media_song.setText("")
             self._media_source_row.setVisible(False)
 
     def update_current_source(self, decision, state):
