@@ -497,10 +497,10 @@ class DisplayMirrorSection(QWidget):
 
         if decision == "media":
             if state == "phase1":
-                text = "앨범아트 (판별 중...)"
+                text = "미디어 (판별 중...)"
                 color = "#d4c85a"
             else:
-                text = "앨범아트 사용 중"
+                text = "미디어 사용 중"
                 color = "#a3d977"
         else:  # "mirror"
             if state == "audio_idle":
