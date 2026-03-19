@@ -214,6 +214,11 @@ class MainWindow(QMainWindow):
             initial_params=engine_params,
         )
 
+        # ★ 직전 미디어 판별값 복원
+        last = getattr(self.tab_control, '_last_media_confirmed', None)
+        if last and self.engine_ctrl.engine:
+            self.engine_ctrl.engine._media_detect_last_confirmed = last
+
     def stop_engine(self):
         self.engine_ctrl.stop_engine()
 
@@ -247,6 +252,11 @@ class MainWindow(QMainWindow):
             mode=mode_str,
             initial_params=engine_params,
         )
+
+         # ★ 직전 미디어 판별값 복원
+        last = getattr(self.tab_control, '_last_media_confirmed', None)
+        if last and self.engine_ctrl.engine:
+            self.engine_ctrl.engine._media_detect_last_confirmed = last
 
     def _toggle_pause(self):
         is_paused = self.engine_ctrl.toggle_pause()

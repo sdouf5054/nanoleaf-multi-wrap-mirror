@@ -92,6 +92,7 @@ class ControlTab(QWidget):
         self._display_on = opts.get("default_display_enabled", False)
         self._audio_on = opts.get("default_audio_enabled", False)
         self._media_on = opts.get("default_media_enabled", False)
+        self._last_media_confirmed = None  # ★ 엔진 재시작 시 판별값 보존
 
         # 저장/되돌리기 스냅샷
         self._applied_snapshot = copy.deepcopy(config)
@@ -543,6 +544,11 @@ class ControlTab(QWidget):
         self._sync_flowing_state()
         if self._is_running:
             self._sync_config_from_ui()
+            # ★ 엔진 재시작 전 직전 확정값 보존
+            if self._engine_ctrl and self._engine_ctrl.engine:
+                self._last_media_confirmed = getattr(
+                    self._engine_ctrl.engine, '_media_detect_last_confirmed', None
+                )
             self.request_mode_switch.emit(self._get_engine_mode_string())
 
     def _on_audio_toggled(self, checked):
@@ -553,6 +559,11 @@ class ControlTab(QWidget):
         self._sync_flowing_state()
         if self._is_running:
             self._sync_config_from_ui()
+            # ★ 엔진 재시작 전 직전 확정값 보존
+            if self._engine_ctrl and self._engine_ctrl.engine:
+                self._last_media_confirmed = getattr(
+                    self._engine_ctrl.engine, '_media_detect_last_confirmed', None
+                )
             self.request_mode_switch.emit(self._get_engine_mode_string())
 
     def _on_media_toggled(self, checked):
