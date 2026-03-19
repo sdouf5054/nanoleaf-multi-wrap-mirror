@@ -6,10 +6,15 @@
 
 [미디어 연동 추가]
 - toggle_media: 미디어 연동 토글 스위치
-- lbl_media_info: 현재 재생 곡 정보 표시 라벨
 - tag_media: 상태 태그 (ON/OFF)
 - _media_on 상태 관리
 - HAS_MEDIA_SESSION=False 시 토글 비활성 + 툴팁 안내
+
+[v6 변경]
+- lbl_media_info 및 _media_info_timer 제거 (상태바 미디어 메시지 제거)
+- section_mirror.refresh_thumbnail_requested 시그널 연결
+  → MediaFrameProvider 캐시 리셋 + 즉시 재폴링
+- _update_media_thumbnail(): 3초마다 썸네일만 갱신 (곡 정보 라벨 없음)
 
 [Refactor] 범용 위젯 분리
 - ToggleSwitch → ui/widgets/toggle_switch.py
@@ -67,14 +72,7 @@ from core.media_session import HAS_MEDIA_SESSION
 # ══════════════════════════════════════════════════════════════════
 
 class ControlTab(QWidget):
-    """통합 컨트롤 탭 — 토글 기반 반응형 UI.
-
-    Signals → MainWindow:
-        request_engine_start(str)
-        request_engine_stop()
-        request_engine_pause()
-        config_applied()
-    """
+    """통합 컨트롤 탭 — 토글 기반 반응형 UI."""
 
     request_engine_start = Signal(str)
     request_engine_stop = Signal()
@@ -93,7 +91,7 @@ class ControlTab(QWidget):
         opts = config.get("options", {})
         self._display_on = opts.get("default_display_enabled", False)
         self._audio_on = opts.get("default_audio_enabled", False)
-        self._media_on = opts.get("default_media_enabled", False)  # ★ 미디어 연동
+        self._media_on = opts.get("default_media_enabled", False)
 
         # 저장/되돌리기 스냅샷
         self._applied_snapshot = copy.deepcopy(config)
@@ -107,10 +105,10 @@ class ControlTab(QWidget):
         self._layout_debounce.setInterval(300)
         self._layout_debounce.timeout.connect(self._emit_layout_params)
 
-        # ★ 미디어 정보 갱신 타이머 (3초마다)
-        self._media_info_timer = QTimer(self)
-        self._media_info_timer.setInterval(3000)
-        self._media_info_timer.timeout.connect(self._update_media_info_label)
+        # ★ 미디어 썸네일 갱신 타이머 (3초마다, 곡 정보 라벨 없이 썸네일만)
+        self._media_thumbnail_timer = QTimer(self)
+        self._media_thumbnail_timer.setInterval(3000)
+        self._media_thumbnail_timer.timeout.connect(self._update_media_thumbnail)
 
         # 자원 모니터링
         self._process = psutil.Process(os.getpid())
@@ -141,6 +139,8 @@ class ControlTab(QWidget):
         container.setStyleSheet(
             "QGroupBox{padding-top:14px;margin-top:4px;}"
             "QGroupBox::title{subcontrol-position:top left;padding:0 4px;}"
+            "QToolTip{background:#3a3a42;color:#e0e0e0;border:1px solid #666;"
+            "padding:4px 8px;font-size:11px;}"
         )
 
         scroll.setWidget(container)
@@ -215,14 +215,6 @@ class ControlTab(QWidget):
         info_row.addWidget(self.fps_label)
 
         lay.addLayout(info_row)
-
-        # ★ 미디어 정보 라벨 (상태 행 아래)
-        self.lbl_media_info = QLabel("")
-        self.lbl_media_info.setStyleSheet(
-            "font-size:11px;color:#888;font-style:italic;padding-left:2px;"
-        )
-        self.lbl_media_info.setVisible(False)
-        lay.addWidget(self.lbl_media_info)
 
         # 버튼 행
         btn_row = QHBoxLayout()
@@ -470,6 +462,10 @@ class ControlTab(QWidget):
         self.section_mirror.params_changed.connect(self._on_display_params_changed)
         self.section_mirror.layout_params_changed.connect(self._on_layout_changed)
         self.section_mirror.zone_count_changed.connect(self._on_zone_count_changed)
+        # ★ 썸네일 새로고침 시그널 연결
+        self.section_mirror.refresh_thumbnail_requested.connect(
+            self._on_refresh_thumbnail_requested
+        )
         lay.addWidget(self.section_mirror)
         panel.set_content_layout(lay)
 
@@ -537,8 +533,7 @@ class ControlTab(QWidget):
             self.toggle_media.blockSignals(True)
             self.toggle_media.setChecked(False)
             self.toggle_media.blockSignals(False)
-            self.lbl_media_info.setVisible(False)
-            self._media_info_timer.stop()
+            self._media_thumbnail_timer.stop()
         # 미디어 토글은 디스플레이 ON일 때만 활성
         self.toggle_media.setEnabled(checked and HAS_MEDIA_SESSION)
         # 미러링 패널에 소스 상태 갱신
@@ -569,14 +564,11 @@ class ControlTab(QWidget):
         if hasattr(self, 'section_mirror'):
             self.section_mirror.set_media_active(checked)
 
-        # 미디어 정보 라벨 표시/숨김 + 타이머 제어
-        self.lbl_media_info.setVisible(checked)
-        if checked:
-            self.lbl_media_info.setText("미디어 정보 대기 중...")
-            self._media_info_timer.start()
+        # ★ 썸네일 타이머 제어
+        if checked and self._is_running:
+            self._media_thumbnail_timer.start()
         else:
-            self._media_info_timer.stop()
-            self.lbl_media_info.setText("")
+            self._media_thumbnail_timer.stop()
 
         if self._is_running:
             self._push_params_to_engine()
@@ -592,7 +584,7 @@ class ControlTab(QWidget):
         self.section_mirror.set_flowing_active(is_flowing)
 
     def _update_toggle_panels(self, animate=True):
-        # ── 태그 갱신 ──
+        # ── 태그 갱신 (각 토글마다 고유 색상) ──
         if self._display_on:
             self.tag_display.setText("디스플레이 ON")
             self.tag_display.setStyleSheet(
@@ -609,7 +601,7 @@ class ControlTab(QWidget):
         if self._audio_on:
             self.tag_audio.setText("오디오 ON")
             self.tag_audio.setStyleSheet(
-                "background:#1a3456;color:#7ec8e3;padding:2px 8px;"
+                "background:#2e1a45;color:#c49be8;padding:2px 8px;"
                 "border-radius:8px;font-size:10px;font-weight:600;"
             )
         else:
@@ -646,7 +638,7 @@ class ControlTab(QWidget):
         opts = self.config.setdefault("options", {})
         opts["default_display_enabled"] = self._display_on
         opts["default_audio_enabled"] = self._audio_on
-        opts["default_media_enabled"] = self._media_on  # ★ 미디어 기본값 저장
+        opts["default_media_enabled"] = self._media_on
         self._applied_snapshot.setdefault("options", {})["default_display_enabled"] = self._display_on
         self._applied_snapshot.setdefault("options", {})["default_audio_enabled"] = self._audio_on
         self._applied_snapshot.setdefault("options", {})["default_media_enabled"] = self._media_on
@@ -670,11 +662,11 @@ class ControlTab(QWidget):
         self.lbl_toggle_default_hint.setText(f"기본값: {' / '.join(parts)}")
 
     # ══════════════════════════════════════════════════════════════
-    #  ★ 미디어 정보 라벨 갱신
+    #  ★ 미디어 썸네일 + 곡 정보 툴팁 + 현재 소스 상태 갱신
     # ══════════════════════════════════════════════════════════════
 
-    def _update_media_info_label(self):
-        """3초마다 엔진의 MediaFrameProvider에서 곡 정보 + 썸네일을 갱신."""
+    def _update_media_thumbnail(self):
+        """3초마다 엔진에서 썸네일 + 곡 정보 + 현재 소스 판별 결과를 갱신."""
         if not self._media_on or not self._is_running:
             return
         if not self._engine_ctrl or not self._engine_ctrl.engine:
@@ -683,26 +675,49 @@ class ControlTab(QWidget):
         engine = self._engine_ctrl.engine
         provider = getattr(engine, '_media_provider', None)
         if provider is None:
-            self.lbl_media_info.setText("미디어 연동 대기 중...")
             return
-
-        info = provider.get_media_info()
-        if info:
-            artist = info.get("artist", "")
-            title = info.get("title", "")
-            if artist and title:
-                self.lbl_media_info.setText(f"♪ {artist} — {title}")
-            elif title:
-                self.lbl_media_info.setText(f"♪ {title}")
-            else:
-                self.lbl_media_info.setText("미디어 정보 없음")
-        else:
-            self.lbl_media_info.setText("미디어 정보 없음")
 
         # ★ 미러링 패널의 앨범아트 썸네일 갱신
         if hasattr(self, 'section_mirror'):
             frame = provider.get_frame()
             self.section_mirror.update_media_thumbnail(frame)
+
+        # ★ 곡 정보를 카드 라벨 + 썸네일 툴팁에 설정
+        info = provider.get_media_info()
+        if info and hasattr(self, 'section_mirror'):
+            artist = info.get("artist", "")
+            title = info.get("title", "")
+            if artist and title:
+                song_text = f"♪ {artist} — {title}"
+            elif title:
+                song_text = f"♪ {title}"
+            else:
+                song_text = ""
+            self.section_mirror.lbl_media_song.setText(song_text)
+            self.section_mirror.lbl_media_thumbnail.setToolTip(song_text)
+
+        # ★ 현재 소스 판별 결과를 미러링 패널에 전달
+        if hasattr(self, 'section_mirror'):
+            decision = getattr(engine, '_media_detect_decision', "media")
+            state = getattr(engine, '_media_detect_state', "idle")
+            self.section_mirror.update_current_source(decision, state)
+
+    def _on_refresh_thumbnail_requested(self):
+        """★ 썸네일 새로고침 버튼 클릭 — MediaFrameProvider 캐시 리셋 + 즉시 재폴링."""
+        if not self._engine_ctrl or not self._engine_ctrl.engine:
+            return
+
+        engine = self._engine_ctrl.engine
+        provider = getattr(engine, '_media_provider', None)
+        if provider is None:
+            return
+
+        # 미디어 해시를 0으로 리셋 → 다음 폴링에서 강제 재추출
+        with provider._lock:
+            provider._media_hash = 0
+
+        # 즉시 썸네일 갱신 시도
+        self._update_media_thumbnail()
 
     # ══════════════════════════════════════════════════════════════
     #  기타 이벤트
@@ -825,7 +840,6 @@ class ControlTab(QWidget):
 
     @property
     def media_enabled(self) -> bool:
-        """★ 미디어 연동 토글 상태."""
         return self._media_on
 
     @property
@@ -845,12 +859,11 @@ class ControlTab(QWidget):
         self.spin_target_fps.setEnabled(not running)
         self.combo_audio_device.setEnabled(not running)
 
-        # ★ 미디어 정보 타이머 제어
+        # ★ 썸네일 타이머 제어
         if running and self._media_on:
-            self.lbl_media_info.setVisible(True)
-            self._media_info_timer.start()
+            self._media_thumbnail_timer.start()
         elif not running:
-            self._media_info_timer.stop()
+            self._media_thumbnail_timer.stop()
 
     def update_fps(self, fps):
         self.fps_label.setText(f"{fps:.1f} fps")
@@ -885,7 +898,7 @@ class ControlTab(QWidget):
         params = {
             "display_enabled": self._display_on,
             "audio_enabled": self._audio_on,
-            "media_color_enabled": self._media_on,  # ★ 미디어 연동
+            "media_color_enabled": self._media_on,
             "master_brightness": self.slider_master_brightness.value() / 100.0,
         }
         if self._display_on:
@@ -904,7 +917,7 @@ class ControlTab(QWidget):
         return self._params_builder.build(
             display_enabled=self._display_on,
             audio_enabled=self._audio_on,
-            media_color_enabled=self._media_on,  # ★ 미디어 연동
+            media_color_enabled=self._media_on,
             master_brightness=self.slider_master_brightness.value() / 100.0,
             display_params=self.section_mirror.collect_params() if self._display_on else None,
             color_params=self.section_color.collect_params() if not self._display_on else None,
@@ -957,6 +970,6 @@ class ControlTab(QWidget):
 
     def cleanup(self):
         self._res_timer.stop()
-        self._media_info_timer.stop()
+        self._media_thumbnail_timer.stop()
         if hasattr(self, 'section_audio'):
             self.section_audio.cleanup()

@@ -20,6 +20,12 @@
 - combo_media_source: 자동/앨범아트 강제/미러링 강제 선택
   → 미디어 연동 ON 상태에서만 표시
 
+[v6 추가]
+- btn_refresh_thumbnail: 썸네일 새로고침 버튼
+  → 미디어 연동 ON 상태에서 썸네일 옆에 표시
+  → 클릭 시 refresh_thumbnail_requested 시그널 emit
+  → tab_control에서 MediaFrameProvider 캐시 리셋 + 재폴링
+
 [Hotfix] flowing 모드 활성 시 미러링 설정 비활성화
 """
 
@@ -82,11 +88,13 @@ class DisplayMirrorSection(QWidget):
         params_changed(): 파라미터가 변경되었을 때 emit
         layout_params_changed(): 감쇠/페널티가 변경되었을 때 emit (디바운스 필요)
         zone_count_changed(int): 구역 수 변경 시 emit
+        refresh_thumbnail_requested(): ★ 썸네일 새로고침 버튼 클릭 시 emit
     """
 
     params_changed = Signal()
     layout_params_changed = Signal()
     zone_count_changed = Signal(int)
+    refresh_thumbnail_requested = Signal()
 
     def __init__(self, config, parent=None):
         super().__init__(parent)
@@ -109,26 +117,73 @@ class DisplayMirrorSection(QWidget):
         gl.setSpacing(_GROUP_SPACING)
         gl.setContentsMargins(*_GROUP_MARGINS)
 
-        # ── ★ 소스 상태 라벨 + 썸네일 프리뷰 ──
-        source_row = QHBoxLayout()
-        self.lbl_media_source = QLabel("소스: 화면 캡처")
-        self.lbl_media_source.setStyleSheet(
-            "color:#888;font-size:11px;font-style:italic;padding:2px 0;"
+        # ── ★ 미디어 소스 카드 (미디어 ON 시에만 표시) ──
+        self._media_card = QFrame()
+        self._media_card.setStyleSheet(
+            "QFrame#mediaCard{background:#2a2a30;border:1px solid #444;"
+            "border-radius:6px;}"
         )
-        source_row.addWidget(self.lbl_media_source)
+        self._media_card.setObjectName("mediaCard")
+        self._media_card.setVisible(False)
+        card_lay = QHBoxLayout(self._media_card)
+        card_lay.setContentsMargins(10, 8, 10, 8)
+        card_lay.setSpacing(10)
 
+        # 썸네일 (56×56)
         self.lbl_media_thumbnail = QLabel()
-        self.lbl_media_thumbnail.setMaximumSize(64, 64)
-        self.lbl_media_thumbnail.setMinimumSize(32, 32)
+        self.lbl_media_thumbnail.setFixedSize(56, 56)
         self.lbl_media_thumbnail.setStyleSheet(
-            "border:1px solid #555;border-radius:4px;background:#2b2b2b;"
+            "border:1px solid #555;border-radius:4px;background:#1a1a1e;"
         )
         self.lbl_media_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_media_thumbnail.setVisible(False)
-        source_row.addWidget(self.lbl_media_thumbnail)
+        card_lay.addWidget(self.lbl_media_thumbnail)
 
-        source_row.addStretch()
-        gl.addLayout(source_row)
+        # 텍스트 영역 (소스 상태 + 곡 정보)
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+
+        self.lbl_media_source = QLabel("미디어 연동 활성")
+        self.lbl_media_source.setStyleSheet(
+            "color:#a3d977;font-size:11px;font-weight:bold;"
+            "border:none;background:transparent;"
+        )
+        text_col.addWidget(self.lbl_media_source)
+
+        self.lbl_media_song = QLabel("")
+        self.lbl_media_song.setStyleSheet(
+            "color:#999;font-size:10px;border:none;background:transparent;"
+        )
+        self.lbl_media_song.setWordWrap(True)
+        text_col.addWidget(self.lbl_media_song)
+
+        card_lay.addLayout(text_col, 1)
+
+        # 새로고침 버튼 (카드 내부 스타일)
+        self.btn_refresh_thumbnail = QPushButton("🔄")
+        self.btn_refresh_thumbnail.setFixedSize(32, 32)
+        self.btn_refresh_thumbnail.setToolTip(
+            "앨범아트를 수동으로 다시 가져옵니다"
+        )
+        self.btn_refresh_thumbnail.setStyleSheet(
+            "QPushButton{background:#363640;border:1px solid #555;"
+            "border-radius:6px;font-size:14px;padding:0;}"
+            "QPushButton:hover{background:#46465a;border-color:#888;}"
+            "QPushButton:pressed{background:#2a2a34;}"
+        )
+        self.btn_refresh_thumbnail.clicked.connect(
+            self.refresh_thumbnail_requested.emit
+        )
+        card_lay.addWidget(self.btn_refresh_thumbnail)
+
+        gl.addWidget(self._media_card)
+
+        # ── 미디어 OFF 시 보이는 소스 라벨 (카드 대신) ──
+        self._lbl_source_off = QLabel("소스: 화면 캡처")
+        self._lbl_source_off.setStyleSheet(
+            "color:#888;font-size:11px;font-style:italic;"
+        )
+        gl.addWidget(self._lbl_source_off)
 
         # ── ★ 미디어 소스 오버라이드 콤보 (미디어 ON 시에만 표시) ──
         self._media_source_row = QWidget()
@@ -377,11 +432,7 @@ class DisplayMirrorSection(QWidget):
         self.params_changed.emit()
 
     def _on_toggle_source_clicked(self):
-        """전환 버튼 클릭 — 엔진의 현재 자동 판별 결과를 즉시 반전시키는 트리거를 보냄.
-
-        콤보박스는 '자동 판별' 그대로 유지되며, 다음 곡이 재생되면
-        자동으로 새 판별이 시작됩니다.
-        """
+        """전환 버튼 클릭 — 엔진의 현재 자동 판별 결과를 즉시 반전시키는 트리거를 보냄."""
         self._media_toggle_count += 1
         self.params_changed.emit()
 
@@ -407,26 +458,56 @@ class DisplayMirrorSection(QWidget):
     # ── ★ 미디어 연동 소스 상태 ──────────────────────────────────
 
     def set_media_active(self, active):
-        """미디어 연동 활성 상태를 표시 + 소스 오버라이드 콤보 표시/숨김."""
+        """미디어 연동 활성 상태를 표시 — 카드/라벨 전환."""
         self._media_active = active
         if active:
-            self.lbl_media_source.setText("소스: 미디어 (앨범아트)")
+            self._media_card.setVisible(True)
+            self._lbl_source_off.setVisible(False)
+            self.lbl_media_source.setText("미디어 연동 활성")
             self.lbl_media_source.setStyleSheet(
-                "color:#a3d977;font-size:11px;font-weight:bold;padding:2px 0;"
+                "color:#a3d977;font-size:11px;font-weight:bold;border:none;background:transparent;"
             )
-            self.lbl_media_thumbnail.setVisible(True)
             self._media_source_row.setVisible(True)
-            # ★ row가 표시될 때 버튼 활성화 상태 동기화
             self.btn_toggle_source.setEnabled(
                 self.combo_media_source.currentData() == "auto"
             )
         else:
-            self.lbl_media_source.setText("소스: 화면 캡처")
-            self.lbl_media_source.setStyleSheet(
-                "color:#888;font-size:11px;font-style:italic;padding:2px 0;"
-            )
-            self.lbl_media_thumbnail.setVisible(False)
+            self._media_card.setVisible(False)
+            self._lbl_source_off.setVisible(True)
             self._media_source_row.setVisible(False)
+
+    def update_current_source(self, decision, state):
+        """★ 현재 실제 소스 판별 결과를 라벨에 실시간 표시.
+
+        Args:
+            decision: "media" 또는 "mirror" — 현재 사용 중인 소스
+            state: "idle"|"phase1"|"holding"|"phase2"|"audio_idle" — 판별 상태
+        """
+        if not self._media_active:
+            return
+
+        if decision == "media":
+            if state == "phase1":
+                text = "앨범아트 (판별 중...)"
+                color = "#d4c85a"
+            else:
+                text = "앨범아트 사용 중"
+                color = "#a3d977"
+        else:  # "mirror"
+            if state == "audio_idle":
+                text = "미러링 (오디오 무음)"
+                color = "#e6a85a"
+            elif state == "phase1":
+                text = "미러링 (판별 중...)"
+                color = "#d4c85a"
+            else:
+                text = "미러링 사용 중"
+                color = "#7ec8e3"
+
+        self.lbl_media_source.setText(text)
+        self.lbl_media_source.setStyleSheet(
+            f"color:{color};font-size:11px;font-weight:bold;border:none;background:transparent;"
+        )
 
     def update_media_thumbnail(self, frame):
         """앨범아트 프레임을 썸네일로 표시."""
@@ -439,7 +520,7 @@ class DisplayMirrorSection(QWidget):
             qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
             pixmap = QPixmap.fromImage(qimg)
             scaled = pixmap.scaled(
-                60, 60,
+                54, 54,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
