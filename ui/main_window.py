@@ -17,6 +17,12 @@
 
 [미디어 연동 추가]
 - _CONTROL_OPTION_KEYS에 "default_media_enabled" 추가
+
+[Hotfix] startup 모드에서 창이 뜨는 문제 수정
+  - ★ start_hidden 플래그 추가: True이면 statusBar/상태 관련 호출이 show를 트리거하지 않도록 보호
+  - ★ _on_status_changed: 창이 숨겨진 상태에서 statusBar().showMessage() 호출 시
+    Qt가 내부적으로 창을 visible로 만드는 것을 방지
+  - ★ _show_window() 호출 시 start_hidden 플래그 해제
 """
 
 import ctypes
@@ -76,10 +82,14 @@ class SessionEventFilter(QAbstractNativeEventFilter):
 class MainWindow(QMainWindow):
     """메인 윈도우 — 새 토글 기반 UI."""
 
-    def __init__(self, config):
+    def __init__(self, config, start_hidden=False):
         super().__init__()
         self.config = config
         self._force_quit = False
+
+        # ★ startup 모드 플래그: True이면 사용자가 명시적으로 창을 열 때까지
+        #   statusBar 등의 호출이 창을 visible로 만들지 않도록 보호
+        self._start_hidden = start_hidden
 
         self.setWindowTitle("Nanoleaf Screen Mirror")
         self.setMinimumSize(600, 700)
@@ -124,7 +134,9 @@ class MainWindow(QMainWindow):
         self.engine_ctrl.status_changed.connect(self.tab_control.update_status)
 
         # ── 상태바 ──
-        self.statusBar().showMessage("준비")
+        # ★ start_hidden 모드에서는 statusBar 접근을 지연시킴
+        if not start_hidden:
+            self.statusBar().showMessage("준비")
 
         # ── 시스템 트레이 ──
         opts = config.get("options", {})
@@ -140,9 +152,14 @@ class MainWindow(QMainWindow):
         self._session_filter = SessionEventFilter(self._on_session_event)
         QApplication.instance().installNativeEventFilter(self._session_filter)
         try:
-            ctypes.windll.wtsapi32.WTSRegisterSessionNotification(
-                int(self.winId()), 0
-            )
+            # ★ winId()는 네이티브 윈도우를 강제 생성하며,
+            #   이 과정에서 WS_VISIBLE이 설정될 수 있음.
+            hwnd = int(self.winId())
+            ctypes.windll.wtsapi32.WTSRegisterSessionNotification(hwnd, 0)
+
+            # ★ start_hidden 모드: winId() 직후 Win32 API로 즉시 숨김
+            if self._start_hidden:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
         except Exception:
             pass
 
@@ -255,7 +272,14 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _on_status_changed(self, text):
-        self.statusBar().showMessage(text)
+        """상태 메시지 갱신.
+
+        ★ Hotfix: 창이 한 번도 show()된 적 없는 상태(_start_hidden=True)에서
+        statusBar().showMessage()를 호출하면 Qt가 내부적으로 창을 visible로
+        만들 수 있음. 이 경우 statusBar 갱신을 건너뛰고 트레이만 갱신.
+        """
+        if not self._start_hidden:
+            self.statusBar().showMessage(text)
         self.tray.update_status(text)
 
     def _on_error(self, msg, severity="critical"):
@@ -267,7 +291,7 @@ class MainWindow(QMainWindow):
         트레이 실행 시 의도치 않게 창이 나타나는 문제를 방지.
         """
         if severity == "critical":
-            if self.isVisible():
+            if self.isVisible() and not self._start_hidden:
                 # 창이 보이는 상태: 기존대로 QMessageBox 사용
                 QMessageBox.warning(self, "오류", msg)
             else:
@@ -279,11 +303,13 @@ class MainWindow(QMainWindow):
                         QSystemTrayIcon.MessageIcon.Warning,
                         5000,
                     )
-                # 상태바 + 트레이 상태 텍스트도 갱신
-                self.statusBar().showMessage(f"⚠ {msg}")
+                # ★ statusBar도 보호
+                if not self._start_hidden:
+                    self.statusBar().showMessage(f"⚠ {msg}")
                 self.tray.update_status(f"⚠ {msg}")
         else:
-            self.statusBar().showMessage(f"⚠ {msg}")
+            if not self._start_hidden:
+                self.statusBar().showMessage(f"⚠ {msg}")
             self.tray.update_status(f"⚠ {msg}")
             QTimer.singleShot(5000, self._restore_status)
 
@@ -301,7 +327,8 @@ class MainWindow(QMainWindow):
 
     def _restore_status(self):
         text = "실행 중" if self.engine_ctrl.is_running else "준비"
-        self.statusBar().showMessage(text)
+        if not self._start_hidden:
+            self.statusBar().showMessage(text)
         self.tray.update_status(text)
 
     # ══════════════════════════════════════════════════════════════
@@ -326,23 +353,27 @@ class MainWindow(QMainWindow):
                 self._was_running_before_lock = True
                 self._lock_restart_mode = self.tab_control._get_engine_mode_string()
                 self.engine_ctrl.stop_engine()
-                self.statusBar().showMessage("잠금 감지 — 엔진 중지")
+                if not self._start_hidden:
+                    self.statusBar().showMessage("잠금 감지 — 엔진 중지")
 
         elif event == "unlock":
             if self._was_running_before_lock:
                 self._was_running_before_lock = False
                 mode = self._lock_restart_mode or "unified"
                 QTimer.singleShot(3000, lambda: self.start_engine(mode))
-                self.statusBar().showMessage("잠금 해제 — 3초 후 재시작")
+                if not self._start_hidden:
+                    self.statusBar().showMessage("잠금 해제 — 3초 후 재시작")
 
     def _on_display_change_settled(self):
         self.engine_ctrl.on_display_changed()
-        self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")
+        if not self._start_hidden:
+            self.statusBar().showMessage("디스플레이 변경 감지 — 캡처 재초기화 중...")
 
     def _on_session_resume_settled(self):
         if self.engine_ctrl.is_running:
             self.engine_ctrl.on_session_resume()
-            self.statusBar().showMessage("절전 복귀 — USB 재연결 중...")
+            if not self._start_hidden:
+                self.statusBar().showMessage("절전 복귀 — USB 재연결 중...")
 
     # ══════════════════════════════════════════════════════════════
     #  단일 인스턴스
@@ -363,6 +394,8 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _show_window(self):
+        # ★ 사용자가 명시적으로 창을 열면 start_hidden 해제
+        self._start_hidden = False
         self.show()
         self.showNormal()
         self.activateWindow()

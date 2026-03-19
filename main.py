@@ -7,12 +7,15 @@ Nanoleaf Screen Mirror — GUI 앱 진입점 (PySide6)
 
 [ADR-028] Named Mutex 단일 인스턴스 (KEEP)
 [ADR-029] PySide6 빌트인 High DPI 스케일링 (CHANGE → B)
-  - SetProcessDpiAwareness + Qt 자동 스케일링을 PySide6에 위임
-  - 수동 DPI 재조정 코드 40줄 제거
 
-[Phase 7] auto_start: default_mode → 토글 기본값 기반으로 변경
-[Phase 8] auto_start_mirror → auto_start_engine 키 이름 변경
-         startup 모드 트레이 안정성 강화 (부팅 시 트레이 지연 대응)
+[Hotfix] startup 모드에서 GUI 창이 뜨는 문제 수정
+  근본 원인: MainWindow.__init__()에서 self.winId()를 호출
+  (WTSRegisterSessionNotification에 HWND 필요)하면 Qt가
+  내부적으로 네이티브 윈도우를 create()하면서 WS_VISIBLE이 설정됨.
+  또한 resize/move도 내부적으로 윈도우를 생성할 수 있음.
+
+  해결: start_to_tray 모드에서는 QTimer.singleShot(0) 으로
+  이벤트 루프 첫 틱에서 즉시 hide() 호출 + Win32 SW_HIDE 직접 전송.
 """
 
 import sys
@@ -124,7 +127,9 @@ def main():
     app.setFont(font)
 
     config = load_config()
-    window = MainWindow(config)
+
+    # ★ start_to_tray 플래그를 MainWindow에 전달
+    window = MainWindow(config, start_hidden=start_to_tray)
 
     # === 9) 윈도우 크기 + 화면 중앙 배치 ===
     window.resize(740, 840)
@@ -137,12 +142,23 @@ def main():
         y = (screen_geo.height() - window.height()) // 2
         window.move(max(0, x), max(0, y))
 
-    # === 10) startup 모드: 트레이로 시작, 아니면 창 표시 ===
+    # === 10) startup 모드 처리 ===
     if start_to_tray:
-        # ★ 부팅 시 시스템 트레이 영역이 아직 준비 안 됐을 수 있으므로
-        #    약간의 지연 후 트레이 아이콘이 정상 표시되는지 확인.
-        #    창은 숨긴 상태로 유지.
+        # ★ winId() / resize / move 등이 Qt 내부적으로 네이티브 윈도우를
+        #   create하면서 WS_VISIBLE을 설정할 수 있음.
+        #   이벤트 루프 첫 틱(singleShot(0))에서 강제로 숨김.
+        #   추가로 Win32 API로 직접 SW_HIDE를 보내서 확실하게 처리.
         window.hide()
+        from PySide6.QtCore import QTimer
+        def _ensure_hidden():
+            window.hide()
+            # Win32 API 직접 호출로 확실하게 숨김
+            try:
+                hwnd = int(window.winId())
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+            except Exception:
+                pass
+        QTimer.singleShot(0, _ensure_hidden)
     else:
         window.show()
 
