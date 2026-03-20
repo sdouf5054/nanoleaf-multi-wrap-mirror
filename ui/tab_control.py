@@ -866,6 +866,126 @@ class ControlTab(QWidget):
         self._update_toggle_default_hint()
 
     # ══════════════════════════════════════════════════════════════
+    #  ★ 오디오 모드 순환 (핫키/트레이 메뉴에서 호출)
+    # ══════════════════════════════════════════════════════════════
+
+    # 기본 순서 — 기본 모드 인덱스에서 rotate하여 사용
+    _AUDIO_CYCLE_BASE = ["pulse", "spectrum", "bass_detail", "wave", "dynamic", "flowing"]
+
+    # 모드 키 → 표시 이름 (트레이 알림용)
+    _AUDIO_MODE_DISPLAY_NAMES = {
+        "pulse": "Pulse",
+        "spectrum": "Spectrum",
+        "bass_detail": "Bass Detail",
+        "wave": "Wave",
+        "dynamic": "Dynamic",
+        "flowing": "Flowing",
+    }
+
+    def cycle_audio_mode(self):
+        """오디오 모드 순환 — circular 방식.
+
+        기본 모드(default_audio_mode)부터 시작하여 전체를 한 바퀴 돌고 OFF.
+        디스플레이 OFF면 flowing을 스킵.
+
+        Returns:
+            dict — {"action": "on"|"off", "mode": str, "display_name": str}
+            None — 변경 없음 (이론상 발생 안 함)
+        """
+        from ui.panels.audio_reactive_section import _MODE_TO_INDEX
+
+        # 현재 사용 가능한 모드 목록 (디스플레이 OFF면 flowing 제외)
+        available = [m for m in self._AUDIO_CYCLE_BASE
+                     if m != "flowing" or self._display_on]
+
+        if not self._audio_on:
+            # ── OFF → ON: 기본 모드로 시작 ──
+            default_mode = self.section_audio._default_mode
+            if default_mode not in available:
+                default_mode = available[0] if available else "pulse"
+
+            self._audio_on = True
+            self.toggle_audio.blockSignals(True)
+            self.toggle_audio.setChecked(True)
+            self.toggle_audio.blockSignals(False)
+
+            # 콤보박스 설정 (UI 동기화)
+            self.section_audio.combo_audio_mode.blockSignals(True)
+            self.section_audio._mode_key = default_mode
+            self.section_audio._load_mode_params(default_mode)
+            self.section_audio.combo_audio_mode.setCurrentIndex(
+                _MODE_TO_INDEX.get(default_mode, 0)
+            )
+            self.section_audio.combo_audio_mode.blockSignals(False)
+            self.section_audio._update_mode_visibility()
+
+            self._update_toggle_panels(animate=False)
+            self._sync_flowing_state()
+
+            if self._is_running:
+                self._sync_config_from_ui()
+                self.request_mode_switch.emit(self._get_engine_mode_string())
+            
+            return {
+                "action": "on",
+                "mode": default_mode,
+                "display_name": self._AUDIO_MODE_DISPLAY_NAMES.get(default_mode, default_mode),
+            }
+
+        # ── ON → 다음 모드 (circular) ──
+        current = self.section_audio._mode_key
+
+        # 기본 모드부터 시작하는 circular 순서 만들기
+        default_mode = self.section_audio._default_mode
+        if default_mode not in available:
+            default_mode = available[0]
+
+        start_idx = available.index(default_mode)
+        # rotate: [default, default+1, ..., last, first, ..., default-1]
+        rotated = available[start_idx:] + available[:start_idx]
+
+        if current not in rotated:
+            # 현재 모드가 순환 목록에 없으면 (이론상 없지만 방어)
+            next_mode = rotated[0]
+        else:
+            current_pos = rotated.index(current)
+            if current_pos >= len(rotated) - 1:
+                # 마지막 모드 (= 기본 모드 직전) → OFF
+                self._audio_on = False
+                self.toggle_audio.blockSignals(True)
+                self.toggle_audio.setChecked(False)
+                self.toggle_audio.blockSignals(False)
+                self._update_toggle_panels(animate=False)
+                self._sync_flowing_state()
+                if self._is_running:
+                    self._sync_config_from_ui()
+                    self.request_mode_switch.emit(self._get_engine_mode_string())
+                return {"action": "off", "mode": "", "display_name": ""}
+            else:
+                next_mode = rotated[current_pos + 1]
+
+        # ── 다음 모드로 전환 ──
+        self.section_audio._save_mode_params(current)
+        self.section_audio._mode_key = next_mode
+        self.section_audio._load_mode_params(next_mode)
+        self.section_audio.combo_audio_mode.blockSignals(True)
+        self.section_audio.combo_audio_mode.setCurrentIndex(
+            _MODE_TO_INDEX.get(next_mode, 0)
+        )
+        self.section_audio.combo_audio_mode.blockSignals(False)
+        self.section_audio._update_mode_visibility()
+        self._sync_flowing_state()
+
+        if self._is_running:
+            self._push_params_to_engine()
+
+        return {
+            "action": "on",
+            "mode": next_mode,
+            "display_name": self._AUDIO_MODE_DISPLAY_NAMES.get(next_mode, next_mode),
+        }
+
+    # ══════════════════════════════════════════════════════════════
     #  외부 인터페이스
     # ══════════════════════════════════════════════════════════════
 

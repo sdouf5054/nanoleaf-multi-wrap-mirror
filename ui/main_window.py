@@ -188,6 +188,7 @@ class MainWindow(QMainWindow):
         self.tray.toggle_requested.connect(self._toggle_engine)
         self.tray.brightness_delta.connect(self._on_tray_brightness_delta)
         self.tray.brightness_set.connect(self._on_tray_brightness_set)
+        self.tray.audio_cycle_requested.connect(self._on_audio_cycle)  # ★ 추가
         self.tray.show_window_requested.connect(self._show_window)
         self.tray.quit_requested.connect(self._quit)
 
@@ -276,6 +277,17 @@ class MainWindow(QMainWindow):
     def _on_tray_brightness_set(self, pct):
         """트레이 밝기 절대값."""
         self.tab_control.slider_master_brightness.setValue(pct)
+
+    # ══════════════════════════════════════════════════════════════
+    #  오디오 모드 순환 핫키
+    # ══════════════════════════════════════════════════════════════
+
+    def _on_audio_cycle(self):
+        """★ 오디오 모드 순환 핫키 처리."""
+        self.tab_control.cycle_audio_mode()
+
+        if not self.engine_ctrl.is_running:
+            self.start_engine()
 
     # ══════════════════════════════════════════════════════════════
     #  엔진 상태 콜백

@@ -8,9 +8,15 @@
 - QAction들도 menu의 child로 생성 → 소유권 체인 확보
 - cleanup()에서 menu를 명시적으로 정리
 
+[★ 오디오 모드 순환 핫키 추가]
+- audio_cycle_requested 시그널 추가
+- 옵션에서 설정한 hotkey_audio_cycle 키로 등록
+- 트레이 메뉴에 "오디오 모드 순환" 항목 추가
+
 Signals:
     toggle_requested(): 엔진 on/off 토글 요청
     brightness_delta(int): 밝기 변경 요청 (+10 또는 -10)
+    audio_cycle_requested(): ★ 오디오 모드 순환 요청
     show_window_requested(): 설정 창 표시 요청
     quit_requested(): 앱 종료 요청
 """
@@ -40,6 +46,7 @@ class SystemTray(QSystemTrayIcon):
     toggle_requested = Signal()
     brightness_delta = Signal(int)
     brightness_set = Signal(int)
+    audio_cycle_requested = Signal()       # ★ 오디오 모드 순환
     show_window_requested = Signal()
     quit_requested = Signal()
 
@@ -63,8 +70,6 @@ class SystemTray(QSystemTrayIcon):
         self.activated.connect(self._on_activated)
 
     def _build_menu(self):
-        # ★ QMenu를 인스턴스 변수로 유지 — setContextMenu()만으로는
-        #    Python 측 참조가 사라질 수 있어 GC 대상이 됨
         menu = QMenu()
         self._menu = menu
 
@@ -76,6 +81,12 @@ class SystemTray(QSystemTrayIcon):
         self.onoff_action = QAction("엔진 시작", menu)
         self.onoff_action.triggered.connect(self.toggle_requested.emit)
         menu.addAction(self.onoff_action)
+
+        # ★ 오디오 모드 순환 메뉴 항목
+        self.audio_cycle_action = QAction("오디오 모드 순환", menu)
+        self.audio_cycle_action.triggered.connect(self.audio_cycle_requested.emit)
+        menu.addAction(self.audio_cycle_action)
+
         menu.addSeparator()
 
         bright_menu = QMenu("밝기", menu)
@@ -115,6 +126,7 @@ class SystemTray(QSystemTrayIcon):
         hk_toggle = opts.get("hotkey_toggle", "ctrl+shift+o")
         hk_up = opts.get("hotkey_bright_up", "ctrl+shift+up")
         hk_down = opts.get("hotkey_bright_down", "ctrl+shift+down")
+        hk_audio_cycle = opts.get("hotkey_audio_cycle", "")  # ★ 새 핫키
 
         def _safe_add(hotkey_str, callback):
             if not hotkey_str.strip():
@@ -127,11 +139,10 @@ class SystemTray(QSystemTrayIcon):
             except Exception as e:
                 print(f"[핫키 등록 실패] '{hotkey_str}': {e}")
 
-        # Qt Signal.emit()은 cross-thread safe (queued connection 자동 적용).
-        # keyboard 스레드에서 직접 emit해도 안전.
         _safe_add(hk_toggle, self.toggle_requested.emit)
         _safe_add(hk_up, lambda: self.brightness_delta.emit(10))
         _safe_add(hk_down, lambda: self.brightness_delta.emit(-10))
+        _safe_add(hk_audio_cycle, self.audio_cycle_requested.emit)  # ★
 
     def _clear_hotkeys(self):
         if not HAS_KEYBOARD:
@@ -147,7 +158,7 @@ class SystemTray(QSystemTrayIcon):
 
     def update_status(self, text):
         self.status_action.setText(text)
-        self.setToolTip(f"Nanoleaf Mirror — {text}")
+        self.setToolTip(f"Nanoleaf Mirror - {text}")
 
     def set_engine_running(self, running):
         if running:
@@ -163,7 +174,6 @@ class SystemTray(QSystemTrayIcon):
 
     def cleanup(self):
         self._clear_hotkeys()
-        # ★ 메뉴 명시적 정리 — deleteLater()로 안전하게 해제
         if self._menu is not None:
             self._menu.deleteLater()
             self._menu = None

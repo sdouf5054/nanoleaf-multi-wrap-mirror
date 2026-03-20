@@ -5,8 +5,11 @@
 [Phase 8 변경]
 - "미러링" 표현 → 모드 중립적 표현으로 전면 교체
 - auto_start_mirror → auto_start_engine 키 이름 변경
-- 시작프로그램 헬퍼 메시지 현행화
-- 잠금 화면 설명 현행화
+
+[★ 오디오 모드 순환 핫키 추가]
+- hotkey_audio_cycle: 편집 행 추가
+- 기본값 없음 (사용자가 명시적으로 설정)
+- 동작 설명 라벨 추가
 """
 
 import os
@@ -100,14 +103,11 @@ def _register_startup():
         import winreg
 
         if getattr(sys, 'frozen', False):
-            # exe 빌드: sys.executable이 곧 앱 실행 파일
             cmd = f'"{sys.executable}" --startup'
         else:
-            # 스크립트 실행: pythonw.exe + main.py 절대 경로
             pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
             if not os.path.exists(pythonw):
                 pythonw = sys.executable
-            # main.py 경로를 이 파일 기준으로 계산 (CWD 의존 제거)
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             main_py = os.path.join(project_root, "main.py")
             cmd = f'"{pythonw}" "{main_py}" --startup'
@@ -157,7 +157,21 @@ class OptionsTab(QWidget):
         self.edit_toggle = HotkeyEdit(); self.edit_toggle.setText(self.opt.get("hotkey_toggle", "ctrl+shift+o")); form.addRow("엔진 On/Off :", self.edit_toggle)
         self.edit_bright_up = HotkeyEdit(); self.edit_bright_up.setText(self.opt.get("hotkey_bright_up", "ctrl+shift+up")); form.addRow("밝기 +10% :", self.edit_bright_up)
         self.edit_bright_down = HotkeyEdit(); self.edit_bright_down.setText(self.opt.get("hotkey_bright_down", "ctrl+shift+down")); form.addRow("밝기 -10% :", self.edit_bright_down)
+        # ★ 오디오 모드 순환 핫키
+        self.edit_audio_cycle = HotkeyEdit()
+        self.edit_audio_cycle.setText(self.opt.get("hotkey_audio_cycle", ""))
+        form.addRow("오디오 모드 순환 :", self.edit_audio_cycle)
         hotkey_layout.addLayout(form)
+
+        # ★ 오디오 모드 순환 설명
+        audio_cycle_hint = QLabel(
+            "OFF → 기본 모드로 ON · ON → 다음 모드 순환 · 한 바퀴 후 OFF\n"
+            "기본 모드부터 시작하여 전체를 한 바퀴 돕니다"
+        )
+        audio_cycle_hint.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
+        audio_cycle_hint.setWordWrap(True)
+        hotkey_layout.addWidget(audio_cycle_hint)
+
         btn_reset_hk = QPushButton("↩ 핫키 기본값 복원"); btn_reset_hk.setFixedWidth(160); btn_reset_hk.clicked.connect(self._reset_hotkeys); hotkey_layout.addWidget(btn_reset_hk)
         layout.addWidget(hotkey_group)
 
@@ -192,8 +206,10 @@ class OptionsTab(QWidget):
     def _on_hotkey_enabled_changed(self, state):
         enabled = bool(state)
         self.edit_toggle.setEnabled(enabled); self.edit_bright_up.setEnabled(enabled); self.edit_bright_down.setEnabled(enabled)
+        self.edit_audio_cycle.setEnabled(enabled)  # ★
     def _reset_hotkeys(self):
         self.edit_toggle.setText("ctrl+shift+o"); self.edit_bright_up.setText("ctrl+shift+up"); self.edit_bright_down.setText("ctrl+shift+down")
+        self.edit_audio_cycle.setText("")  # ★ 기본값: 비어있음
 
     def _save(self):
         self.opt["tray_enabled"] = self.chk_tray.isChecked()
@@ -204,6 +220,7 @@ class OptionsTab(QWidget):
         self.opt["hotkey_toggle"] = self.edit_toggle.text().strip()
         self.opt["hotkey_bright_up"] = self.edit_bright_up.text().strip()
         self.opt["hotkey_bright_down"] = self.edit_bright_down.text().strip()
+        self.opt["hotkey_audio_cycle"] = self.edit_audio_cycle.text().strip()  # ★
 
         # ★ 구 키가 남아 있으면 정리
         self.opt.pop("auto_start_mirror", None)

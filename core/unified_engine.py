@@ -160,6 +160,9 @@ class UnifiedEngine(BaseEngine):
         self._audio_engine: AudioCapture | None = None
         self._cc: ColorCorrection | None = None
 
+        # ── 상태 메시지 추적 (모드 변경 감지용) ──
+        self._last_status_key = None
+
         # ── ★ 미디어 전용 경량 오디오 모니터 플래그 ──
         self._audio_monitor_only = False  # True: 렌더링 미사용, idle 감지 전용
 
@@ -753,6 +756,9 @@ class UnifiedEngine(BaseEngine):
             # ── 파라미터 스냅샷 교체 ──
             self._swap_params()
             ep = self._current_params
+
+            # ── 상태 메시지 갱신 (변경 시에만 emit) ──
+            self._emit_status_message(ep)
 
             # ── 그라데이션 위상 누적 ──
             if ep.color_effect != COLOR_EFFECT_STATIC:
@@ -1652,13 +1658,32 @@ class UnifiedEngine(BaseEngine):
             self._media_provider.stop()
             self._media_provider = None
 
+    # 오디오 모드 키 → 표시 이름
+    _AUDIO_MODE_NAMES = {
+        "pulse": "Pulse", "spectrum": "Spectrum",
+        "bass_detail": "Bass Detail", "wave": "Wave",
+        "dynamic": "Dynamic", "flowing": "Flowing",
+    }
+
     def _emit_status_message(self, ep):
-        """토글 조합에 따른 상태 메시지."""
-        if ep.display_enabled and ep.audio_enabled:
-            self.status_changed.emit("디스플레이 + 오디오 실행 중")
-        elif ep.display_enabled:
-            self.status_changed.emit("디스플레이 미러링 실행 중")
-        elif ep.audio_enabled:
-            self.status_changed.emit("오디오 반응 실행 중")
+        """토글 조합 + 오디오 모드 상태 메시지. 변경 시에만 emit."""
+        if ep.audio_enabled:
+            mode_name = self._AUDIO_MODE_NAMES.get(ep.audio_mode, ep.audio_mode)
+            suffix = f" · 🔊 {mode_name}"
         else:
-            self.status_changed.emit("정적 LED 실행 중")
+            suffix = ""
+
+        if ep.display_enabled and ep.audio_enabled:
+            msg = f"하이브리드 실행 중{suffix}"
+        elif ep.display_enabled:
+            msg = "디스플레이 미러링 실행 중"
+        elif ep.audio_enabled:
+            msg = f"오디오 반응 실행 중{suffix}"
+        else:
+            msg = "정적 LED 실행 중"
+
+        # ★ 메시지가 바뀔 때만 emit — 매 프레임 불필요한 emit 방지
+        key = (ep.display_enabled, ep.audio_enabled, ep.audio_mode)
+        if key != self._last_status_key:
+            self._last_status_key = key
+            self.status_changed.emit(msg)

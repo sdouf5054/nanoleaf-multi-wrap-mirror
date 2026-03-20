@@ -156,6 +156,7 @@ DEFAULT_CONFIG = {
         "hotkey_toggle": "ctrl+shift+o",
         "hotkey_bright_up": "ctrl+shift+up",
         "hotkey_bright_down": "ctrl+shift+down",
+        "hotkey_audio_cycle": "ctrl+shift+a",
         # ★ 신규: 토글 기본값 (기존 default_mode 대체)
         "default_display_enabled": False,
         "default_audio_enabled": False,
