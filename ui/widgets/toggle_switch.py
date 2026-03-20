@@ -3,6 +3,11 @@
 QCheckBox를 상속하여 기존 시그널(stateChanged, toggled) 사용 가능.
 스타일시트 indicator 대신 직접 그려서 QPainter engine==0 경고 방지.
 
+[QSS 테마] paintEvent 텍스트 색상을 palette에서 읽도록 변경.
+  - QColor("#000000") → self.palette().color(QPalette.ColorRole.WindowText)
+  - QSS ToggleSwitch { color: ... } 가 반영됨.
+  - __init__의 인라인 setStyleSheet() 제거 → dark.qss의 ToggleSwitch 셀렉터로 이전.
+
 사용법:
     toggle = ToggleSwitch("디스플레이 미러링")
     toggle.toggled.connect(on_toggled)
@@ -11,7 +16,7 @@ QCheckBox를 상속하여 기존 시그널(stateChanged, toggled) 사용 가능.
 
 from PySide6.QtWidgets import QCheckBox
 from PySide6.QtCore import Qt, QRectF, QSize
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPalette
 
 
 class ToggleSwitch(QCheckBox):
@@ -24,22 +29,7 @@ class ToggleSwitch(QCheckBox):
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
-        # indicator를 숨기고 직접 그림
-        self.setStyleSheet("""
-            QCheckBox {
-                spacing: 8px;
-                font-size: 13px;
-                color: #d0d0d0;
-            }
-            QCheckBox::indicator {
-                width: 0px;
-                height: 0px;
-                margin: 0px;
-                padding: 0px;
-                border: none;
-                background: transparent;
-            }
-        """)
+        # ★ 인라인 setStyleSheet 제거 → dark.qss의 ToggleSwitch 셀렉터로 이전
 
     def sizeHint(self):
         base = super().sizeHint()
@@ -85,7 +75,9 @@ class ToggleSwitch(QCheckBox):
         # ── 텍스트 ──
         text = self.text()
         if text:
-            painter.setPen(QColor("#000000"))
+            # ★ 팔레트에서 텍스트 색상을 읽음 → QSS color 속성이 반영됨
+            text_color = self.palette().color(QPalette.ColorRole.WindowText)
+            painter.setPen(text_color)
             font = self.font()
             painter.setFont(font)
             text_x = tw + self._SPACING

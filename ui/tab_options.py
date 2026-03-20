@@ -10,6 +10,10 @@
 - hotkey_audio_cycle: 편집 행 추가
 - 기본값 없음 (사용자가 명시적으로 설정)
 - 동작 설명 라벨 추가
+
+[QSS 테마] 인라인 setStyleSheet → palette 참조 + property 기반으로 전환.
+  - HotkeyEdit: idle/listening 동적 스타일은 인라인 유지 (palette 참조)
+  - 힌트 라벨: setProperty("role", "hint")
 """
 
 import os
@@ -22,6 +26,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence
 
 from core.config import save_config
+from styles.palette import DARK as _PAL
 
 # ── F13~F24 가상 키 매핑 ──
 _FKEY_MAP = {getattr(Qt.Key, f"Key_F{n}", None): f"f{n}" for n in range(13, 25)}
@@ -60,16 +65,26 @@ class HotkeyEdit(QLineEdit):
         self._set_idle_style()
 
     def _set_idle_style(self):
-        self.setStyleSheet("QLineEdit{background:#2b2b2b;color:#ddd;border:1px solid #555;border-radius:4px;padding:3px 6px;}QLineEdit:hover{border-color:#888;}")
+        # ★ palette 참조로 하드코딩 제거
+        self.setStyleSheet(
+            f"QLineEdit{{background:{_PAL['bg_tertiary']};color:{_PAL['text_primary']};"
+            f"border:1px solid {_PAL['border']};border-radius:4px;padding:3px 6px;}}"
+            f"QLineEdit:hover{{border-color:{_PAL['border_hover']};}}"
+        )
+
     def _set_listening_style(self):
-        self.setStyleSheet("QLineEdit{background:#1a3a5c;color:#7ec8e3;border:2px solid #3a8fc7;border-radius:4px;padding:3px 6px;font-style:italic;}")
+        self.setStyleSheet(
+            f"QLineEdit{{background:{_PAL['hotkey_listen_bg']};color:{_PAL['hotkey_listen_text']};"
+            f"border:2px solid {_PAL['hotkey_listen_border']};border-radius:4px;"
+            "padding:3px 6px;font-style:italic;}}"
+        )
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton: self._start_listening()
         super().mousePressEvent(event)
 
     def _start_listening(self):
-        self._original_text = self.text(); self._listening = True; self.setText("🎹 키를 누르세요…"); self._set_listening_style(); self.setFocus()
+        self._original_text = self.text(); self._listening = True; self.setText("키를 누르세요…"); self._set_listening_style(); self.setFocus()
 
     def keyPressEvent(self, event):
         if not self._listening: return
@@ -98,10 +113,8 @@ def _is_startup_registered():
 
 
 def _register_startup():
-    """[ADR-032] Registry Run key로 시작프로그램 등록."""
     try:
         import winreg
-
         if getattr(sys, 'frozen', False):
             cmd = f'"{sys.executable}" --startup'
         else:
@@ -111,7 +124,6 @@ def _register_startup():
             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             main_py = os.path.join(project_root, "main.py")
             cmd = f'"{pythonw}" "{main_py}" --startup'
-
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, _REG_NAME, 0, winreg.REG_SZ, cmd)
         winreg.CloseKey(key)
@@ -150,25 +162,25 @@ class OptionsTab(QWidget):
         hotkey_group = QGroupBox("글로벌 핫키"); hotkey_layout = QVBoxLayout(hotkey_group)
         self.chk_hotkey = QCheckBox("글로벌 핫키 사용"); self.chk_hotkey.setChecked(self.opt.get("hotkey_enabled", True))
         self.chk_hotkey.stateChanged.connect(self._on_hotkey_enabled_changed); hotkey_layout.addWidget(self.chk_hotkey)
-        hint = QLabel("버튼을 클릭한 뒤 원하는 키를 누르면 자동으로 입력됩니다."); hint.setStyleSheet("color:#888;font-size:11px;"); hint.setWordWrap(True)
+        hint = QLabel("버튼을 클릭한 뒤 원하는 키를 누르면 자동으로 입력됩니다.")
+        hint.setProperty("role", "hint")
+        hint.setWordWrap(True)
         hotkey_layout.addWidget(hint)
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); line.setFrameShadow(QFrame.Shadow.Sunken); hotkey_layout.addWidget(line)
         form = QFormLayout(); form.setLabelAlignment(Qt.AlignmentFlag.AlignRight); form.setSpacing(8)
         self.edit_toggle = HotkeyEdit(); self.edit_toggle.setText(self.opt.get("hotkey_toggle", "ctrl+shift+o")); form.addRow("엔진 On/Off :", self.edit_toggle)
         self.edit_bright_up = HotkeyEdit(); self.edit_bright_up.setText(self.opt.get("hotkey_bright_up", "ctrl+shift+up")); form.addRow("밝기 +10% :", self.edit_bright_up)
         self.edit_bright_down = HotkeyEdit(); self.edit_bright_down.setText(self.opt.get("hotkey_bright_down", "ctrl+shift+down")); form.addRow("밝기 -10% :", self.edit_bright_down)
-        # ★ 오디오 모드 순환 핫키
         self.edit_audio_cycle = HotkeyEdit()
         self.edit_audio_cycle.setText(self.opt.get("hotkey_audio_cycle", ""))
         form.addRow("오디오 모드 순환 :", self.edit_audio_cycle)
         hotkey_layout.addLayout(form)
 
-        # ★ 오디오 모드 순환 설명
         audio_cycle_hint = QLabel(
             "OFF → 기본 모드로 ON · ON → 다음 모드 순환 · 한 바퀴 후 OFF\n"
             "Pulse부터 시작하여 전체를 한 바퀴 돕니다"
         )
-        audio_cycle_hint.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
+        audio_cycle_hint.setProperty("role", "hint")
         audio_cycle_hint.setWordWrap(True)
         hotkey_layout.addWidget(audio_cycle_hint)
 
@@ -179,7 +191,9 @@ class OptionsTab(QWidget):
         lock_group = QGroupBox("잠금 화면 동작"); lock_layout = QVBoxLayout(lock_group)
         self.chk_lock_stop = QCheckBox("잠금 화면(Win+L) 시 엔진 자동 중지 및 LED 소등"); self.chk_lock_stop.setChecked(self.opt.get("turn_off_on_lock", True))
         lock_layout.addWidget(self.chk_lock_stop)
-        lock_note = QLabel("• 체크 시: 잠금 화면 진입 시 LED가 꺼지고, 잠금 해제 후 자동으로 재시작됩니다."); lock_note.setStyleSheet("color:#888;"); lock_note.setWordWrap(True)
+        lock_note = QLabel("• 체크 시: 잠금 화면 진입 시 LED가 꺼지고, 잠금 해제 후 자동으로 재시작됩니다.")
+        lock_note.setProperty("role", "hint")
+        lock_note.setWordWrap(True)
         lock_layout.addWidget(lock_note); layout.addWidget(lock_group)
 
         # 시작프로그램
@@ -193,12 +207,13 @@ class OptionsTab(QWidget):
             "※ 시작프로그램 등록 시 창 없이 트레이로 바로 실행됩니다.\n"
             "※ 엔진 자동 시작 시 컨트롤 탭의 기본값 토글 설정을 사용합니다."
         )
-        startup_note.setStyleSheet("color:#888;"); startup_note.setWordWrap(True)
+        startup_note.setProperty("role", "hint")
+        startup_note.setWordWrap(True)
         startup_layout.addWidget(startup_note); layout.addWidget(startup_group)
 
         # 저장
         btn_layout = QHBoxLayout()
-        btn_save = QPushButton("💾 옵션 저장"); btn_save.clicked.connect(self._save); btn_layout.addWidget(btn_save); btn_layout.addStretch()
+        btn_save = QPushButton("옵션 저장"); btn_save.clicked.connect(self._save); btn_layout.addWidget(btn_save); btn_layout.addStretch()
         layout.addLayout(btn_layout); layout.addStretch()
         self._on_hotkey_enabled_changed(self.chk_hotkey.checkState())
 
@@ -206,10 +221,10 @@ class OptionsTab(QWidget):
     def _on_hotkey_enabled_changed(self, state):
         enabled = bool(state)
         self.edit_toggle.setEnabled(enabled); self.edit_bright_up.setEnabled(enabled); self.edit_bright_down.setEnabled(enabled)
-        self.edit_audio_cycle.setEnabled(enabled)  # ★
+        self.edit_audio_cycle.setEnabled(enabled)
     def _reset_hotkeys(self):
         self.edit_toggle.setText("ctrl+shift+o"); self.edit_bright_up.setText("ctrl+shift+up"); self.edit_bright_down.setText("ctrl+shift+down")
-        self.edit_audio_cycle.setText("")  # ★ 기본값: 비어있음
+        self.edit_audio_cycle.setText("")
 
     def _save(self):
         self.opt["tray_enabled"] = self.chk_tray.isChecked()
@@ -220,9 +235,8 @@ class OptionsTab(QWidget):
         self.opt["hotkey_toggle"] = self.edit_toggle.text().strip()
         self.opt["hotkey_bright_up"] = self.edit_bright_up.text().strip()
         self.opt["hotkey_bright_down"] = self.edit_bright_down.text().strip()
-        self.opt["hotkey_audio_cycle"] = self.edit_audio_cycle.text().strip()  # ★
+        self.opt["hotkey_audio_cycle"] = self.edit_audio_cycle.text().strip()
 
-        # ★ 구 키가 남아 있으면 정리
         self.opt.pop("auto_start_mirror", None)
 
         save_config(self.config)

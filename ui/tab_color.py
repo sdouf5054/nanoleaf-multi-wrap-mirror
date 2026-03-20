@@ -6,6 +6,11 @@
 - _toggle_connection, _set_connected_ui, _set_disconnected_ui,
   _on_force_released, force_disconnect, cleanup 중복 제거
 - _DEVICE_OWNER = "color_tab"
+
+[QSS 테마] 인라인 setStyleSheet → objectName 기반으로 전환.
+  - conn_label: objectName="connLabel" + device_owner의 property 방식
+  - preview_input: 초기 스타일 제거 → QSS QFrame 전역
+  - 테스트 색상 버튼 / preview_output: 동적 RGB → 인라인 유지
 """
 
 import numpy as np
@@ -25,7 +30,6 @@ TEST_COLORS = [
     ("따뜻한 백", 255, 220, 180),
 ]
 
-# ── [ADR-040] 공통 레이아웃 상수 ──
 _GROUP_MARGINS = (6, 16, 6, 4)
 _GROUP_SPACING = 3
 
@@ -61,12 +65,7 @@ class ColorSliderRow(QWidget):
 
 
 class ColorTab(DeviceOwnerMixin, QWidget):
-    """색상 보정 탭.
-
-    DeviceOwnerMixin 제공:
-        _toggle_connection, _set_connected_ui, _set_disconnected_ui,
-        _on_force_released, force_disconnect, _device_cleanup
-    """
+    """색상 보정 탭."""
 
     _DEVICE_OWNER = "color_tab"
     request_mirror_stop = Signal()
@@ -77,9 +76,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
         self.color_cfg = config["color"]
         self._current_test_rgb = (255, 255, 255)
 
-        # ── Mixin 초기화 ──
         self._init_device_owner(device_manager)
-
         self._build_ui()
 
     def _build_ui(self):
@@ -101,7 +98,9 @@ class ColorTab(DeviceOwnerMixin, QWidget):
         self.btn_connect.clicked.connect(self._toggle_connection)
         conn_layout.addWidget(self.btn_connect)
         self.conn_label = QLabel("연결 안 됨")
-        self.conn_label.setStyleSheet("color: #c0392b;")
+        self.conn_label.setObjectName("connLabel")
+        from ui.mixins.device_owner import _set_property
+        _set_property(self.conn_label, "connState", "disconnected")
         conn_layout.addWidget(self.conn_label)
         conn_layout.addStretch()
         layout.addLayout(conn_layout)
@@ -150,6 +149,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
             btn = QPushButton(name)
             btn.setMinimumHeight(32)
             tc = "#000" if (r + g + b) > 380 else "#fff"
+            # ★ 동적 RGB — 인라인 유지
             btn.setStyleSheet(f"background-color:rgb({r},{g},{b});color:{tc};font-weight:bold;border-radius:4px;")
             btn.clicked.connect(lambda checked, rgb=(r, g, b): self._send_test_color(*rgb))
             test_layout.addWidget(btn, i // 5, i % 5)
@@ -160,6 +160,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
         preview_layout.addWidget(QLabel("입력:"))
         self.preview_input = QFrame()
         self.preview_input.setFixedSize(40, 40)
+        # ★ 초기 스타일: 동적으로 바뀌므로 인라인 유지
         self.preview_input.setStyleSheet("background-color:white;border:1px solid #ccc;")
         preview_layout.addWidget(self.preview_input)
         preview_layout.addWidget(QLabel("→ 보정 후:"))
@@ -176,7 +177,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
 
         # 버튼
         btn_layout = QHBoxLayout()
-        btn_save = QPushButton("💾 설정 저장")
+        btn_save = QPushButton("설정 저장")
         btn_save.clicked.connect(self._save)
         btn_layout.addWidget(btn_save)
         btn_reset = QPushButton("↩ 기본값 복원")
@@ -187,7 +188,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
         btn_layout.addWidget(btn_off)
         layout.addLayout(btn_layout)
 
-    # ── 색상 보정 로직 (탭 고유) ──────────────────────────────────
+    # ── 색상 보정 로직 ──
 
     def _apply_correction(self, r, g, b):
         rgb = np.array([[r, g, b]], dtype=np.float32)
@@ -207,6 +208,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
 
     def _send_test_color(self, r, g, b):
         self._current_test_rgb = (r, g, b)
+        # ★ 동적 RGB — 인라인 유지
         self.preview_input.setStyleSheet(f"background-color:rgb({r},{g},{b});border:1px solid #ccc;")
         cr, cg, cb = self._apply_correction(r, g, b)
         self.preview_output.setStyleSheet(f"background-color:rgb({cr},{cg},{cb});border:1px solid #ccc;")

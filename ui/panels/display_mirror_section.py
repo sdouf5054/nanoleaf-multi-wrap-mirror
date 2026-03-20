@@ -27,6 +27,10 @@
   → tab_control에서 MediaFrameProvider 캐시 리셋 + 재폴링
 
 [Hotfix] flowing 모드 활성 시 미러링 설정 비활성화
+
+[QSS 테마] 인라인 setStyleSheet → objectName + QSS 기반으로 전환.
+  - 동적 색상 (lbl_media_source, lbl_media_thumbnail 플레이스홀더)은
+    palette.py 참조로 변경.
 """
 
 from PySide6.QtWidgets import (
@@ -43,6 +47,7 @@ from core.engine_utils import (
     COLOR_EFFECT_GRADIENT_CCW,
     gradient_speed_from_slider,
 )
+from styles.palette import DARK as _PAL
 
 # ── 구역 수 옵션 ──
 _ZONE_OPTIONS = [
@@ -102,8 +107,8 @@ class DisplayMirrorSection(QWidget):
         self._color_effect = COLOR_EFFECT_STATIC
         self._adv_open = False
         self._flowing_active = False
-        self._media_active = False  # ★ 미디어 연동 활성 상태
-        self._media_toggle_count = 0  # ★ 판별 결과 수동 반전 트리거 카운트
+        self._media_active = False
+        self._media_toggle_count = 0
         self._build_ui()
         self.load_from_config()
 
@@ -119,10 +124,6 @@ class DisplayMirrorSection(QWidget):
 
         # ── ★ 미디어 소스 카드 (미디어 ON 시에만 표시) ──
         self._media_card = QFrame()
-        self._media_card.setStyleSheet(
-            "QFrame#mediaCard{background:#2a2a30;border:1px solid #444;"
-            "border-radius:6px;}"
-        )
         self._media_card.setObjectName("mediaCard")
         self._media_card.setVisible(False)
         card_lay = QHBoxLayout(self._media_card)
@@ -131,10 +132,8 @@ class DisplayMirrorSection(QWidget):
 
         # 썸네일 (56×56)
         self.lbl_media_thumbnail = QLabel()
+        self.lbl_media_thumbnail.setObjectName("lblMediaThumb")
         self.lbl_media_thumbnail.setFixedSize(56, 56)
-        self.lbl_media_thumbnail.setStyleSheet(
-            "border:1px solid #555;border-radius:4px;background:#1a1a1e;"
-        )
         self.lbl_media_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_lay.addWidget(self.lbl_media_thumbnail)
 
@@ -144,32 +143,26 @@ class DisplayMirrorSection(QWidget):
         text_col.setSpacing(2)
 
         self.lbl_media_source = QLabel("미디어 연동 활성")
+        self.lbl_media_source.setObjectName("lblMediaSource")
         self.lbl_media_source.setStyleSheet(
-            "color:#a3d977;font-size:11px;font-weight:bold;"
+            f"color:{_PAL['media_active']};font-size:11px;font-weight:bold;"
             "border:none;background:transparent;"
         )
         text_col.addWidget(self.lbl_media_source)
 
         self.lbl_media_song = QLabel("")
-        self.lbl_media_song.setStyleSheet(
-            "color:#999;font-size:10px;border:none;background:transparent;"
-        )
+        self.lbl_media_song.setObjectName("lblMediaSong")
         self.lbl_media_song.setWordWrap(True)
         text_col.addWidget(self.lbl_media_song)
 
         card_lay.addLayout(text_col, 1)
 
-        # 새로고침 버튼 (카드 내부 스타일)
-        self.btn_refresh_thumbnail = QPushButton("🔄")
+        # 새로고침 버튼
+        self.btn_refresh_thumbnail = QPushButton("↻")
+        self.btn_refresh_thumbnail.setObjectName("btnRefreshThumb")
         self.btn_refresh_thumbnail.setFixedSize(32, 32)
         self.btn_refresh_thumbnail.setToolTip(
             "앨범아트를 수동으로 다시 가져옵니다"
-        )
-        self.btn_refresh_thumbnail.setStyleSheet(
-            "QPushButton{background:#363640;border:1px solid #555;"
-            "border-radius:6px;font-size:14px;padding:0;}"
-            "QPushButton:hover{background:#46465a;border-color:#888;}"
-            "QPushButton:pressed{background:#2a2a34;}"
         )
         self.btn_refresh_thumbnail.clicked.connect(
             self.refresh_thumbnail_requested.emit
@@ -180,9 +173,7 @@ class DisplayMirrorSection(QWidget):
 
         # ── 미디어 OFF 시 보이는 소스 라벨 (카드 대신) ──
         self._lbl_source_off = QLabel("소스: 화면 캡처")
-        self._lbl_source_off.setStyleSheet(
-            "color:#888;font-size:11px;font-style:italic;"
-        )
+        self._lbl_source_off.setObjectName("lblSourceOff")
         gl.addWidget(self._lbl_source_off)
 
         # ── ★ 미디어 소스 오버라이드 콤보 (미디어 ON 시에만 표시) ──
@@ -197,28 +188,24 @@ class DisplayMirrorSection(QWidget):
         msr.addWidget(self.combo_media_source)
 
         # ── ★ 판별 결과 수동 반전 버튼 (자동 모드일 때만 활성) ──
-        self.btn_toggle_source = QPushButton("🔁 전환")
+        self.btn_toggle_source = QPushButton("⇄ 전환")
+        self.btn_toggle_source.setObjectName("btnToggleSource")
         self.btn_toggle_source.setToolTip(
             "자동 판별 결과가 틀렸을 때, 이번 곡에 한해 소스를 반대로 뒤집습니다.\n"
             "다음 곡이 재생되면 다시 자동 판별이 시작됩니다."
         )
-        self.btn_toggle_source.setStyleSheet(
-            "QPushButton { padding: 2px 8px; font-size: 11px; }"
-        )
-        self.btn_toggle_source.setEnabled(False)  # 초기값: 자동이 아니면 비활성
+        self.btn_toggle_source.setEnabled(False)
         self.btn_toggle_source.clicked.connect(self._on_toggle_source_clicked)
         msr.addWidget(self.btn_toggle_source)
 
         self.lbl_media_source_hint = QLabel(
             "자동: 영상→미러링, 음원→앨범아트"
         )
-        self.lbl_media_source_hint.setStyleSheet(
-            "color:#6a6a74;font-size:10px;font-style:italic;"
-        )
+        self.lbl_media_source_hint.setProperty("role", "hint")
         msr.addWidget(self.lbl_media_source_hint)
         msr.addStretch()
         gl.addWidget(self._media_source_row)
-        self._media_source_row.setVisible(False)  # 미디어 OFF 시 숨김
+        self._media_source_row.setVisible(False)
 
         # ── 색상 효과 ──
         effect_row = QHBoxLayout()
@@ -299,9 +286,7 @@ class DisplayMirrorSection(QWidget):
 
         # ★ flowing 비활성 힌트 라벨
         self.lbl_flowing_hint = QLabel("Flowing 모드에서는 자체 색 추출을 사용합니다")
-        self.lbl_flowing_hint.setStyleSheet(
-            "color:#e67e22;font-size:10px;font-style:italic;"
-        )
+        self.lbl_flowing_hint.setObjectName("lblFlowingHint")
         self.lbl_flowing_hint.setVisible(False)
         gl.addWidget(self.lbl_flowing_hint)
 
@@ -309,7 +294,7 @@ class DisplayMirrorSection(QWidget):
         smooth_row = QHBoxLayout()
         smooth_row.addWidget(QLabel("스무딩 계수:"))
         self.slider_smoothing = NoScrollSlider(Qt.Orientation.Horizontal)
-        self.slider_smoothing.setRange(0, 95)  # 0~0.95 (×0.01)
+        self.slider_smoothing.setRange(0, 95)
         self.slider_smoothing.setValue(50)
         self.slider_smoothing.valueChanged.connect(self._on_param_changed)
         smooth_row.addWidget(self.slider_smoothing)
@@ -319,11 +304,10 @@ class DisplayMirrorSection(QWidget):
         smooth_row.addWidget(self.lbl_smoothing)
         gl.addLayout(smooth_row)
 
-        # ★ 스무딩 행을 감싸는 컨테이너 (비활성화 대상)
         self._smoothing_row_widgets = [self.slider_smoothing, self.lbl_smoothing]
 
         hint_smooth = QLabel("0 = 스무딩 꺼짐")
-        hint_smooth.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
+        hint_smooth.setProperty("role", "hint")
         gl.addWidget(hint_smooth)
 
         # ── 구분선 ──
@@ -334,11 +318,7 @@ class DisplayMirrorSection(QWidget):
 
         # ── 고급 옵션 (접기/펼치기) ──
         self.btn_advanced = QPushButton("▶ 고급 옵션")
-        self.btn_advanced.setStyleSheet(
-            "QPushButton{background:transparent;color:#2e86c1;border:none;"
-            "font-size:12px;text-align:left;padding:2px;}"
-            "QPushButton:hover{color:#3498db;}"
-        )
+        self.btn_advanced.setObjectName("btnAdvanced")
         self.btn_advanced.clicked.connect(self._toggle_advanced)
         gl.addWidget(self.btn_advanced)
 
@@ -425,14 +405,12 @@ class DisplayMirrorSection(QWidget):
         self.lbl_gradient_hue.setText(f"{self.slider_gradient_hue.value()}%")
         self.lbl_gradient_sv.setText(f"{self.slider_gradient_sv.value()}%")
         self.lbl_smoothing.setText(f"{self.slider_smoothing.value() / 100:.2f}")
-        # ★ 소스 선택이 '자동'일 때만 전환 버튼 활성화
         if hasattr(self, "btn_toggle_source"):
             is_auto = self.combo_media_source.currentData() == "auto"
             self.btn_toggle_source.setEnabled(is_auto)
         self.params_changed.emit()
 
     def _on_toggle_source_clicked(self):
-        """전환 버튼 클릭 — 엔진의 현재 자동 판별 결과를 즉시 반전시키는 트리거를 보냄."""
         self._media_toggle_count += 1
         self.params_changed.emit()
 
@@ -448,7 +426,6 @@ class DisplayMirrorSection(QWidget):
     # ── ★ flowing 모드 연동 ──────────────────────────────────────
 
     def set_flowing_active(self, active):
-        """flowing 모드 활성 시 미러링 설정 일부 비활성화."""
         self._flowing_active = active
         self.combo_zone_count.setEnabled(not active)
         self.combo_extract_mode.setEnabled(not active)
@@ -458,23 +435,17 @@ class DisplayMirrorSection(QWidget):
     # ── ★ 미디어 연동 소스 상태 ──────────────────────────────────
 
     def set_media_active(self, active):
-        """미디어 연동 활성 상태를 표시 — 카드/라벨 전환."""
         self._media_active = active
         if active:
             self._media_card.setVisible(True)
             self._lbl_source_off.setVisible(False)
             self.lbl_media_source.setText("미디어 연동 활성")
             self.lbl_media_source.setStyleSheet(
-                "color:#a3d977;font-size:11px;font-weight:bold;"
+                f"color:{_PAL['media_active']};font-size:11px;font-weight:bold;"
                 "border:none;background:transparent;"
             )
             self.lbl_media_song.setText("미디어 정보 대기 중...")
-            # 썸네일 플레이스홀더 (아직 앨범아트 없을 때)
-            self.lbl_media_thumbnail.setText("🎵")
-            self.lbl_media_thumbnail.setStyleSheet(
-                "border:1px solid #555;border-radius:4px;background:#1a1a1e;"
-                "color:#555;font-size:20px;"
-            )
+            self.lbl_media_thumbnail.setText("♪")
             self._media_source_row.setVisible(True)
             self.btn_toggle_source.setEnabled(
                 self.combo_media_source.currentData() == "auto"
@@ -486,36 +457,32 @@ class DisplayMirrorSection(QWidget):
             self._media_source_row.setVisible(False)
 
     def update_current_source(self, decision, state):
-        """★ 현재 실제 소스 판별 결과를 라벨에 실시간 표시.
-
-        Args:
-            decision: "media" 또는 "mirror" — 현재 사용 중인 소스
-            state: "idle"|"phase1"|"holding"|"phase2"|"audio_idle" — 판별 상태
-        """
+        """★ 현재 실제 소스 판별 결과를 라벨에 실시간 표시."""
         if not self._media_active:
             return
 
         if decision == "media":
             if state == "phase1":
                 text = "미디어 (판별 중...)"
-                color = "#d4c85a"
+                color = _PAL["media_phase1"]
             else:
                 text = "미디어 사용 중"
-                color = "#a3d977"
-        else:  # "mirror"
+                color = _PAL["media_active"]
+        else:
             if state == "audio_idle":
                 text = "미러링 (오디오 무음)"
-                color = "#e6a85a"
+                color = _PAL["media_idle"]
             elif state == "phase1":
                 text = "미러링 (판별 중...)"
-                color = "#d4c85a"
+                color = _PAL["media_phase1"]
             else:
                 text = "미러링 사용 중"
-                color = "#7ec8e3"
+                color = _PAL["media_mirror"]
 
         self.lbl_media_source.setText(text)
         self.lbl_media_source.setStyleSheet(
-            f"color:{color};font-size:11px;font-weight:bold;border:none;background:transparent;"
+            f"color:{color};font-size:11px;font-weight:bold;"
+            "border:none;background:transparent;"
         )
 
     def update_media_thumbnail(self, frame):
@@ -537,16 +504,16 @@ class DisplayMirrorSection(QWidget):
         except Exception:
             pass
 
+    def set_media_thumbnail_placeholder(self):
+        """썸네일을 플레이스홀더로 리셋."""
+        self.lbl_media_thumbnail.clear()
+        self.lbl_media_thumbnail.setText("♪")
+
     # ══════════════════════════════════════════════════════════════
     #  프리셋 수집/적용 (Step 2a)
     # ══════════════════════════════════════════════════════════════
 
     def collect_for_preset(self):
-        """현재 미러링 설정을 프리셋용 raw 슬라이더 값으로 수집.
-
-        collect_params()와 달리 엔진 변환 없이 슬라이더 정수값을 그대로 반환.
-        미러링 색상 효과는 mirror_ 접두사로 디스플레이 OFF 색상과 구분.
-        """
         return {
             "smoothing_factor": self.slider_smoothing.value(),
             "mirror_n_zones": self.combo_zone_count.currentData() or -1,
@@ -559,18 +526,12 @@ class DisplayMirrorSection(QWidget):
         }
 
     def apply_from_preset(self, data):
-        """프리셋 dict에서 미러링 설정을 UI에 적용.
-
-        blockSignals로 시그널 재귀 방지. 호출부에서 일괄 emit.
-        """
-        # ── 스무딩 ──
         if "smoothing_factor" in data:
             self.slider_smoothing.blockSignals(True)
             self.slider_smoothing.setValue(int(data["smoothing_factor"]))
             self.slider_smoothing.blockSignals(False)
             self.lbl_smoothing.setText(f"{data['smoothing_factor'] / 100:.2f}")
 
-        # ── 구역 수 ──
         if "mirror_n_zones" in data:
             self.combo_zone_count.blockSignals(True)
             target = data["mirror_n_zones"]
@@ -580,7 +541,6 @@ class DisplayMirrorSection(QWidget):
                     break
             self.combo_zone_count.blockSignals(False)
 
-        # ── 추출 방식 ──
         if "color_extract_mode" in data:
             self.combo_extract_mode.blockSignals(True)
             target = data["color_extract_mode"]
@@ -590,12 +550,7 @@ class DisplayMirrorSection(QWidget):
                     break
             self.combo_extract_mode.blockSignals(False)
 
-        # ── 미러링 색상 효과 ──
         if "mirror_color_effect" in data:
-            from core.engine_utils import (
-                COLOR_EFFECT_STATIC, COLOR_EFFECT_GRADIENT_CW,
-                COLOR_EFFECT_GRADIENT_CCW,
-            )
             effect_to_idx = {
                 COLOR_EFFECT_STATIC: 0,
                 COLOR_EFFECT_GRADIENT_CW: 1,
@@ -606,13 +561,11 @@ class DisplayMirrorSection(QWidget):
             self.combo_color_effect.setCurrentIndex(idx)
             self.combo_color_effect.blockSignals(False)
             self._color_effect = data["mirror_color_effect"]
-            # 효과 슬라이더 가시성 갱신
             is_static = self._color_effect == COLOR_EFFECT_STATIC
             self._row_speed.setVisible(not is_static)
             self._row_hue.setVisible(not is_static)
             self._row_sv.setVisible(not is_static)
 
-        # ── 미러링 그라데이션 슬라이더 ──
         if "mirror_gradient_speed" in data:
             self.slider_gradient_speed.blockSignals(True)
             self.slider_gradient_speed.setValue(int(data["mirror_gradient_speed"]))
@@ -631,7 +584,6 @@ class DisplayMirrorSection(QWidget):
             self.slider_gradient_sv.blockSignals(False)
             self.lbl_gradient_sv.setText(f"{data['mirror_gradient_sv']}%")
 
-        # ── 미디어 소스 오버라이드 ──
         if "media_source_override" in data:
             self.combo_media_source.blockSignals(True)
             target = data["media_source_override"]
@@ -640,14 +592,12 @@ class DisplayMirrorSection(QWidget):
                     self.combo_media_source.setCurrentIndex(i)
                     break
             self.combo_media_source.blockSignals(False)
-            # 전환 버튼 활성화 상태 동기화
             if hasattr(self, "btn_toggle_source"):
                 self.btn_toggle_source.setEnabled(target == "auto")
 
     # ── collect / apply / load ───────────────────────────────────
 
     def collect_params(self):
-        """현재 미러링 파라미터를 dict로 반환."""
         params = {
             "smoothing_factor": self.slider_smoothing.value() / 100.0,
             "mirror_n_zones": self.combo_zone_count.currentData() or N_ZONES_PER_LED,
@@ -657,17 +607,14 @@ class DisplayMirrorSection(QWidget):
             "gradient_hue_range": self.slider_gradient_hue.value() / 100.0 * 0.20,
             "gradient_sv_range": self.slider_gradient_sv.value() / 100.0,
         }
-        # ★ 미디어 소스 오버라이드 (미디어 ON 상태에서만 의미 있음)
         if self._media_active:
             params["media_source_override"] = (
                 self.combo_media_source.currentData() or "auto"
             )
-            # ★ 자동 판별 결과 반전 트리거 카운트 전달
             params["media_decision_toggle_count"] = self._media_toggle_count
         return params
 
     def get_layout_params(self):
-        """감쇠/페널티 파라미터 반환."""
         params = {
             "decay_radius": self.spin_decay.value(),
             "parallel_penalty": self.spin_penalty.value(),
@@ -685,7 +632,6 @@ class DisplayMirrorSection(QWidget):
         return params
 
     def apply_to_config(self):
-        """현재 상태를 config에 반영."""
         m = self._config.setdefault("mirror", {})
         m["smoothing_factor"] = self.slider_smoothing.value() / 100.0
         m["zone_count"] = self.combo_zone_count.currentData() or N_ZONES_PER_LED
@@ -702,26 +648,21 @@ class DisplayMirrorSection(QWidget):
         else:
             m["decay_radius_per_side"] = {}
             m["parallel_penalty_per_side"] = {}
-        # 색상 효과
         m["color_effect"] = self._color_effect
         m["gradient_speed"] = self.slider_gradient_speed.value()
         m["gradient_hue"] = self.slider_gradient_hue.value()
         m["gradient_sv"] = self.slider_gradient_sv.value()
-        # ★ 미디어 소스 오버라이드
         m["media_source_override"] = self.combo_media_source.currentData() or "auto"
 
     def load_from_config(self):
-        """config에서 상태 복원."""
         m = self._config.get("mirror", {})
 
-        # 스무딩
         sf = m.get("smoothing_factor", 0.5)
         self.slider_smoothing.blockSignals(True)
         self.slider_smoothing.setValue(int(sf * 100))
         self.slider_smoothing.blockSignals(False)
         self.lbl_smoothing.setText(f"{sf:.2f}")
 
-        # 구역 수
         saved_zone = m.get("zone_count", N_ZONES_PER_LED)
         self.combo_zone_count.blockSignals(True)
         for i in range(self.combo_zone_count.count()):
@@ -730,7 +671,6 @@ class DisplayMirrorSection(QWidget):
                 break
         self.combo_zone_count.blockSignals(False)
 
-        # 추출 방식
         saved_extract = m.get("color_extract_mode", "average")
         self.combo_extract_mode.blockSignals(True)
         for i in range(self.combo_extract_mode.count()):
@@ -739,7 +679,6 @@ class DisplayMirrorSection(QWidget):
                 break
         self.combo_extract_mode.blockSignals(False)
 
-        # 감쇠/페널티
         self.spin_decay.setValue(m.get("decay_radius", 0.3))
         self.spin_penalty.setValue(m.get("parallel_penalty", 5.0))
 
@@ -757,7 +696,6 @@ class DisplayMirrorSection(QWidget):
                 per_penalty.get(side, m.get("parallel_penalty", 5.0))
             )
 
-        # 색상 효과
         saved_effect = m.get("color_effect", None)
         if saved_effect is None:
             state = self._config.get("options", {}).get("audio_state", {})
@@ -770,7 +708,6 @@ class DisplayMirrorSection(QWidget):
         self.combo_color_effect.blockSignals(False)
         self._on_color_effect_changed(effect_idx)
 
-        # 그라데이션 슬라이더 복원
         state = self._config.get("options", {}).get("audio_state", {})
         self.slider_gradient_speed.blockSignals(True)
         self.slider_gradient_speed.setValue(
@@ -790,7 +727,6 @@ class DisplayMirrorSection(QWidget):
         self.slider_gradient_sv.blockSignals(False)
         self.lbl_gradient_sv.setText(f"{self.slider_gradient_sv.value()}%")
 
-        # ★ 미디어 소스 오버라이드 복원
         saved_override = m.get("media_source_override", "auto")
         self.combo_media_source.blockSignals(True)
         for i in range(self.combo_media_source.count()):
@@ -799,7 +735,6 @@ class DisplayMirrorSection(QWidget):
                 break
         self.combo_media_source.blockSignals(False)
 
-        # ★ 버튼 활성화 상태 초기 동기화 (blockSignals로 인해 _on_param_changed가 미호출되므로)
         if hasattr(self, "btn_toggle_source"):
             self.btn_toggle_source.setEnabled(
                 self.combo_media_source.currentData() == "auto"

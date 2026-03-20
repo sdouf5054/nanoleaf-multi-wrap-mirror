@@ -20,6 +20,12 @@
 - ★ min_brightness를 모드별로 독립 저장/로드
 - ★ 기본 모드 버튼/힌트 제거 (프리셋 ⭐ 기본 기능으로 대체)
 - ★ collect_for_preset() + apply_from_preset() 추가
+
+[QSS 테마] 인라인 setStyleSheet → objectName + property 기반으로 전환.
+  - 에너지 바: objectName barBass/barMid/barHigh → QSS chunk 색상
+  - 섹션 헤더: setProperty("role", "sectionHeader")
+  - 힌트 라벨: setProperty("role", "hint")
+  - _make_bar()에서 인라인 스타일 제거
 """
 
 from PySide6.QtWidgets import (
@@ -48,13 +54,10 @@ _MODE_KEYS = [item[0] for item in _AUDIO_MODE_ITEMS]
 _INDEX_TO_MODE = {i: k for i, (k, _) in enumerate(_AUDIO_MODE_ITEMS)}
 _MODE_TO_INDEX = {k: i for i, (k, _) in enumerate(_AUDIO_MODE_ITEMS)}
 
-# bass-only 모드: mid/high 감도 슬라이더 비활성화
 _BASS_ONLY_MODES = {"pulse", "wave", "dynamic"}
-
-# 대역 비율이 의미 있는 모드
 _BANDED_MODES = {"spectrum", "bass_detail"}
 
-# ── 모드별 기본값 (★ min_brightness 포함) ──
+# ── 모드별 기본값 ──
 _AUDIO_DEFAULTS = {
     "pulse":       {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
     "spectrum":    {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 50, "release": 50, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
@@ -64,18 +67,12 @@ _AUDIO_DEFAULTS = {
     "flowing":     {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 40, "release": 60, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
 }
 
-# ── 레이아웃 상수 ──
 _GROUP_MARGINS = (6, 16, 6, 6)
 _GROUP_SPACING = 4
 
 
 class AudioReactiveSection(QWidget):
-    """오디오 반응 설정 패널.
-
-    Signals:
-        params_changed(): 오디오 파라미터가 변경되었을 때 emit
-        audio_mode_changed(str): 오디오 모드가 변경되었을 때 emit (모드 키 전달)
-    """
+    """오디오 반응 설정 패널."""
 
     params_changed = Signal()
     audio_mode_changed = Signal(str)
@@ -85,7 +82,7 @@ class AudioReactiveSection(QWidget):
         self._config = config
         self._mode_key = "pulse"
         self._display_enabled = False
-        self._updating = False  # 재귀 시그널 방지
+        self._updating = False
         self._build_ui()
         self.load_from_config()
 
@@ -98,23 +95,19 @@ class AudioReactiveSection(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        # ── 에너지 레벨 ──
         self._build_energy_section(layout)
-
-        # ── 오디오 반응 설정 ──
         self._build_audio_settings(layout)
 
     def _build_energy_section(self, parent_layout):
-        """에너지 레벨 바 + 스펙트럼 — 한 벌."""
         grp = QGroupBox("에너지 레벨")
         gl = QVBoxLayout(grp)
         gl.setSpacing(_GROUP_SPACING)
         gl.setContentsMargins(*_GROUP_MARGINS)
 
         grid = QGridLayout()
-        self.bar_bass = self._make_bar(grid, 0, "Bass", "#e74c3c")
-        self.bar_mid = self._make_bar(grid, 1, "Mid", "#27ae60")
-        self.bar_high = self._make_bar(grid, 2, "High", "#3498db")
+        self.bar_bass = self._make_bar(grid, 0, "Bass", "barBass")
+        self.bar_mid = self._make_bar(grid, 1, "Mid", "barMid")
+        self.bar_high = self._make_bar(grid, 2, "High", "barHigh")
         gl.addLayout(grid)
 
         gl.addWidget(QLabel("스펙트럼 (16밴드)"))
@@ -124,7 +117,6 @@ class AudioReactiveSection(QWidget):
         parent_layout.addWidget(grp)
 
     def _build_audio_settings(self, parent_layout):
-        """오디오 반응 설정 — 모드 콤보 + 공통 설정 + 모드별 세부 설정."""
         grp = QGroupBox("오디오 반응 설정")
         gl = QVBoxLayout(grp)
         gl.setSpacing(_GROUP_SPACING)
@@ -140,12 +132,11 @@ class AudioReactiveSection(QWidget):
         mode_row.addWidget(self.combo_audio_mode, 1)
         gl.addLayout(mode_row)
 
-        # ── 구분선 ──
         gl.addWidget(self._make_sep())
 
         # ── 공통 설정 헤더 ──
         lbl_common = QLabel("오디오 공통 설정")
-        lbl_common.setStyleSheet("font-weight:bold;font-size:11px;")
+        lbl_common.setProperty("role", "sectionHeader")
         gl.addWidget(lbl_common)
 
         # 최소 밝기
@@ -178,7 +169,7 @@ class AudioReactiveSection(QWidget):
         bass_row.addWidget(self.lbl_bass_sens)
         gl.addLayout(bass_row)
 
-        # 감도 — mid (bass-only 모드에서 비활성)
+        # 감도 — mid
         self._row_mid_sens = QWidget()
         rm = QHBoxLayout(self._row_mid_sens)
         rm.setContentsMargins(0, 0, 0, 0)
@@ -238,27 +229,23 @@ class AudioReactiveSection(QWidget):
         gl.addLayout(rel_row)
 
         hint = QLabel("Attack ↑ = 빠르게 반응 · Release ↑ = 긴 잔향")
-        hint.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
+        hint.setProperty("role", "hint")
         gl.addWidget(hint)
 
-        # ── 구분선 ──
         gl.addWidget(self._make_sep())
 
-        # ── 모드 세부 설정 ──
         self._build_mode_specific(gl)
 
         parent_layout.addWidget(grp)
 
     def _build_mode_specific(self, parent_layout):
-        """모드별 조건부 세부 설정 위젯들."""
-
         # ── Wave 속도 ──
         self._wave_container = QWidget()
         wl = QVBoxLayout(self._wave_container)
         wl.setContentsMargins(0, 0, 0, 0)
         wl.setSpacing(3)
         lbl_wave = QLabel("Wave 설정")
-        lbl_wave.setStyleSheet("font-weight:bold;font-size:11px;")
+        lbl_wave.setProperty("role", "sectionHeader")
         wl.addWidget(lbl_wave)
         ws_row = QHBoxLayout()
         ws_row.addWidget(QLabel("Wave 속도:"))
@@ -273,18 +260,18 @@ class AudioReactiveSection(QWidget):
         ws_row.addWidget(self.lbl_wave_speed)
         wl.addLayout(ws_row)
         hint_w = QLabel("0% = 느린 연출 · 100% = 빠른 비트")
-        hint_w.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
+        hint_w.setProperty("role", "hint")
         wl.addWidget(hint_w)
         parent_layout.addWidget(self._wave_container)
         self._wave_container.setVisible(False)
 
-        # ── 대역 비율 (spectrum / bass_detail) ──
+        # ── 대역 비율 ──
         self._zone_container = QWidget()
         zl = QVBoxLayout(self._zone_container)
         zl.setContentsMargins(0, 0, 0, 0)
         zl.setSpacing(3)
         lbl_zone = QLabel("대역 비율")
-        lbl_zone.setStyleSheet("font-weight:bold;font-size:11px;")
+        lbl_zone.setProperty("role", "sectionHeader")
         zl.addWidget(lbl_zone)
         self.zone_balance = ZoneBalanceWidget(33, 33, 34)
         self.zone_balance.zone_changed.connect(lambda *_: self._on_param_changed())
@@ -298,21 +285,19 @@ class AudioReactiveSection(QWidget):
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(3)
         lbl_flow = QLabel("Flowing 설정")
-        lbl_flow.setStyleSheet("font-weight:bold;font-size:11px;")
+        lbl_flow.setProperty("role", "sectionHeader")
         fl.addWidget(lbl_flow)
 
-        # palette 프리뷰
         pal_row = QHBoxLayout()
         pal_row.addWidget(QLabel("현재 팔레트:"))
         self.flow_palette_preview = FlowPalettePreview(n_swatches=5)
         pal_row.addWidget(self.flow_palette_preview, 1)
         fl.addLayout(pal_row)
 
-        # 갱신 주기
         fi_row = QHBoxLayout()
         fi_row.addWidget(QLabel("갱신 주기:"))
         self.slider_flowing_interval = NoScrollSlider(Qt.Orientation.Horizontal)
-        self.slider_flowing_interval.setRange(10, 100)  # 1.0~10.0초 (×0.1)
+        self.slider_flowing_interval.setRange(10, 100)
         self.slider_flowing_interval.setValue(30)
         self.slider_flowing_interval.valueChanged.connect(self._on_param_changed)
         fi_row.addWidget(self.slider_flowing_interval)
@@ -322,7 +307,6 @@ class AudioReactiveSection(QWidget):
         fi_row.addWidget(self.lbl_flowing_interval)
         fl.addLayout(fi_row)
 
-        # 흐름 속도
         fs_row = QHBoxLayout()
         fs_row.addWidget(QLabel("흐름 속도:"))
         self.slider_flowing_speed = NoScrollSlider(Qt.Orientation.Horizontal)
@@ -337,13 +321,13 @@ class AudioReactiveSection(QWidget):
         fl.addLayout(fs_row)
 
         hint_f = QLabel("갱신 주기 ↑ = 안정적 · 속도 ↑ = 빠른 회전")
-        hint_f.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
+        hint_f.setProperty("role", "hint")
         fl.addWidget(hint_f)
         parent_layout.addWidget(self._flowing_container)
         self._flowing_container.setVisible(False)
 
     # ══════════════════════════════════════════════════════════════
-    #  이벤트
+    #  이벤트 — 원본과 동일 (변경 없음)
     # ══════════════════════════════════════════════════════════════
 
     def _on_mode_changed(self, idx):
@@ -365,7 +349,6 @@ class AudioReactiveSection(QWidget):
         self.params_changed.emit()
 
     def _update_labels(self):
-        """모든 슬라이더 라벨 갱신."""
         self.lbl_min_brightness.setText(f"{self.slider_min_brightness.value()}%")
         self.lbl_bass_sens.setText(f"{self.slider_bass_sens.value() / 100:.2f}")
         self.lbl_mid_sens.setText(f"{self.slider_mid_sens.value() / 100:.2f}")
@@ -377,18 +360,15 @@ class AudioReactiveSection(QWidget):
         self.lbl_flowing_speed.setText(f"{self.slider_flowing_speed.value()}%")
 
     def _update_mode_visibility(self):
-        """모드에 따라 세부 설정 위젯 표시/숨김."""
         mode = self._mode_key
         is_bass_only = mode in _BASS_ONLY_MODES
         is_banded = mode in _BANDED_MODES
         is_wave = mode == "wave"
         is_flowing = mode == "flowing"
 
-        # mid/high 감도 비활성화 (bass-only 모드)
         self._row_mid_sens.setEnabled(not is_bass_only)
         self._row_high_sens.setEnabled(not is_bass_only)
 
-        # 감도 헤더 텍스트
         header_map = {
             "pulse": "감도 (Bass)", "wave": "감도 (Bass → Wave)",
             "dynamic": "감도 (Dynamic)", "spectrum": "감도 (대역별)",
@@ -396,19 +376,16 @@ class AudioReactiveSection(QWidget):
         }
         self.lbl_sens_header.setText(header_map.get(mode, "감도"))
 
-        # 세부 설정 가시성
         self._wave_container.setVisible(is_wave)
         self._zone_container.setVisible(is_banded)
         self._flowing_container.setVisible(is_flowing)
 
     # ══════════════════════════════════════════════════════════════
-    #  디스플레이 토글 연동
+    #  디스플레이 토글 연동 — 원본과 동일
     # ══════════════════════════════════════════════════════════════
 
     def set_display_enabled(self, enabled):
-        """디스플레이 토글 상태를 전달. flowing 모드 활성/비활성 제어."""
         self._display_enabled = enabled
-        # flowing 항목 활성/비활성
         flowing_idx = _MODE_TO_INDEX.get("flowing", 5)
         model = self.combo_audio_mode.model()
         item = model.item(flowing_idx)
@@ -417,12 +394,11 @@ class AudioReactiveSection(QWidget):
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEnabled)
             else:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
-                # 현재 flowing 선택 상태인데 디스플레이 꺼지면 pulse로 복귀
                 if self._mode_key == "flowing":
                     self.combo_audio_mode.setCurrentIndex(0)
 
     # ══════════════════════════════════════════════════════════════
-    #  에너지 / 스펙트럼 갱신 (엔진에서 호출)
+    #  에너지 / 스펙트럼 갱신 — 원본과 동일
     # ══════════════════════════════════════════════════════════════
 
     def update_energy(self, bass, mid, high):
@@ -438,11 +414,10 @@ class AudioReactiveSection(QWidget):
             self.flow_palette_preview.set_colors(colors, ratios)
 
     # ══════════════════════════════════════════════════════════════
-    #  모드별 파라미터 저장/로드
+    #  모드별 파라미터 저장/로드 — 원본과 동일
     # ══════════════════════════════════════════════════════════════
 
     def _save_mode_params(self, mode_name):
-        """현재 공통 슬라이더 값을 config의 해당 모드 키에 저장."""
         d = self._config.setdefault(f"audio_{mode_name}", {})
         d["min_brightness"] = self.slider_min_brightness.value()
         d["bass_sens"] = self.slider_bass_sens.value()
@@ -458,7 +433,6 @@ class AudioReactiveSection(QWidget):
             d["wave_speed"] = self.slider_wave_speed.value()
 
     def _load_mode_params(self, mode_name):
-        """config의 해당 모드 키에서 슬라이더 값을 복원."""
         self._updating = True
         df = _AUDIO_DEFAULTS.get(mode_name, _AUDIO_DEFAULTS["pulse"])
         d = self._config.get(f"audio_{mode_name}", df)
@@ -481,11 +455,10 @@ class AudioReactiveSection(QWidget):
         self._updating = False
 
     # ══════════════════════════════════════════════════════════════
-    #  프리셋 수집/적용
+    #  프리셋 수집/적용 — 원본과 동일
     # ══════════════════════════════════════════════════════════════
 
     def collect_for_preset(self):
-        """현재 오디오 설정을 프리셋용 raw 슬라이더 값으로 수집."""
         zb, zm, zh = self.zone_balance.get_values()
         return {
             "audio_mode": self._mode_key,
@@ -502,7 +475,6 @@ class AudioReactiveSection(QWidget):
         }
 
     def apply_from_preset(self, data):
-        """프리셋 dict에서 오디오 설정을 UI에 적용."""
         self._updating = True
 
         if "audio_mode" in data:
@@ -569,11 +541,10 @@ class AudioReactiveSection(QWidget):
         self._updating = False
 
     # ══════════════════════════════════════════════════════════════
-    #  collect / apply / load
+    #  collect / apply / load — 원본과 동일
     # ══════════════════════════════════════════════════════════════
 
     def collect_params(self):
-        """현재 오디오 파라미터를 dict로 반환 (엔진용 변환값)."""
         zb, zm, zh = self.zone_balance.get_values()
         return {
             "audio_mode": self._mode_key,
@@ -590,12 +561,10 @@ class AudioReactiveSection(QWidget):
         }
 
     def _flowing_speed_from_slider(self):
-        """슬라이더(0~100) → 실제 회전 속도."""
         t = self.slider_flowing_speed.value() / 100.0
         return 0.02 + t * 0.18
 
     def apply_to_config(self):
-        """현재 상태를 config에 반영."""
         self._save_mode_params(self._mode_key)
         state = self._config.setdefault("options", {}).setdefault("audio_state", {})
         state["sub_mode"] = self._mode_key
@@ -604,10 +573,8 @@ class AudioReactiveSection(QWidget):
         state["flowing_speed"] = self.slider_flowing_speed.value()
 
     def load_from_config(self):
-        """config에서 상태 복원."""
         state = self._config.get("options", {}).get("audio_state", {})
 
-        # 초기 모드: sub_mode에서 복원
         initial_mode = state.get("sub_mode", "pulse")
         if initial_mode not in _MODE_KEYS:
             initial_mode = "pulse"
@@ -619,7 +586,6 @@ class AudioReactiveSection(QWidget):
         self.combo_audio_mode.setCurrentIndex(_MODE_TO_INDEX.get(initial_mode, 0))
         self.combo_audio_mode.blockSignals(False)
 
-        # flowing 슬라이더
         self.slider_flowing_interval.blockSignals(True)
         self.slider_flowing_interval.setValue(state.get("flowing_interval", 30))
         self.slider_flowing_interval.blockSignals(False)
@@ -627,13 +593,11 @@ class AudioReactiveSection(QWidget):
         self.slider_flowing_speed.setValue(state.get("flowing_speed", 50))
         self.slider_flowing_speed.blockSignals(False)
 
-        # ★ 모드별 파라미터 로드 (min_brightness 포함)
         self._load_mode_params(initial_mode)
         self._update_mode_visibility()
         self._update_labels()
 
     def cleanup(self):
-        """종료 시 현재 모드 파라미터 저장."""
         self._save_mode_params(self._mode_key)
 
     # ══════════════════════════════════════════════════════════════
@@ -641,16 +605,15 @@ class AudioReactiveSection(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     @staticmethod
-    def _make_bar(grid, row, name, color):
+    def _make_bar(grid, row, name, object_name):
+        """★ 에너지 바 생성 — objectName 기반, 인라인 스타일 없음."""
         grid.addWidget(QLabel(name), row, 0)
         bar = QProgressBar()
+        bar.setObjectName(object_name)
         bar.setRange(0, 100)
         bar.setTextVisible(False)
         bar.setFixedHeight(14)
-        bar.setStyleSheet(
-            f"QProgressBar{{background:#2b2b2b;border-radius:3px}}"
-            f"QProgressBar::chunk{{background:{color};border-radius:3px}}"
-        )
+        # ★ 인라인 setStyleSheet 제거 → dark.qss의 QProgressBar#barBass 등으로 이전
         grid.addWidget(bar, row, 1)
         return bar
 

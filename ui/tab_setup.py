@@ -7,6 +7,11 @@
   _on_force_released, force_disconnect, cleanup 중복 제거
 - _on_device_force_released() 오버라이드: 강제 해제 시 스캔 중지
 - _DEVICE_OWNER = "setup_tab"
+
+[QSS 테마] 인라인 setStyleSheet → objectName 기반으로 전환.
+  - conn_label: objectName="connLabel" + device_owner의 property 방식
+  - spin_current_led: objectName="spinCurrentLed" → QSS 큰 파란 폰트
+  - seg_preview: objectName="segPreview" → QSS 모노스페이스
 """
 
 import time
@@ -81,15 +86,7 @@ class LedScanThread(QThread):
 
 
 class SetupTab(DeviceOwnerMixin, QWidget):
-    """LED 캘리브레이션 탭.
-
-    DeviceOwnerMixin 제공:
-        _toggle_connection, _set_connected_ui, _set_disconnected_ui,
-        _on_force_released, force_disconnect, _device_cleanup
-
-    _on_device_force_released() 오버라이드:
-        강제 해제 시 실행 중인 스캔을 중지합니다.
-    """
+    """LED 캘리브레이션 탭."""
 
     N_WRAPS = 2
     _DEVICE_OWNER = "setup_tab"
@@ -103,19 +100,12 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self._saved_layout = copy.deepcopy(config["layout"])
         self._saved_led_count = config["device"]["led_count"]
 
-        # ── Mixin 초기화 ──
         self._init_device_owner(device_manager)
-
         self._build_ui()
         self._load_from_config()
 
-    # ── DeviceOwnerMixin 오버라이드 ──────────────────────────────
-
     def _on_device_force_released(self):
-        """강제 해제 시 실행 중인 스캔을 중지."""
         self._stop_scan()
-
-    # ── UI 빌드 ──────────────────────────────────────────────────
 
     def _build_ui(self):
         scroll = QScrollArea(self)
@@ -136,7 +126,9 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self.btn_connect.clicked.connect(self._toggle_connection)
         conn_layout.addWidget(self.btn_connect)
         self.conn_label = QLabel("연결 안 됨")
-        self.conn_label.setStyleSheet("color:#c0392b;")
+        self.conn_label.setObjectName("connLabel")
+        from ui.mixins.device_owner import _set_property
+        _set_property(self.conn_label, "connState", "disconnected")
         conn_layout.addWidget(self.conn_label)
         conn_layout.addStretch()
         layout.addLayout(conn_layout)
@@ -173,17 +165,17 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self.btn_manual = QPushButton("수동 모드")
         self.btn_manual.clicked.connect(self._start_manual_mode)
         ctrl_layout.addWidget(self.btn_manual)
-        self.btn_prev = QPushButton("◀")
+        self.btn_prev = QPushButton("◂")
         self.btn_prev.setFixedWidth(50)
         self.btn_prev.clicked.connect(self._step_backward)
         self.btn_prev.setEnabled(False)
         ctrl_layout.addWidget(self.btn_prev)
-        self.btn_next = QPushButton("▶")
+        self.btn_next = QPushButton("▸")
         self.btn_next.setFixedWidth(50)
         self.btn_next.clicked.connect(self._step_forward)
         self.btn_next.setEnabled(False)
         ctrl_layout.addWidget(self.btn_next)
-        self.btn_scan_stop = QPushButton("⏹ 중지")
+        self.btn_scan_stop = QPushButton("■ 중지")
         self.btn_scan_stop.clicked.connect(self._stop_scan)
         self.btn_scan_stop.setEnabled(False)
         ctrl_layout.addWidget(self.btn_scan_stop)
@@ -192,13 +184,13 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         led_display = QHBoxLayout()
         led_display.addWidget(QLabel("현재 LED:"))
         self.spin_current_led = QSpinBox()
+        self.spin_current_led.setObjectName("spinCurrentLed")
         self.spin_current_led.setRange(0, 999)
         self.spin_current_led.setFixedWidth(90)
-        self.spin_current_led.setStyleSheet("font-size:20px;font-weight:bold;color:#2980b9;")
         self.spin_current_led.setEnabled(False)
         self.spin_current_led.valueChanged.connect(self._on_spin_value_changed)
         led_display.addWidget(self.spin_current_led)
-        self.btn_mark_corner = QPushButton("📌 이 LED를 코너로 기록")
+        self.btn_mark_corner = QPushButton("이 LED를 코너로 기록")
         self.btn_mark_corner.clicked.connect(self._mark_corner)
         self.btn_mark_corner.setEnabled(False)
         led_display.addWidget(self.btn_mark_corner)
@@ -230,9 +222,9 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         seg_layout.setSpacing(_GROUP_SPACING)
         seg_layout.setContentsMargins(*_GROUP_MARGINS)
         self.seg_preview = QTextEdit()
+        self.seg_preview.setObjectName("segPreview")
         self.seg_preview.setReadOnly(True)
         self.seg_preview.setMaximumHeight(160)
-        self.seg_preview.setStyleSheet("font-family:Consolas,monospace;")
         seg_layout.addWidget(self.seg_preview)
         layout.addWidget(seg_group)
 
@@ -240,18 +232,18 @@ class SetupTab(DeviceOwnerMixin, QWidget):
 
         # 버튼
         btn_layout = QHBoxLayout()
-        btn_generate = QPushButton("🔄 세그먼트 생성")
+        btn_generate = QPushButton("세그먼트 생성")
         btn_generate.clicked.connect(self._generate_segments)
         btn_layout.addWidget(btn_generate)
         btn_reset = QPushButton("↩ 저장된 값 복원")
         btn_reset.clicked.connect(self._reset_to_saved)
         btn_layout.addWidget(btn_reset)
-        btn_save = QPushButton("💾 설정 저장")
+        btn_save = QPushButton("설정 저장")
         btn_save.clicked.connect(self._save)
         btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
 
-    # ── config 로드 ──────────────────────────────────────────────
+    # ── config 로드 ──
 
     def _load_from_config(self):
         corners = self.layout_cfg.get("corners", {})
@@ -269,12 +261,7 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         lines = [f"LED {seg['start']:>2}→{seg['end']:<2}  {seg['side']}" for seg in segments]
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
-    # ── 연결 관련 (Mixin _toggle_connection 사용) ────────────────
-
-    # _toggle_connection()은 DeviceOwnerMixin에서 제공
-    # btn_connect.clicked → self._toggle_connection (UI 빌드에서 연결)
-
-    # ── 스캔 ─────────────────────────────────────────────────────
+    # ── 스캔 (원본과 동일) ──
 
     def _start_auto_scan(self):
         if not self.dm or not self.dm.is_connected:
@@ -351,7 +338,7 @@ class SetupTab(DeviceOwnerMixin, QWidget):
                     return
         QMessageBox.information(self, "코너", "모든 코너가 채워졌습니다.")
 
-    # ── 세그먼트 생성 ────────────────────────────────────────────
+    # ── 세그먼트 생성 (원본과 동일) ──
 
     def _validate_corners(self, corners_all):
         all_corners = []

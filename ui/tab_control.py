@@ -28,6 +28,12 @@
 - 프리셋 변경 감지: 콤보 텍스트에 * 표시
 - saved_config 프로퍼티: 현재 config 직접 반환 (스냅샷 불필요)
 
+[QSS 테마] 인라인 setStyleSheet → objectName + QSS property 기반으로 전환.
+  - 모든 인라인 스타일시트 제거 (동적 포함)
+  - objectName 기반: dark.qss의 셀렉터와 매칭
+  - property 기반: tagState, isDefault, level 등 동적 상태 전환
+  - 이모지 → 유니코드 텍스트 심볼 (★, ✕, ✓)
+
 [시그널]
   request_engine_start(str)   — 모드 문자열로 엔진 시작 요청
   request_engine_stop()       — 엔진 중지 요청
@@ -82,6 +88,17 @@ from core.preset import (
 
 # 프리셋 콤보 첫 항목 텍스트
 _PRESET_NONE_TEXT = "(선택 안 함)"
+
+
+# ══════════════════════════════════════════════════════════════
+#  QSS property 헬퍼
+# ══════════════════════════════════════════════════════════════
+
+def _set_property(widget, name, value):
+    """QSS dynamic property를 설정하고 스타일을 다시 적용."""
+    widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -159,12 +176,7 @@ class ControlTab(QWidget):
         self._main_layout = QVBoxLayout(container)
         self._main_layout.setSpacing(4)
         self._main_layout.setContentsMargins(6, 4, 6, 4)
-        container.setStyleSheet(
-            "QGroupBox{padding-top:14px;margin-top:4px;}"
-            "QGroupBox::title{subcontrol-position:top left;padding:0 4px;}"
-            "QToolTip{background:#3a3a42;color:#e0e0e0;border:1px solid #666;"
-            "padding:4px 8px;font-size:11px;}"
-        )
+        # ★ container.setStyleSheet(...) 제거 → dark.qss로 이전
 
         scroll.setWidget(container)
         root.addWidget(scroll, 1)
@@ -198,43 +210,37 @@ class ControlTab(QWidget):
         info_row = QHBoxLayout()
 
         self.status_label = QLabel("대기 중")
-        self.status_label.setStyleSheet("font-size:13px;font-weight:bold;")
+        self.status_label.setObjectName("statusLabel")
         info_row.addWidget(self.status_label)
 
         self.tag_display = QLabel("디스플레이 OFF")
-        self.tag_display.setStyleSheet(
-            "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
-            "border-radius:8px;font-size:10px;font-weight:600;"
-        )
+        self.tag_display.setObjectName("tagDisplay")
+        _set_property(self.tag_display, "tagState", "off")
         info_row.addWidget(self.tag_display)
 
         self.tag_audio = QLabel("오디오 OFF")
-        self.tag_audio.setStyleSheet(
-            "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
-            "border-radius:8px;font-size:10px;font-weight:600;"
-        )
+        self.tag_audio.setObjectName("tagAudio")
+        _set_property(self.tag_audio, "tagState", "off")
         info_row.addWidget(self.tag_audio)
 
         # ★ 미디어 연동 태그
         self.tag_media = QLabel("미디어 OFF")
-        self.tag_media.setStyleSheet(
-            "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
-            "border-radius:8px;font-size:10px;font-weight:600;"
-        )
+        self.tag_media.setObjectName("tagMedia")
+        _set_property(self.tag_media, "tagState", "off")
         info_row.addWidget(self.tag_media)
 
         info_row.addStretch()
 
         self.cpu_label = QLabel("CPU: —%")
-        self.cpu_label.setStyleSheet("font-size:12px;color:#d35400;margin-right:6px;")
+        self.cpu_label.setObjectName("cpuLabel")
         info_row.addWidget(self.cpu_label)
 
         self.ram_label = QLabel("RAM: — MB")
-        self.ram_label.setStyleSheet("font-size:12px;color:#27ae60;margin-right:10px;")
+        self.ram_label.setObjectName("ramLabel")
         info_row.addWidget(self.ram_label)
 
         self.fps_label = QLabel("— fps")
-        self.fps_label.setStyleSheet("font-size:14px;color:#888;")
+        self.fps_label.setObjectName("fpsLabel")
         info_row.addWidget(self.fps_label)
 
         lay.addLayout(info_row)
@@ -243,37 +249,22 @@ class ControlTab(QWidget):
         btn_row = QHBoxLayout()
 
         self.btn_start = QPushButton("▶ 시작")
+        self.btn_start.setObjectName("btnStart")
         self.btn_start.setMinimumHeight(32)
-        self.btn_start.setStyleSheet(
-            "QPushButton{background:#2d8c46;color:white;font-size:14px;"
-            "font-weight:bold;border-radius:6px;}"
-            "QPushButton:hover{background:#35a352;}"
-            "QPushButton:disabled{background:#555;color:#999;}"
-        )
         self.btn_start.clicked.connect(self._on_start_clicked)
         btn_row.addWidget(self.btn_start)
 
-        self.btn_pause = QPushButton("⏸ 일시정지")
+        self.btn_pause = QPushButton("∥ 일시정지")
+        self.btn_pause.setObjectName("btnPause")
         self.btn_pause.setMinimumHeight(32)
         self.btn_pause.setEnabled(False)
-        self.btn_pause.setStyleSheet(
-            "QPushButton{background:#2c3e50;color:white;font-size:14px;"
-            "font-weight:bold;border-radius:6px;}"
-            "QPushButton:hover{background:#34495e;}"
-            "QPushButton:disabled{background:#555;color:#999;}"
-        )
         self.btn_pause.clicked.connect(lambda: self.request_engine_pause.emit())
         btn_row.addWidget(self.btn_pause)
 
-        self.btn_stop = QPushButton("⏹ 중지")
+        self.btn_stop = QPushButton("■ 중지")
+        self.btn_stop.setObjectName("btnStop")
         self.btn_stop.setMinimumHeight(32)
         self.btn_stop.setEnabled(False)
-        self.btn_stop.setStyleSheet(
-            "QPushButton{background:#c0392b;color:white;font-size:14px;"
-            "font-weight:bold;border-radius:6px;}"
-            "QPushButton:hover{background:#e74c3c;}"
-            "QPushButton:disabled{background:#555;color:#999;}"
-        )
         self.btn_stop.clicked.connect(lambda: self.request_engine_stop.emit())
         btn_row.addWidget(self.btn_stop)
 
@@ -342,7 +333,7 @@ class ControlTab(QWidget):
         lay.addLayout(bright_row)
 
         hint = QLabel("모든 모드의 최대 밝기. 오디오 모드에서는 최대 밝기로 기능합니다.")
-        hint.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
+        hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
@@ -390,7 +381,7 @@ class ControlTab(QWidget):
                     self.combo_audio_device.setCurrentIndex(i)
                     break
         audio_row.addWidget(self.combo_audio_device)
-        btn_refresh = QPushButton("🔄")
+        btn_refresh = QPushButton("↻")
         btn_refresh.setFixedWidth(36)
         btn_refresh.clicked.connect(self._refresh_audio_devices)
         audio_row.addWidget(btn_refresh)
@@ -407,15 +398,11 @@ class ControlTab(QWidget):
         lay.setContentsMargins(6, 16, 6, 4)
         lay.setSpacing(2)
 
-        self.btn_preview_toggle = QPushButton("👁 프리뷰 보기")
+        self.btn_preview_toggle = QPushButton("프리뷰 보기")
+        self.btn_preview_toggle.setObjectName("btnPreviewToggle")
         self.btn_preview_toggle.setCheckable(True)
         self.btn_preview_toggle.setChecked(False)
         self.btn_preview_toggle.setFixedWidth(130)
-        self.btn_preview_toggle.setStyleSheet(
-            "QPushButton{background:#34495e;color:#bdc3c7;border-radius:4px;"
-            "padding:5px;font-size:11px;}"
-            "QPushButton:checked{background:#2980b9;color:white;}"
-        )
         self.btn_preview_toggle.toggled.connect(self._on_preview_toggled)
         lay.addWidget(self.btn_preview_toggle)
 
@@ -424,7 +411,7 @@ class ControlTab(QWidget):
         lay.addWidget(self.monitor_preview)
 
         hint = QLabel("색상 보정 적용 전 RGB 값으로 표시됩니다")
-        hint.setStyleSheet("color:#6a6a74;font-size:10px;font-style:italic;")
+        hint.setProperty("role", "hint")
         hint.setVisible(False)
         self._preview_hint = hint
         lay.addWidget(hint)
@@ -505,70 +492,46 @@ class ControlTab(QWidget):
         self.combo_preset.currentIndexChanged.connect(self._on_preset_selected)
         bar.addWidget(self.combo_preset, 1)
 
-        # 💾 저장 (덮어쓰기)
-        self.btn_preset_save = QPushButton("💾 저장")
+        # 저장 (덮어쓰기)
+        self.btn_preset_save = QPushButton("저장")
+        self.btn_preset_save.setObjectName("btnPresetSave")
         self.btn_preset_save.setFixedHeight(28)
         self.btn_preset_save.setMinimumWidth(70)
         self.btn_preset_save.setToolTip("현재 설정을 선택된 프리셋에 덮어씁니다")
-        self.btn_preset_save.setStyleSheet(
-            "QPushButton{background:#2e86c1;color:white;font-size:12px;"
-            "font-weight:bold;border-radius:5px;padding:0 8px;}"
-            "QPushButton:hover{background:#3498db;}"
-            "QPushButton:disabled{background:#555;color:#888;}"
-        )
         self.btn_preset_save.clicked.connect(self._on_preset_save)
         bar.addWidget(self.btn_preset_save)
 
-        # 📝 새로
-        self.btn_preset_new = QPushButton("📝 새로")
+        # + 새로
+        self.btn_preset_new = QPushButton("+ 새로")
+        self.btn_preset_new.setObjectName("btnPresetNew")
         self.btn_preset_new.setFixedHeight(28)
         self.btn_preset_new.setMinimumWidth(70)
         self.btn_preset_new.setToolTip("현재 설정을 새 프리셋으로 저장합니다")
-        self.btn_preset_new.setStyleSheet(
-            "QPushButton{background:#27ae60;color:white;font-size:12px;"
-            "font-weight:bold;border-radius:5px;padding:0 8px;}"
-            "QPushButton:hover{background:#2ecc71;}"
-        )
         self.btn_preset_new.clicked.connect(self._on_preset_new)
         bar.addWidget(self.btn_preset_new)
 
         # ↩ 되돌리기
         self.btn_preset_revert = QPushButton("↩ 되돌리기")
+        self.btn_preset_revert.setObjectName("btnPresetRevert")
         self.btn_preset_revert.setFixedHeight(28)
         self.btn_preset_revert.setMinimumWidth(85)
         self.btn_preset_revert.setToolTip("프리셋의 원래 설정으로 되돌립니다")
-        self.btn_preset_revert.setStyleSheet(
-            "QPushButton{background:#555;color:#ccc;font-size:12px;"
-            "font-weight:bold;border-radius:5px;padding:0 8px;}"
-            "QPushButton:hover{background:#666;}"
-            "QPushButton:disabled{background:#444;color:#777;}"
-        )
         self.btn_preset_revert.clicked.connect(self._on_preset_revert)
         bar.addWidget(self.btn_preset_revert)
 
-        # ⭐ 기본 프리셋 설정
-        self.btn_preset_default = QPushButton("⭐")
+        # ★ 기본 프리셋 설정
+        self.btn_preset_default = QPushButton("★")
+        self.btn_preset_default.setObjectName("btnPresetDefault")
         self.btn_preset_default.setFixedSize(28, 28)
         self.btn_preset_default.setToolTip("이 프리셋을 앱 시작 시 기본값으로 설정합니다")
-        self.btn_preset_default.setStyleSheet(
-            "QPushButton{background:#555;color:#ccc;font-size:13px;"
-            "border-radius:5px;}"
-            "QPushButton:hover{background:#b7950b;color:white;}"
-            "QPushButton:disabled{background:#444;color:#777;}"
-        )
         self.btn_preset_default.clicked.connect(self._on_preset_set_default)
         bar.addWidget(self.btn_preset_default)
 
-        # 🗑️ 삭제
-        self.btn_preset_delete = QPushButton("🗑️")
+        # ✕ 삭제
+        self.btn_preset_delete = QPushButton("✕")
+        self.btn_preset_delete.setObjectName("btnPresetDelete")
         self.btn_preset_delete.setFixedSize(28, 28)
         self.btn_preset_delete.setToolTip("선택된 프리셋을 삭제합니다")
-        self.btn_preset_delete.setStyleSheet(
-            "QPushButton{background:#555;color:#ccc;font-size:13px;"
-            "border-radius:5px;}"
-            "QPushButton:hover{background:#c0392b;color:white;}"
-            "QPushButton:disabled{background:#444;color:#777;}"
-        )
         self.btn_preset_delete.clicked.connect(self._on_preset_delete)
         bar.addWidget(self.btn_preset_delete)
 
@@ -595,10 +558,10 @@ class ControlTab(QWidget):
         while self.combo_preset.count() > 1:
             self.combo_preset.removeItem(1)
 
-        # 프리셋 목록 추가 (⭐ 표시 포함)
+        # 프리셋 목록 추가 (★ 표시 포함)
         default_name = self.config.get("options", {}).get("default_preset")
         for name in list_presets():
-            display = f"⭐ {name}" if name == default_name else name
+            display = f"★ {name}" if name == default_name else name
             self.combo_preset.addItem(display, name)
 
         # ★ 기본 프리셋 우선, 없으면 마지막 프리셋
@@ -635,7 +598,7 @@ class ControlTab(QWidget):
         self._update_preset_button_states()
 
     def _refresh_preset_combo(self, select_name=None):
-        """프리셋 콤보 새로고침 — 저장/삭제 후 호출. 기본 프리셋에 ⭐ 표시."""
+        """프리셋 콤보 새로고침 — 저장/삭제 후 호출. 기본 프리셋에 ★ 표시."""
         self.combo_preset.blockSignals(True)
 
         while self.combo_preset.count() > 1:
@@ -644,7 +607,7 @@ class ControlTab(QWidget):
         default_name = self.config.get("options", {}).get("default_preset")
 
         for name in list_presets():
-            display = f"⭐ {name}" if name == default_name else name
+            display = f"★ {name}" if name == default_name else name
             self.combo_preset.addItem(display, name)
 
         if select_name:
@@ -708,7 +671,7 @@ class ControlTab(QWidget):
         self._update_preset_button_states()
 
     def _on_preset_save(self):
-        """💾 저장 — 현재 프리셋에 덮어쓰기."""
+        """저장 — 현재 프리셋에 덮어쓰기."""
         if not self._current_preset_name:
             return
 
@@ -730,7 +693,7 @@ class ControlTab(QWidget):
             self._update_preset_button_states()
 
     def _on_preset_new(self):
-        """📝 새로 — 새 프리셋 저장."""
+        """+ 새로 — 새 프리셋 저장."""
         name, ok = QInputDialog.getText(
             self, "새 프리셋", "프리셋 이름을 입력하세요:",
         )
@@ -777,7 +740,7 @@ class ControlTab(QWidget):
             self._push_params_to_engine()
 
     def _on_preset_delete(self):
-        """🗑️ 삭제 — 현재 프리셋 삭제."""
+        """✕ 삭제 — 현재 프리셋 삭제."""
         if not self._current_preset_name:
             return
 
@@ -808,7 +771,7 @@ class ControlTab(QWidget):
             self.config_applied.emit()
 
     def _on_preset_set_default(self):
-        """⭐ 기본 — 현재 프리셋을 앱 시작 시 기본값으로 설정."""
+        """★ 기본 — 현재 프리셋을 앱 시작 시 기본값으로 설정."""
         if not self._current_preset_name:
             return
 
@@ -828,13 +791,13 @@ class ControlTab(QWidget):
         opts["default_preset"] = name
         self.config_applied.emit()
 
-        # 콤보 갱신 (⭐ 표시 반영)
+        # 콤보 갱신 (★ 표시 반영)
         self._refresh_preset_combo(select_name=name)
         self._update_preset_button_states()
 
         # 버튼 피드백
-        self.btn_preset_default.setText("✅")
-        QTimer.singleShot(1500, lambda: self.btn_preset_default.setText("⭐"))
+        self.btn_preset_default.setText("✓")
+        QTimer.singleShot(1500, lambda: self.btn_preset_default.setText("★"))
 
     # ── 프리셋 → UI 적용 ────────────────────────────────────────
 
@@ -933,14 +896,7 @@ class ControlTab(QWidget):
             self.combo_preset.setItemText(idx, text[:-2])
 
     def _update_preset_button_states(self):
-        """프리셋 버튼 활성/비활성 상태 갱신.
-
-        | 상태                    | 💾 저장 | 📝 새로 | ↩ 되돌리기 | ⭐ 기본 | 🗑️ |
-        |------------------------|---------|---------|------------|--------|-----|
-        | 미선택                  | 비활성  | 활성    | 비활성     | 비활성  | 비활성 |
-        | 선택, 변경 없음          | 비활성  | 활성    | 비활성     | 활성    | 활성   |
-        | 선택, 변경됨 (*)         | 활성    | 활성    | 활성       | 활성    | 활성   |
-        """
+        """프리셋 버튼 활성/비활성 상태 갱신."""
         has_preset = self._current_preset_name is not None
         modified = self._preset_modified and has_preset
 
@@ -950,23 +906,14 @@ class ControlTab(QWidget):
         self.btn_preset_default.setEnabled(has_preset)
         self.btn_preset_delete.setEnabled(has_preset)
 
-        # ⭐ 버튼 시각적 피드백: 이미 기본이면 밝게
+        # ★ 기본 버튼: QSS property로 시각적 피드백
         if has_preset:
             default_name = self.config.get("options", {}).get("default_preset")
             is_default = (self._current_preset_name == default_name)
-            if is_default:
-                self.btn_preset_default.setStyleSheet(
-                    "QPushButton{background:#b7950b;color:white;font-size:13px;"
-                    "border-radius:5px;}"
-                    "QPushButton:hover{background:#d4ac0d;}"
-                )
-            else:
-                self.btn_preset_default.setStyleSheet(
-                    "QPushButton{background:#555;color:#ccc;font-size:13px;"
-                    "border-radius:5px;}"
-                    "QPushButton:hover{background:#b7950b;color:white;}"
-                    "QPushButton:disabled{background:#444;color:#777;}"
-                )
+            _set_property(self.btn_preset_default, "isDefault",
+                          "true" if is_default else "false")
+        else:
+            _set_property(self.btn_preset_default, "isDefault", "false")
 
     # ── 트레이/외부에서 프리셋 선택 ──────────────────────────────
 
@@ -1058,47 +1005,31 @@ class ControlTab(QWidget):
         self.section_mirror.set_flowing_active(is_flowing)
 
     def _update_toggle_panels(self, animate=True):
-        # ── 태그 갱신 (각 토글마다 고유 색상) ──
+        """★ 태그 + 패널 상태를 QSS property로 갱신."""
+
+        # ── 태그 텍스트 + QSS property 갱신 ──
         if self._display_on:
             self.tag_display.setText("디스플레이 ON")
-            self.tag_display.setStyleSheet(
-                "background:#1a3456;color:#7ec8e3;padding:2px 8px;"
-                "border-radius:8px;font-size:10px;font-weight:600;"
-            )
+            _set_property(self.tag_display, "tagState", "on")
         else:
             self.tag_display.setText("디스플레이 OFF")
-            self.tag_display.setStyleSheet(
-                "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
-                "border-radius:8px;font-size:10px;font-weight:600;"
-            )
+            _set_property(self.tag_display, "tagState", "off")
 
         if self._audio_on:
             self.tag_audio.setText("오디오 ON")
-            self.tag_audio.setStyleSheet(
-                "background:#2e1a45;color:#c49be8;padding:2px 8px;"
-                "border-radius:8px;font-size:10px;font-weight:600;"
-            )
+            _set_property(self.tag_audio, "tagState", "on")
         else:
             self.tag_audio.setText("오디오 OFF")
-            self.tag_audio.setStyleSheet(
-                "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
-                "border-radius:8px;font-size:10px;font-weight:600;"
-            )
+            _set_property(self.tag_audio, "tagState", "off")
 
-        # ★ 미디어 태그 갱신 — display ON + media ON일 때만 실제 활성
+        # ★ 미디어 태그 — display ON + media ON일 때만 실제 활성
         media_effective = self._media_on and self._display_on
         if media_effective:
             self.tag_media.setText("미디어 ON")
-            self.tag_media.setStyleSheet(
-                "background:#2d3a1a;color:#a3d977;padding:2px 8px;"
-                "border-radius:8px;font-size:10px;font-weight:600;"
-            )
+            _set_property(self.tag_media, "tagState", "on")
         else:
             self.tag_media.setText("미디어 OFF")
-            self.tag_media.setStyleSheet(
-                "background:#2b2b2b;color:#6a6a74;padding:2px 8px;"
-                "border-radius:8px;font-size:10px;font-weight:600;"
-            )
+            _set_property(self.tag_media, "tagState", "off")
 
         self.panel_display_off.set_expanded(not self._display_on, animate=animate)
         self.panel_display_on.set_expanded(self._display_on, animate=animate)
@@ -1130,12 +1061,7 @@ class ControlTab(QWidget):
             if frame is not None:
                 self.section_mirror.update_media_thumbnail(frame)
             else:
-                self.section_mirror.lbl_media_thumbnail.clear()
-                self.section_mirror.lbl_media_thumbnail.setText("🎵")
-                self.section_mirror.lbl_media_thumbnail.setStyleSheet(
-                    "border:1px solid #555;border-radius:4px;background:#1a1a1e;"
-                    "color:#555;font-size:20px;"
-                )
+                self.section_mirror.set_media_thumbnail_placeholder()
 
         # ★ 곡 정보를 카드 라벨 + 썸네일 툴팁에 설정
         info = provider.get_media_info()
@@ -1155,9 +1081,10 @@ class ControlTab(QWidget):
             self.section_mirror.lbl_media_thumbnail.setToolTip(song_text)
 
             if not info:
+                from styles.palette import DARK as _PAL
                 self.section_mirror.lbl_media_source.setText("미디어 연동 활성")
                 self.section_mirror.lbl_media_source.setStyleSheet(
-                    "color:#a3d977;font-size:11px;font-weight:bold;"
+                    f"color:{_PAL['media_active']};font-size:11px;font-weight:bold;"
                     "border:none;background:transparent;"
                 )
 
@@ -1236,7 +1163,7 @@ class ControlTab(QWidget):
         self.monitor_preview.setVisible(checked)
         self._preview_hint.setVisible(checked)
         self.btn_preview_toggle.setText(
-            "👁 프리뷰 숨기기" if checked else "👁 프리뷰 보기"
+            "프리뷰 숨기기" if checked else "프리뷰 보기"
         )
 
     # ══════════════════════════════════════════════════════════════
@@ -1414,7 +1341,7 @@ class ControlTab(QWidget):
                 self.section_audio.update_spectrum(spec)
 
     def update_pause_button(self, is_paused):
-        self.btn_pause.setText("▶ 재개" if is_paused else "⏸ 일시정지")
+        self.btn_pause.setText("▶ 재개" if is_paused else "∥ 일시정지")
 
     def get_audio_device_index(self):
         return self.combo_audio_device.currentData()
@@ -1489,14 +1416,17 @@ class ControlTab(QWidget):
         self.section_audio.apply_to_config()
 
     def _update_resource_usage(self):
+        """★ CPU/RAM 갱신 — QSS property로 CPU 색상 제어."""
         try:
             cpu = self._process.cpu_percent() / psutil.cpu_count()
             mem_info = self._process.memory_full_info()
             ram = getattr(mem_info, 'uss', mem_info.rss) / (1024 * 1024)
             self.cpu_label.setText(f"CPU: {cpu:.1f}%")
             self.ram_label.setText(f"RAM: {ram:.0f} MB")
-            color = "#c0392b" if cpu >= 20 else "#e67e22" if cpu >= 10 else "#d35400"
-            self.cpu_label.setStyleSheet(f"font-size:12px;color:{color};margin-right:6px;")
+
+            # ★ QSS property로 색상 전환 (dark.qss의 QLabel#cpuLabel[level=...])
+            level = "danger" if cpu >= 20 else "warning" if cpu >= 10 else "normal"
+            _set_property(self.cpu_label, "level", level)
         except Exception:
             pass
 

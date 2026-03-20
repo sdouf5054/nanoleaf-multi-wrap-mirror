@@ -7,6 +7,10 @@
   - force_disconnect(): 외부에서 연결 해제 요청
   - cleanup(): 종료 시 소유권 해제
 
+[QSS 테마] setStyleSheet → QSS property 기반으로 전환.
+  - conn_label 색상: setProperty("connState", "connected"/"disconnected")
+  - dark.qss의 QLabel#connLabel[connState=...] 셀렉터와 매칭
+
 사용법:
     class MyTab(DeviceOwnerMixin, QWidget):
         _DEVICE_OWNER = "my_tab"
@@ -20,11 +24,18 @@
 서브클래스 요구사항:
     - _DEVICE_OWNER: str — 소유자 식별 문자열
     - self.btn_connect: QPushButton — 연결 버튼
-    - self.conn_label: QLabel — 상태 라벨
+    - self.conn_label: QLabel — 상태 라벨 (objectName="connLabel" 설정 필요)
     - self.request_mirror_stop: Signal — 엔진 중지 요청 시그널
 """
 
 from PySide6.QtWidgets import QMessageBox
+
+
+def _set_property(widget, name, value):
+    """QSS dynamic property를 설정하고 스타일을 다시 적용."""
+    widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 class DeviceOwnerMixin:
@@ -45,13 +56,13 @@ class DeviceOwnerMixin:
     def _set_connected_ui(self):
         """연결 상태 UI 갱신."""
         self.conn_label.setText("연결됨")
-        self.conn_label.setStyleSheet("color: #2d8c46;")
+        _set_property(self.conn_label, "connState", "connected")
         self.btn_connect.setText("연결 해제")
 
     def _set_disconnected_ui(self):
         """비연결 상태 UI 갱신."""
         self.conn_label.setText("연결 안 됨")
-        self.conn_label.setStyleSheet("color: #c0392b;")
+        _set_property(self.conn_label, "connState", "disconnected")
         self.btn_connect.setText("LED 연결")
 
     def _on_force_released(self, prev_owner):
@@ -61,10 +72,7 @@ class DeviceOwnerMixin:
             self._set_disconnected_ui()
 
     def _on_device_force_released(self):
-        """서브클래스에서 오버라이드 가능 — 강제 해제 시 추가 처리.
-
-        예: SetupTab에서 스캔 중지.
-        """
+        """서브클래스에서 오버라이드 가능 — 강제 해제 시 추가 처리."""
         pass
 
     def force_disconnect(self):

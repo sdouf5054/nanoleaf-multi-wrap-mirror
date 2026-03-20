@@ -16,6 +16,8 @@ Nanoleaf Screen Mirror — GUI 앱 진입점 (PySide6)
 
   해결: start_to_tray 모드에서는 QTimer.singleShot(0) 으로
   이벤트 루프 첫 틱에서 즉시 hide() 호출 + Win32 SW_HIDE 직접 전송.
+
+[QSS 테마] styles/ 패키지에서 다크 테마를 로드하여 적용.
 """
 
 import sys
@@ -76,6 +78,7 @@ QApplication.setHighDpiScaleFactorRoundingPolicy(
 
 from core.config import load_config
 from ui.main_window import MainWindow
+from styles import load_theme                          # ★ QSS 테마 로더
 
 
 def main():
@@ -125,6 +128,9 @@ def main():
     font = app.font()
     font.setPointSize(10)
     app.setFont(font)
+
+    # === 8.5) ★ QSS 다크 테마 적용 ===
+    load_theme(app)
 
     config = load_config()
 

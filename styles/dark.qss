@@ -1,0 +1,727 @@
+/*
+ * Nanoleaf Screen Mirror — Dark Theme
+ *
+ * 이 파일은 Python f-string 템플릿입니다.
+ * {{{{key}}}} 자리표시자가 styles/palette.py의 DARK dict 값으로 치환됩니다.
+ * QSS 리터럴 중괄호는 이중으로: {{{{ }}}} → {{ }}
+ *
+ * 구조:
+ *   1. 전역 기본 위젯
+ *   2. objectName 기반 커스텀 위젯
+ *   3. property 기반 공통 패턴
+ */
+
+
+/* ══════════════════════════════════════════════════════════════
+ *  1. 전역 기본 위젯
+ * ══════════════════════════════════════════════════════════════ */
+
+/* ── 1-1. 루트 ── */
+
+QWidget {{
+    background: {bg_primary};
+    color: {text_primary};
+    font-size: 10pt;
+}}
+
+QToolTip {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border_hover};
+    padding: 4px 8px;
+    font-size: 11px;
+}}
+
+
+/* ── 1-2. 그룹박스 ── */
+
+QGroupBox {{
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 16px 6px 6px 6px;
+    margin-top: 8px;
+    font-weight: bold;
+}}
+
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 4px;
+    color: {text_primary};
+}}
+
+
+/* ── 1-3. 탭 위젯 ── */
+
+QTabWidget::pane {{
+    border: 1px solid {border};
+    border-top: none;
+    background: {bg_primary};
+}}
+
+QTabBar::tab {{
+    background: {bg_secondary};
+    color: {text_muted};
+    border: 1px solid {border};
+    border-bottom: none;
+    padding: 6px 16px;
+    margin-right: 2px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    font-weight: bold;
+    font-size: 10pt;
+}}
+
+QTabBar::tab:selected {{
+    background: {bg_primary};
+    color: {text_primary};
+    border-bottom: 2px solid {accent_blue};
+}}
+
+QTabBar::tab:hover:!selected {{
+    background: {bg_hover};
+    color: {text_secondary};
+}}
+
+
+/* ── 1-4. 버튼 (기본) ── */
+
+QPushButton {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border};
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 10pt;
+}}
+
+QPushButton:hover {{
+    background: {bg_hover};
+    border-color: {border_hover};
+}}
+
+QPushButton:pressed {{
+    background: {bg_pressed};
+}}
+
+QPushButton:disabled {{
+    background: {text_disabled};
+    color: {text_muted};
+    border-color: {border};
+}}
+
+
+/* ── 1-5. 콤보박스 ── */
+
+QComboBox {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 3px 6px;
+}}
+
+QComboBox:hover {{
+    border-color: {border_hover};
+}}
+
+QComboBox:focus {{
+    border-color: {border_focus};
+}}
+
+QComboBox:disabled {{
+    color: {text_dim};
+    background: {bg_secondary};
+    border-color: {border};
+}}
+
+QComboBox QAbstractItemView {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border_hover};
+    selection-background-color: {bg_selected};
+    selection-color: {text_primary};
+    outline: none;
+}}
+
+
+/* ── 1-6. 스핀박스 ── */
+
+QSpinBox, QDoubleSpinBox {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 2px 4px;
+}}
+
+QSpinBox:hover, QDoubleSpinBox:hover {{
+    border-color: {border_hover};
+}}
+
+QSpinBox:focus, QDoubleSpinBox:focus {{
+    border-color: {border_focus};
+    background: {bg_hover};
+}}
+
+QSpinBox:disabled, QDoubleSpinBox:disabled {{
+    color: {text_dim};
+    background: {bg_secondary};
+    border-color: {border};
+}}
+
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+    background: {bg_hover};
+    border: none;
+    width: 16px;
+}}
+
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+    background: {border_hover};
+}}
+
+
+/* ── 1-7. 슬라이더 ── */
+
+QSlider::groove:horizontal {{
+    background: {slider_groove};
+    height: 6px;
+    border-radius: 3px;
+}}
+
+QSlider::handle:horizontal {{
+    background: {slider_handle};
+    width: 16px;
+    height: 16px;
+    margin: -5px 0;
+    border-radius: 8px;
+}}
+
+QSlider::handle:horizontal:hover {{
+    background: {slider_handle_hover};
+}}
+
+QSlider::sub-page:horizontal {{
+    background: {slider_sub};
+    border-radius: 3px;
+}}
+
+
+/* ── 1-8. 체크박스 ── */
+
+QCheckBox {{
+    color: {text_primary};
+    spacing: 6px;
+}}
+
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {border_light};
+    border-radius: 3px;
+    background: {bg_tertiary};
+}}
+
+QCheckBox::indicator:hover {{
+    border-color: {border_hover};
+}}
+
+QCheckBox::indicator:checked {{
+    background: {accent_blue};
+    border-color: {accent_blue};
+}}
+
+
+/* ── 1-9. 텍스트 입력 ── */
+
+QLineEdit {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 3px 6px;
+    selection-background-color: {bg_selected};
+}}
+
+QLineEdit:hover {{
+    border-color: {border_hover};
+}}
+
+QLineEdit:focus {{
+    border-color: {border_focus};
+    background: {bg_hover};
+}}
+
+QTextEdit {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border};
+    border-radius: 4px;
+    padding: 4px;
+    selection-background-color: {bg_selected};
+}}
+
+
+/* ── 1-10. 프로그레스바 ── */
+
+QProgressBar {{
+    background: {bar_bg};
+    border: none;
+    border-radius: 3px;
+    text-align: center;
+}}
+
+QProgressBar::chunk {{
+    border-radius: 3px;
+}}
+
+
+/* ── 1-11. 테이블 ── */
+
+QTableWidget {{
+    background: {bg_secondary};
+    color: {text_primary};
+    border: 1px solid {border};
+    gridline-color: {border};
+    selection-background-color: {bg_selected};
+}}
+
+QTableWidget::item {{
+    padding: 4px;
+}}
+
+QHeaderView::section {{
+    background: {bg_tertiary};
+    color: {text_primary};
+    border: 1px solid {border};
+    padding: 4px;
+    font-weight: bold;
+}}
+
+
+/* ── 1-12. 스크롤 영역 ── */
+
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+
+QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+    margin: 0;
+}}
+
+QScrollBar::handle:vertical {{
+    background: {border};
+    border-radius: 4px;
+    min-height: 30px;
+}}
+
+QScrollBar::handle:vertical:hover {{
+    background: {border_hover};
+}}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+}}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: transparent;
+}}
+
+QScrollBar:horizontal {{
+    background: transparent;
+    height: 8px;
+    margin: 0;
+}}
+
+QScrollBar::handle:horizontal {{
+    background: {border};
+    border-radius: 4px;
+    min-width: 30px;
+}}
+
+QScrollBar::handle:horizontal:hover {{
+    background: {border_hover};
+}}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0;
+}}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: transparent;
+}}
+
+
+/* ── 1-13. 상태바 ── */
+
+QStatusBar {{
+    background: {bg_secondary};
+    color: {text_muted};
+}}
+
+QStatusBar::item {{
+    border: none;
+}}
+
+QSizeGrip {{
+    width: 0;
+    height: 0;
+}}
+
+
+/* ── 1-14. 메뉴 (트레이) ── */
+
+QMenu {{
+    background: {bg_secondary};
+    color: {text_primary};
+    border: 1px solid {border};
+    padding: 4px;
+}}
+
+QMenu::item {{
+    padding: 6px 24px;
+    border-radius: 4px;
+}}
+
+QMenu::item:selected {{
+    background: {bg_selected};
+}}
+
+QMenu::item:disabled {{
+    color: {text_dim};
+}}
+
+QMenu::separator {{
+    height: 1px;
+    background: {border};
+    margin: 4px 8px;
+}}
+
+
+/* ── 1-15. 프레임 구분선 ── */
+
+QFrame[frameShape="4"] {{
+    color: {border};
+    max-height: 1px;
+}}
+
+QFrame[frameShape="5"] {{
+    color: {border};
+    max-width: 1px;
+}}
+
+
+/* ══════════════════════════════════════════════════════════════
+ *  2. objectName 기반 커스텀 위젯
+ * ══════════════════════════════════════════════════════════════ */
+
+/* ── 2-1. 액션 버튼 (tab_control 상태 패널) ── */
+
+QPushButton#btnStart {{
+    background: {accent_green};
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 5px 12px;
+}}
+QPushButton#btnStart:hover {{ background: {accent_green_hover}; }}
+QPushButton#btnStart:disabled {{ background: {text_disabled}; color: {text_muted}; }}
+
+QPushButton#btnPause {{
+    background: {accent_navy};
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 5px 12px;
+}}
+QPushButton#btnPause:hover {{ background: {accent_navy_hover}; }}
+QPushButton#btnPause:disabled {{ background: {text_disabled}; color: {text_muted}; }}
+
+QPushButton#btnStop {{
+    background: {accent_red};
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 5px 12px;
+}}
+QPushButton#btnStop:hover {{ background: {accent_red_hover}; }}
+QPushButton#btnStop:disabled {{ background: {text_disabled}; color: {text_muted}; }}
+
+
+/* ── 2-2. 상태 라벨 ── */
+
+QLabel#statusLabel {{
+    font-size: 13px;
+    font-weight: bold;
+}}
+
+QLabel#cpuLabel {{
+    font-size: 12px;
+    color: {cpu_normal};
+    margin-right: 6px;
+}}
+QLabel#cpuLabel[level="warning"] {{ color: {cpu_warning}; }}
+QLabel#cpuLabel[level="danger"]  {{ color: {cpu_danger}; }}
+QLabel#cpuLabel[level="normal"]  {{ color: {cpu_normal}; }}
+
+QLabel#ramLabel {{
+    font-size: 12px;
+    color: {ram_color};
+    margin-right: 10px;
+}}
+
+QLabel#fpsLabel {{
+    font-size: 14px;
+    color: {fps_color};
+}}
+
+
+/* ── 2-3. 상태 태그 (ON/OFF 동적 전환) ── */
+
+QLabel#tagDisplay, QLabel#tagAudio, QLabel#tagMedia {{
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+}}
+
+QLabel#tagDisplay[tagState="off"] {{ background: {tag_off_bg}; color: {tag_off_text}; }}
+QLabel#tagDisplay[tagState="on"]  {{ background: {tag_display_bg}; color: {tag_display_text}; }}
+
+QLabel#tagAudio[tagState="off"]   {{ background: {tag_off_bg}; color: {tag_off_text}; }}
+QLabel#tagAudio[tagState="on"]    {{ background: {tag_audio_bg}; color: {tag_audio_text}; }}
+
+QLabel#tagMedia[tagState="off"]   {{ background: {tag_off_bg}; color: {tag_off_text}; }}
+QLabel#tagMedia[tagState="on"]    {{ background: {tag_media_bg}; color: {tag_media_text}; }}
+
+
+/* ── 2-4. 프리셋 바 버튼 ── */
+
+QPushButton#btnPresetSave {{
+    background: {accent_blue};
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0 8px;
+}}
+QPushButton#btnPresetSave:hover {{ background: {accent_blue_hover}; }}
+QPushButton#btnPresetSave:disabled {{ background: {text_disabled}; color: {text_dim}; }}
+
+QPushButton#btnPresetNew {{
+    background: {accent_green_bright};
+    color: white;
+    border: none;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0 8px;
+}}
+QPushButton#btnPresetNew:hover {{ background: {accent_green_light}; }}
+
+QPushButton#btnPresetRevert {{
+    background: {text_disabled};
+    color: {text_secondary};
+    border: none;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 0 8px;
+}}
+QPushButton#btnPresetRevert:hover {{ background: {border_hover}; }}
+QPushButton#btnPresetRevert:disabled {{ background: {border}; color: {text_dim}; }}
+
+QPushButton#btnPresetDefault {{
+    background: {text_disabled};
+    color: {text_secondary};
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 0;
+}}
+QPushButton#btnPresetDefault:hover {{ background: {accent_gold}; color: white; }}
+QPushButton#btnPresetDefault:disabled {{ background: {border}; color: {text_dim}; }}
+QPushButton#btnPresetDefault[isDefault="true"] {{
+    background: {accent_gold};
+    color: white;
+}}
+QPushButton#btnPresetDefault[isDefault="true"]:hover {{ background: {accent_gold_hover}; }}
+
+QPushButton#btnPresetDelete {{
+    background: {text_disabled};
+    color: {text_secondary};
+    border: none;
+    border-radius: 5px;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 0;
+}}
+QPushButton#btnPresetDelete:hover {{ background: {accent_red}; color: white; }}
+QPushButton#btnPresetDelete:disabled {{ background: {border}; color: {text_dim}; }}
+
+
+/* ── 2-5. 프리뷰 토글 ── */
+
+QPushButton#btnPreviewToggle {{
+    background: {preview_toggle_bg};
+    color: {preview_toggle_text};
+    border: none;
+    border-radius: 4px;
+    padding: 5px;
+    font-size: 11px;
+}}
+QPushButton#btnPreviewToggle:checked {{
+    background: {preview_toggle_checked};
+    color: white;
+}}
+
+
+/* ── 2-6. 미러링 패널 — 미디어 카드 ── */
+
+QFrame#mediaCard {{
+    background: {card_bg};
+    border: 1px solid {card_border};
+    border-radius: 6px;
+}}
+
+QLabel#lblMediaThumb {{
+    border: 1px solid {border_light};
+    border-radius: 4px;
+    background: {card_inner_bg};
+}}
+
+QLabel#lblMediaSong {{
+    color: {text_muted};
+    font-size: 10px;
+    border: none;
+    background: transparent;
+}}
+
+QLabel#lblSourceOff {{
+    color: {text_dim};
+    font-size: 11px;
+    font-style: italic;
+}}
+
+QPushButton#btnRefreshThumb {{
+    background: {btn_refresh_bg};
+    border: 1px solid {border_light};
+    border-radius: 6px;
+    font-size: 14px;
+    padding: 0;
+}}
+QPushButton#btnRefreshThumb:hover {{ background: {btn_refresh_hover}; border-color: {border_hover}; }}
+QPushButton#btnRefreshThumb:pressed {{ background: {btn_refresh_pressed}; }}
+
+QPushButton#btnToggleSource {{
+    padding: 2px 8px;
+    font-size: 11px;
+}}
+
+QPushButton#btnAdvanced {{
+    background: transparent;
+    color: {accent_blue};
+    border: none;
+    font-size: 12px;
+    text-align: left;
+    padding: 2px;
+}}
+QPushButton#btnAdvanced:hover {{ color: {accent_blue_hover}; }}
+
+
+/* ── 2-7. 에너지 바 ── */
+
+QProgressBar#barBass::chunk {{ background: {bar_bass}; border-radius: 3px; }}
+QProgressBar#barMid::chunk  {{ background: {bar_mid};  border-radius: 3px; }}
+QProgressBar#barHigh::chunk {{ background: {bar_high}; border-radius: 3px; }}
+
+
+/* ── 2-8. LED 셋업 탭 ── */
+
+QSpinBox#spinCurrentLed {{
+    font-size: 20px;
+    font-weight: bold;
+    color: {accent_blue_light};
+}}
+
+QTextEdit#segPreview {{
+    font-family: Consolas, "Courier New", monospace;
+}}
+
+
+/* ── 2-9. 연결 상태 라벨 ── */
+
+QLabel#connLabel[connState="connected"] {{
+    color: {accent_green};
+}}
+QLabel#connLabel[connState="disconnected"] {{
+    color: {accent_red};
+}}
+
+
+/* ── 2-10. ToggleSwitch (커스텀 페인트용 기본) ── */
+
+ToggleSwitch {{
+    spacing: 8px;
+    font-size: 13px;
+    color: {text_primary};
+}}
+
+ToggleSwitch::indicator {{
+    width: 0px;
+    height: 0px;
+    margin: 0px;
+    padding: 0px;
+    border: none;
+    background: transparent;
+}}
+
+
+/* ══════════════════════════════════════════════════════════════
+ *  3. property 기반 공통 패턴
+ * ══════════════════════════════════════════════════════════════ */
+
+/* 섹션 헤더 — 여러 패널에서 사용 */
+QLabel[role="sectionHeader"] {{
+    font-weight: bold;
+    font-size: 11px;
+}}
+
+/* 힌트 라벨 — 앱 전체 공통 */
+QLabel[role="hint"] {{
+    color: {text_dim};
+    font-size: 10px;
+    font-style: italic;
+}}
+
+/* 경고 힌트 (주황) */
+QLabel[role="hintWarning"] {{
+    color: {accent_orange};
+    font-size: 10px;
+    font-style: italic;
+}}
+
+/* Flowing 힌트 전용 */
+QLabel#lblFlowingHint {{
+    color: {accent_orange};
+    font-size: 10px;
+    font-style: italic;
+}}
