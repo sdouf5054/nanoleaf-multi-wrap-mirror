@@ -13,10 +13,16 @@
 - 옵션에서 설정한 hotkey_audio_cycle 키로 등록
 - 트레이 메뉴에 "오디오 모드 순환" 항목 추가
 
+[★ 프리셋 서브메뉴 추가]
+- preset_selected(str) 시그널 추가
+- 프리셋 서브메뉴: 현재 활성 프리셋에 체크 표시
+- update_preset_menu(names, current): 프리셋 목록 갱신
+
 Signals:
     toggle_requested(): 엔진 on/off 토글 요청
     brightness_delta(int): 밝기 변경 요청 (+10 또는 -10)
     audio_cycle_requested(): ★ 오디오 모드 순환 요청
+    preset_selected(str): ★ 프리셋 선택 요청 (이름)
     show_window_requested(): 설정 창 표시 요청
     quit_requested(): 앱 종료 요청
 """
@@ -25,7 +31,7 @@ import os
 import sys
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
-from PySide6.QtGui import QIcon, QAction
+from PySide6.QtGui import QIcon, QAction, QActionGroup
 from PySide6.QtCore import QTimer, Signal, QObject
 
 try:
@@ -47,6 +53,7 @@ class SystemTray(QSystemTrayIcon):
     brightness_delta = Signal(int)
     brightness_set = Signal(int)
     audio_cycle_requested = Signal()       # ★ 오디오 모드 순환
+    preset_selected = Signal(str)          # ★ 프리셋 선택
     show_window_requested = Signal()
     quit_requested = Signal()
 
@@ -64,7 +71,9 @@ class SystemTray(QSystemTrayIcon):
         self.setToolTip("Nanoleaf Screen Mirror")
 
         self._hotkey_handles = []
-        self._menu = None  # ★ 인스턴스 변수로 선언 — GC 방지
+        self._menu = None
+        self._preset_menu = None      # ★ 프리셋 서브메뉴
+        self._preset_actions = []     # ★ 프리셋 QAction 목록 (GC 방지)
         self._build_menu()
         self.setup_hotkeys()
         self.activated.connect(self._on_activated)
@@ -89,6 +98,14 @@ class SystemTray(QSystemTrayIcon):
 
         menu.addSeparator()
 
+        # ★ 프리셋 서브메뉴
+        self._preset_menu = QMenu("프리셋", menu)
+        self._preset_none_action = QAction("(프리셋 없음)", self._preset_menu)
+        self._preset_none_action.setEnabled(False)
+        self._preset_menu.addAction(self._preset_none_action)
+        menu.addMenu(self._preset_menu)
+
+        # 밝기 서브메뉴
         bright_menu = QMenu("밝기", menu)
         for pct in (25, 50, 75, 100):
             action = QAction(f"{pct}%", bright_menu)
@@ -109,6 +126,39 @@ class SystemTray(QSystemTrayIcon):
         menu.addAction(quit_action)
 
         self.setContextMenu(menu)
+
+    # ── ★ 프리셋 메뉴 갱신 ──────────────────────────────────────
+
+    def update_preset_menu(self, names, current_name=None):
+        """프리셋 서브메뉴 갱신.
+
+        Args:
+            names: list[str] — 프리셋 이름 목록
+            current_name: str 또는 None — 현재 활성 프리셋 이름
+        """
+        if self._preset_menu is None:
+            return
+
+        self._preset_menu.clear()
+        self._preset_actions.clear()
+
+        if not names:
+            action = QAction("(프리셋 없음)", self._preset_menu)
+            action.setEnabled(False)
+            self._preset_menu.addAction(action)
+            self._preset_actions.append(action)
+            return
+
+        for name in names:
+            action = QAction(name, self._preset_menu)
+            action.setCheckable(True)
+            action.setChecked(name == current_name)
+            # ★ 클릭 시 프리셋 이름을 시그널로 전달
+            action.triggered.connect(
+                lambda checked, n=name: self.preset_selected.emit(n)
+            )
+            self._preset_menu.addAction(action)
+            self._preset_actions.append(action)
 
     # ── 핫키 (ADR-033: keyboard 라이브러리 유지) ─────────────────
 
@@ -177,3 +227,5 @@ class SystemTray(QSystemTrayIcon):
         if self._menu is not None:
             self._menu.deleteLater()
             self._menu = None
+        self._preset_menu = None
+        self._preset_actions.clear()

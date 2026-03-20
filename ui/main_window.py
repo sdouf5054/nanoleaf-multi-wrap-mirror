@@ -15,14 +15,15 @@
 - ★ _on_error: 창이 숨겨진 상태(트레이 모드)에서 QMessageBox 대신
   트레이 알림 사용 — QMessageBox가 부모 창을 자동 show하는 문제 방지
 
-[미디어 연동 추가]
-- _CONTROL_OPTION_KEYS에 "default_media_enabled" 추가
+[★ 프리셋 기능 추가]
+- _shutdown: auto-save 방식 (스냅샷 불필요, config 직접 저장)
+- _save_config: sync + save
+- 트레이 프리셋 시그널 연결
+- _refresh_tray_presets: 프리셋 목록 변경 시 트레이 메뉴 갱신
+- config_applied → _on_config_applied (프리셋 저장/삭제 시 트레이 갱신 포함)
 
 [Hotfix] startup 모드에서 창이 뜨는 문제 수정
-  - ★ start_hidden 플래그 추가: True이면 statusBar/상태 관련 호출이 show를 트리거하지 않도록 보호
-  - ★ _on_status_changed: 창이 숨겨진 상태에서 statusBar().showMessage() 호출 시
-    Qt가 내부적으로 창을 visible로 만드는 것을 방지
-  - ★ _show_window() 호출 시 start_hidden 플래그 해제
+  - ★ start_hidden 플래그 추가
 """
 
 import ctypes
@@ -39,6 +40,7 @@ from core.config import save_config
 from core.device_manager import DeviceManager
 from core.engine_controller import EngineController
 from core.engine_params import EngineParams
+from core.preset import list_presets
 from ui.tray import SystemTray
 from ui.tab_control import ControlTab
 from ui.tab_color import ColorTab
@@ -87,8 +89,6 @@ class MainWindow(QMainWindow):
         self.config = config
         self._force_quit = False
 
-        # ★ startup 모드 플래그: True이면 사용자가 명시적으로 창을 열 때까지
-        #   statusBar 등의 호출이 창을 visible로 만들지 않도록 보호
         self._start_hidden = start_hidden
 
         self.setWindowTitle("Nanoleaf Screen Mirror")
@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         self.tab_control.request_engine_stop.connect(self.stop_engine)
         self.tab_control.request_engine_pause.connect(self._toggle_pause)
         self.tab_control.request_mode_switch.connect(self._switch_mode)
-        self.tab_control.config_applied.connect(self._save_config)
+        self.tab_control.config_applied.connect(self._on_config_applied)
 
         # ── EngineController → ControlTab 데이터 시그널 ──
         self.engine_ctrl.fps_updated.connect(self.tab_control.update_fps)
@@ -134,7 +134,6 @@ class MainWindow(QMainWindow):
         self.engine_ctrl.status_changed.connect(self.tab_control.update_status)
 
         # ── 상태바 ──
-        # ★ start_hidden 모드에서는 statusBar 접근을 지연시킴
         if not start_hidden:
             self.statusBar().showMessage("준비")
 
@@ -146,20 +145,19 @@ class MainWindow(QMainWindow):
                 and opts.get("tray_enabled", True)):
             self.tray.show()
 
+        # ★ 트레이 프리셋 메뉴 초기화
+        self._refresh_tray_presets()
+
         # ── 잠금 감지 + 디스플레이 변경 + 절전 복귀 ──
         self._was_running_before_lock = False
         self._lock_restart_mode = None
         self._session_filter = SessionEventFilter(self._on_session_event)
         QApplication.instance().installNativeEventFilter(self._session_filter)
         try:
-            # ★ winId()는 네이티브 윈도우를 강제 생성하며,
-            #   이 과정에서 WS_VISIBLE이 설정될 수 있음.
             hwnd = int(self.winId())
             ctypes.windll.wtsapi32.WTSRegisterSessionNotification(hwnd, 0)
-
-            # ★ start_hidden 모드: winId() 직후 Win32 API로 즉시 숨김
             if self._start_hidden:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE = 0
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
         except Exception:
             pass
 
@@ -188,7 +186,8 @@ class MainWindow(QMainWindow):
         self.tray.toggle_requested.connect(self._toggle_engine)
         self.tray.brightness_delta.connect(self._on_tray_brightness_delta)
         self.tray.brightness_set.connect(self._on_tray_brightness_set)
-        self.tray.audio_cycle_requested.connect(self._on_audio_cycle)  # ★ 추가
+        self.tray.audio_cycle_requested.connect(self._on_audio_cycle)
+        self.tray.preset_selected.connect(self._on_tray_preset_selected)  # ★
         self.tray.show_window_requested.connect(self._show_window)
         self.tray.quit_requested.connect(self._quit)
 
@@ -206,7 +205,6 @@ class MainWindow(QMainWindow):
         if mode is not None:
             mode_str = mode
 
-        # 오디오 디바이스 설정
         audio_dev = self.tab_control.get_audio_device_index()
         self.engine_ctrl.set_audio_device_index(audio_dev)
 
@@ -242,7 +240,6 @@ class MainWindow(QMainWindow):
         mode_str, engine_params = (
             self.tab_control.build_init_params_for_start()
         )
-        # new_mode 우선 (토글에서 결정된 모드)
         if new_mode:
             mode_str = new_mode
 
@@ -254,7 +251,7 @@ class MainWindow(QMainWindow):
             initial_params=engine_params,
         )
 
-         # ★ 직전 미디어 판별값 복원
+        # ★ 직전 미디어 판별값 복원
         last = getattr(self.tab_control, '_last_media_confirmed', None)
         if last and self.engine_ctrl.engine:
             self.engine_ctrl.engine._media_detect_last_confirmed = last
@@ -290,34 +287,38 @@ class MainWindow(QMainWindow):
             self.start_engine()
 
     # ══════════════════════════════════════════════════════════════
+    #  ★ 트레이 프리셋
+    # ══════════════════════════════════════════════════════════════
+
+    def _on_tray_preset_selected(self, name):
+        """트레이에서 프리셋 선택 → UI에 적용 + 엔진 자동 시작."""
+        if self.tab_control.select_preset_by_name(name):
+            # 엔진이 정지 상태면 자동 시작
+            if not self.engine_ctrl.is_running:
+                self.start_engine()
+            # 트레이 체크 갱신
+            self._refresh_tray_presets()
+
+    def _refresh_tray_presets(self):
+        """트레이 프리셋 메뉴 갱신."""
+        names = list_presets()
+        current = self.tab_control.current_preset_name
+        self.tray.update_preset_menu(names, current)
+
+    # ══════════════════════════════════════════════════════════════
     #  엔진 상태 콜백
     # ══════════════════════════════════════════════════════════════
 
     def _on_status_changed(self, text):
-        """상태 메시지 갱신.
-
-        ★ Hotfix: 창이 한 번도 show()된 적 없는 상태(_start_hidden=True)에서
-        statusBar().showMessage()를 호출하면 Qt가 내부적으로 창을 visible로
-        만들 수 있음. 이 경우 statusBar 갱신을 건너뛰고 트레이만 갱신.
-        """
         if not self._start_hidden:
             self.statusBar().showMessage(text)
         self.tray.update_status(text)
 
     def _on_error(self, msg, severity="critical"):
-        """엔진 에러 처리.
-
-        ★ Phase 8: 창이 숨겨진 상태(트레이 모드)에서는 QMessageBox 대신
-        트레이 알림을 사용. QMessageBox(parent=self)가 숨겨진 부모 창을
-        자동으로 show하는 Qt 동작 때문에, 시작프로그램(--startup)으로
-        트레이 실행 시 의도치 않게 창이 나타나는 문제를 방지.
-        """
         if severity == "critical":
             if self.isVisible() and not self._start_hidden:
-                # 창이 보이는 상태: 기존대로 QMessageBox 사용
                 QMessageBox.warning(self, "오류", msg)
             else:
-                # 창이 숨겨진 상태(트레이 모드): 트레이 알림으로 대체
                 if self.tray.isVisible():
                     self.tray.showMessage(
                         "Nanoleaf Mirror — 오류",
@@ -325,7 +326,6 @@ class MainWindow(QMainWindow):
                         QSystemTrayIcon.MessageIcon.Warning,
                         5000,
                     )
-                # ★ statusBar도 보호
                 if not self._start_hidden:
                     self.statusBar().showMessage(f"⚠ {msg}")
                 self.tray.update_status(f"⚠ {msg}")
@@ -344,8 +344,11 @@ class MainWindow(QMainWindow):
         self.tab_control.update_fps(0)
         self.tab_control.update_pause_button(False)
 
-    def _save_config(self):
+    def _on_config_applied(self):
+        """★ config 저장 + 트레이 프리셋 메뉴 갱신."""
+        self.tab_control._sync_config_from_ui()
         save_config(self.config)
+        self._refresh_tray_presets()
 
     def _restore_status(self):
         text = "실행 중" if self.engine_ctrl.is_running else "준비"
@@ -416,7 +419,6 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
 
     def _show_window(self):
-        # ★ 사용자가 명시적으로 창을 열면 start_hidden 해제
         self._start_hidden = False
         self.show()
         self.showNormal()
@@ -463,37 +465,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # ── 종료 시 config 저장 ──
-        saved = self.tab_control.saved_config
-        final = copy.deepcopy(self.config)
+        # ── ★ 종료 시 config auto-save ──
+        self.tab_control._sync_config_from_ui()
 
-        _CONTROL_TAB_KEYS = (
-            "mirror", "audio_pulse", "audio_spectrum", "audio_bass_detail",
-            "audio_wave", "audio_dynamic", "audio_flowing",
-        )
-        for key in _CONTROL_TAB_KEYS:
-            if key in saved:
-                final[key] = copy.deepcopy(saved[key])
-
-        # ★ default_media_enabled 추가
-        _CONTROL_OPTION_KEYS = (
-            "audio_state", "audio_device_index",
-            "default_display_enabled", "default_audio_enabled",
-            "default_media_enabled",
-        )
-        saved_opts = saved.get("options", {})
-        final_opts = final.setdefault("options", {})
-        for key in _CONTROL_OPTION_KEYS:
-            if key in saved_opts:
-                final_opts[key] = copy.deepcopy(saved_opts[key])
-
-        final.setdefault("mirror", {})["master_brightness"] = (
+        # master 밝기
+        self.config.setdefault("mirror", {})["master_brightness"] = (
             self.tab_control.slider_master_brightness.value() / 100.0
         )
 
-        # ★ 구 키 정리
-        final_opts.pop("default_mode", None)
-        final_opts.pop("auto_start_mirror", None)
+        # ★ 마지막 프리셋 이름 저장
+        self.config.setdefault("options", {})["last_preset"] = (
+            self.tab_control.current_preset_name
+        )
 
-        save_config(final)
+        # ★ 구 키 정리
+        opts = self.config.get("options", {})
+        opts.pop("default_mode", None)
+        opts.pop("auto_start_mirror", None)
+
+        save_config(self.config)
         QApplication.instance().quit()

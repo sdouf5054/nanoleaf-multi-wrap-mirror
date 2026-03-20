@@ -21,6 +21,13 @@
 - CollapsiblePanel → ui/widgets/collapsible_panel.py
 - _NoScrollFilter → ui/widgets/no_scroll_filter.py (NoScrollFilter로 이름 변경)
 
+[★ 프리셋 기능 추가]
+- 하단 고정 영역: 기존 저장/되돌리기 → 프리셋 콤보 + 저장/새로/되돌리기/삭제
+- _applied_snapshot / _on_apply / _on_revert 제거
+- config.json auto-save (종료 시 자동 저장)
+- 프리셋 변경 감지: 콤보 텍스트에 * 표시
+- saved_config 프로퍼티: 현재 config 직접 반환 (스냅샷 불필요)
+
 [시그널]
   request_engine_start(str)   — 모드 문자열로 엔진 시작 요청
   request_engine_stop()       — 엔진 중지 요청
@@ -36,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QGroupBox, QComboBox, QFrame, QScrollArea,
     QSizePolicy, QSpinBox, QDoubleSpinBox,
-    QSlider, QCheckBox,
+    QSlider, QCheckBox, QInputDialog, QMessageBox,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QEvent
 
@@ -66,6 +73,16 @@ from core.audio_engine import list_loopback_devices, HAS_PYAUDIO
 # ── ★ 미디어 연동 ──
 from core.media_session import HAS_MEDIA_SESSION
 
+# ── ★ 프리셋 ──
+from core.preset import (
+    list_presets, load_preset, save_preset, delete_preset,
+    preset_exists, collect_preset_data, preset_differs,
+)
+
+
+# 프리셋 콤보 첫 항목 텍스트
+_PRESET_NONE_TEXT = "(선택 안 함)"
+
 
 # ══════════════════════════════════════════════════════════════════
 #  ControlTab
@@ -94,8 +111,10 @@ class ControlTab(QWidget):
         self._media_on = opts.get("default_media_enabled", False)
         self._last_media_confirmed = None  # ★ 엔진 재시작 시 판별값 보존
 
-        # 저장/되돌리기 스냅샷
-        self._applied_snapshot = copy.deepcopy(config)
+        # ★ 프리셋 상태
+        self._current_preset_name = None   # 현재 선택된 프리셋 이름 (None=미선택)
+        self._loaded_preset_data = None    # 로드된 프리셋 원본 데이터 (되돌리기용)
+        self._preset_modified = False      # 변경 감지 플래그
 
         self._build_ui()
         self._update_toggle_panels(animate=False)
@@ -118,12 +137,15 @@ class ControlTab(QWidget):
         self._res_timer.timeout.connect(self._update_resource_usage)
         self._res_timer.start(2000)
 
+        # ★ 프리셋 콤보 초기화 (마지막 프리셋 복원)
+        self._init_preset_combo()
+
     # ══════════════════════════════════════════════════════════════
     #  UI 빌드
     # ══════════════════════════════════════════════════════════════
 
     def _build_ui(self):
-        """전체 UI 구성: scroll 영역 + 하단 고정 버튼."""
+        """전체 UI 구성: scroll 영역 + 하단 고정 프리셋 바."""
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -154,8 +176,8 @@ class ControlTab(QWidget):
         self._build_reactive_panels()
         self._main_layout.addStretch()
 
-        # ── 하단 고정 버튼 (스크롤 밖) ──
-        self._build_bottom_actions(root)
+        # ── ★ 하단 고정 프리셋 바 (스크롤 밖) ──
+        self._build_preset_bar(root)
 
         # ── 스크롤 방지 필터 ──
         self._no_scroll_filter = NoScrollFilter(self)
@@ -299,26 +321,6 @@ class ControlTab(QWidget):
 
         toggle_row.addStretch()
         lay.addLayout(toggle_row)
-
-        # 기본값 설정 버튼 + 힌트
-        default_toggle_row = QHBoxLayout()
-        self.btn_set_default = QPushButton("현재 토글 설정을 기본값으로 설정")
-        self.btn_set_default.setFixedHeight(24)
-        self.btn_set_default.setStyleSheet(
-            "QPushButton{background:#444;color:#bbb;font-size:11px;"
-            "border-radius:4px;padding:2px 10px;}"
-            "QPushButton:hover{background:#555;color:#eee;}"
-        )
-        self.btn_set_default.clicked.connect(self._on_set_default_toggles)
-        default_toggle_row.addWidget(self.btn_set_default)
-        self.lbl_toggle_default_hint = QLabel("")
-        self.lbl_toggle_default_hint.setStyleSheet(
-            "color:#6a6a74;font-size:10px;font-style:italic;"
-        )
-        default_toggle_row.addWidget(self.lbl_toggle_default_hint)
-        default_toggle_row.addStretch()
-        lay.addLayout(default_toggle_row)
-        self._update_toggle_default_hint()
 
         lay.addWidget(self._make_separator())
 
@@ -478,45 +480,503 @@ class ControlTab(QWidget):
         self.section_audio.set_display_enabled(self._display_on)
         self.section_audio.params_changed.connect(self._on_audio_params_changed)
         self.section_audio.audio_mode_changed.connect(self._on_audio_mode_changed)
-        self.section_audio.default_mode_saved.connect(self._on_default_mode_saved)
         lay.addWidget(self.section_audio)
         panel.set_content_layout(lay)
 
-    # ── ⑤ 하단 고정 버튼 ────────────────────────────────────────
+    # ── ⑤ ★ 하단 고정 프리셋 바 ─────────────────────────────────
 
-    def _build_bottom_actions(self, root_layout):
+    def _build_preset_bar(self, root_layout):
+        """하단 고정 프리셋 바 — 스크롤 밖, 항상 보임."""
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFrameShadow(QFrame.Shadow.Sunken)
         root_layout.addWidget(sep)
 
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(6, 4, 6, 6)
-        action_row.addStretch()
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 5, 8, 7)
+        bar.setSpacing(6)
 
-        self.btn_apply = QPushButton("💾 저장")
-        self.btn_apply.setMinimumHeight(28)
-        self.btn_apply.setMinimumWidth(100)
-        self.btn_apply.setStyleSheet(
-            "QPushButton{background:#2e86c1;color:white;font-size:13px;"
-            "font-weight:bold;border-radius:6px;}"
+        bar.addWidget(QLabel("프리셋:"))
+
+        # 프리셋 콤보박스
+        self.combo_preset = QComboBox()
+        self.combo_preset.setMinimumWidth(180)
+        self.combo_preset.addItem(_PRESET_NONE_TEXT, None)
+        self.combo_preset.currentIndexChanged.connect(self._on_preset_selected)
+        bar.addWidget(self.combo_preset, 1)
+
+        # 💾 저장 (덮어쓰기)
+        self.btn_preset_save = QPushButton("💾 저장")
+        self.btn_preset_save.setFixedHeight(28)
+        self.btn_preset_save.setMinimumWidth(70)
+        self.btn_preset_save.setToolTip("현재 설정을 선택된 프리셋에 덮어씁니다")
+        self.btn_preset_save.setStyleSheet(
+            "QPushButton{background:#2e86c1;color:white;font-size:12px;"
+            "font-weight:bold;border-radius:5px;padding:0 8px;}"
             "QPushButton:hover{background:#3498db;}"
+            "QPushButton:disabled{background:#555;color:#888;}"
         )
-        self.btn_apply.clicked.connect(self._on_apply)
-        action_row.addWidget(self.btn_apply)
+        self.btn_preset_save.clicked.connect(self._on_preset_save)
+        bar.addWidget(self.btn_preset_save)
 
-        self.btn_revert = QPushButton("↩ 되돌리기")
-        self.btn_revert.setMinimumHeight(28)
-        self.btn_revert.setMinimumWidth(100)
-        self.btn_revert.setStyleSheet(
-            "QPushButton{background:#555;color:#ccc;font-size:13px;"
-            "font-weight:bold;border-radius:6px;}"
+        # 📝 새로
+        self.btn_preset_new = QPushButton("📝 새로")
+        self.btn_preset_new.setFixedHeight(28)
+        self.btn_preset_new.setMinimumWidth(70)
+        self.btn_preset_new.setToolTip("현재 설정을 새 프리셋으로 저장합니다")
+        self.btn_preset_new.setStyleSheet(
+            "QPushButton{background:#27ae60;color:white;font-size:12px;"
+            "font-weight:bold;border-radius:5px;padding:0 8px;}"
+            "QPushButton:hover{background:#2ecc71;}"
+        )
+        self.btn_preset_new.clicked.connect(self._on_preset_new)
+        bar.addWidget(self.btn_preset_new)
+
+        # ↩ 되돌리기
+        self.btn_preset_revert = QPushButton("↩ 되돌리기")
+        self.btn_preset_revert.setFixedHeight(28)
+        self.btn_preset_revert.setMinimumWidth(85)
+        self.btn_preset_revert.setToolTip("프리셋의 원래 설정으로 되돌립니다")
+        self.btn_preset_revert.setStyleSheet(
+            "QPushButton{background:#555;color:#ccc;font-size:12px;"
+            "font-weight:bold;border-radius:5px;padding:0 8px;}"
             "QPushButton:hover{background:#666;}"
+            "QPushButton:disabled{background:#444;color:#777;}"
         )
-        self.btn_revert.clicked.connect(self._on_revert)
-        action_row.addWidget(self.btn_revert)
+        self.btn_preset_revert.clicked.connect(self._on_preset_revert)
+        bar.addWidget(self.btn_preset_revert)
 
-        root_layout.addLayout(action_row)
+        # ⭐ 기본 프리셋 설정
+        self.btn_preset_default = QPushButton("⭐")
+        self.btn_preset_default.setFixedSize(28, 28)
+        self.btn_preset_default.setToolTip("이 프리셋을 앱 시작 시 기본값으로 설정합니다")
+        self.btn_preset_default.setStyleSheet(
+            "QPushButton{background:#555;color:#ccc;font-size:13px;"
+            "border-radius:5px;}"
+            "QPushButton:hover{background:#b7950b;color:white;}"
+            "QPushButton:disabled{background:#444;color:#777;}"
+        )
+        self.btn_preset_default.clicked.connect(self._on_preset_set_default)
+        bar.addWidget(self.btn_preset_default)
+
+        # 🗑️ 삭제
+        self.btn_preset_delete = QPushButton("🗑️")
+        self.btn_preset_delete.setFixedSize(28, 28)
+        self.btn_preset_delete.setToolTip("선택된 프리셋을 삭제합니다")
+        self.btn_preset_delete.setStyleSheet(
+            "QPushButton{background:#555;color:#ccc;font-size:13px;"
+            "border-radius:5px;}"
+            "QPushButton:hover{background:#c0392b;color:white;}"
+            "QPushButton:disabled{background:#444;color:#777;}"
+        )
+        self.btn_preset_delete.clicked.connect(self._on_preset_delete)
+        bar.addWidget(self.btn_preset_delete)
+
+        root_layout.addLayout(bar)
+
+        # 초기 버튼 상태
+        self._update_preset_button_states()
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★ 프리셋 로직
+    # ══════════════════════════════════════════════════════════════
+
+    def _init_preset_combo(self):
+        """앱 시작 시 프리셋 콤보 초기화.
+
+        우선순위:
+        1. default_preset이 있으면 → 해당 프리셋 로드 + UI 적용
+        2. last_preset이 있으면 → 콤보에서 선택 (UI 적용 없이 변경 여부만 체크)
+        3. 둘 다 없으면 → "(선택 안 함)"
+        """
+        self.combo_preset.blockSignals(True)
+
+        # 기존 항목 정리 (첫 항목 "(선택 안 함)"은 유지)
+        while self.combo_preset.count() > 1:
+            self.combo_preset.removeItem(1)
+
+        # 프리셋 목록 추가 (⭐ 표시 포함)
+        default_name = self.config.get("options", {}).get("default_preset")
+        for name in list_presets():
+            display = f"⭐ {name}" if name == default_name else name
+            self.combo_preset.addItem(display, name)
+
+        # ★ 기본 프리셋 우선, 없으면 마지막 프리셋
+        target = None
+        if default_name and preset_exists(default_name):
+            target = default_name
+        else:
+            last = self.config.get("options", {}).get("last_preset")
+            if last and preset_exists(last):
+                target = last
+
+        if target:
+            for i in range(self.combo_preset.count()):
+                if self.combo_preset.itemData(i) == target:
+                    self.combo_preset.setCurrentIndex(i)
+                    self._current_preset_name = target
+                    self._loaded_preset_data = load_preset(target)
+
+                    if target == default_name:
+                        # ★ 기본 프리셋 → UI에 적용 (앱 시작 시 프리셋 값으로 초기화)
+                        if self._loaded_preset_data:
+                            self._apply_preset_to_ui(self._loaded_preset_data)
+                            self._preset_modified = False
+                    else:
+                        # 마지막 프리셋 → 변경 여부만 체크 (UI는 config 값 유지)
+                        if self._loaded_preset_data:
+                            current = collect_preset_data(self)
+                            self._preset_modified = preset_differs(current, self._loaded_preset_data)
+                            if self._preset_modified:
+                                self._update_combo_text_with_star()
+                    break
+
+        self.combo_preset.blockSignals(False)
+        self._update_preset_button_states()
+
+    def _refresh_preset_combo(self, select_name=None):
+        """프리셋 콤보 새로고침 — 저장/삭제 후 호출. 기본 프리셋에 ⭐ 표시."""
+        self.combo_preset.blockSignals(True)
+
+        while self.combo_preset.count() > 1:
+            self.combo_preset.removeItem(1)
+
+        default_name = self.config.get("options", {}).get("default_preset")
+
+        for name in list_presets():
+            display = f"⭐ {name}" if name == default_name else name
+            self.combo_preset.addItem(display, name)
+
+        if select_name:
+            for i in range(self.combo_preset.count()):
+                if self.combo_preset.itemData(i) == select_name:
+                    self.combo_preset.setCurrentIndex(i)
+                    break
+        else:
+            self.combo_preset.setCurrentIndex(0)
+
+        self.combo_preset.blockSignals(False)
+
+    def _on_preset_selected(self, index):
+        """프리셋 콤보 선택 변경."""
+        name = self.combo_preset.itemData(index)
+
+        if name is None:
+            # "(선택 안 함)" 선택
+            self._current_preset_name = None
+            self._loaded_preset_data = None
+            self._preset_modified = False
+            self._update_preset_button_states()
+            return
+
+        # 프리셋 로드
+        data = load_preset(name)
+        if data is None:
+            return
+
+        # ★ 토글 변경 여부 판단 (재시작 필요 여부 결정)
+        prev_display = self._display_on
+        prev_audio = self._audio_on
+        prev_media = self._media_on
+
+        self._current_preset_name = name
+        self._loaded_preset_data = data.copy()
+        self._preset_modified = False
+
+        # UI에 적용
+        self._apply_preset_to_ui(data)
+
+        # 엔진 실행 중이면 반영
+        if self._is_running:
+            toggles_changed = (
+                prev_display != self._display_on
+                or prev_audio != self._audio_on
+                or prev_media != self._media_on
+            )
+            if toggles_changed:
+                # 토글 조합 변경 → 엔진 재시작 필요
+                self._sync_config_from_ui()
+                if self._engine_ctrl and self._engine_ctrl.engine:
+                    self._last_media_confirmed = getattr(
+                        self._engine_ctrl.engine, '_media_detect_last_confirmed', None
+                    )
+                self.request_mode_switch.emit(self._get_engine_mode_string())
+            else:
+                # 파라미터만 변경 → 재시작 없이 즉시 반영
+                self._push_params_to_engine()
+
+        self._update_preset_button_states()
+
+    def _on_preset_save(self):
+        """💾 저장 — 현재 프리셋에 덮어쓰기."""
+        if not self._current_preset_name:
+            return
+
+        name = self._current_preset_name
+        reply = QMessageBox.question(
+            self, "프리셋 저장",
+            f"프리셋 '{name}'을(를) 현재 설정으로 덮어쓰시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        data = collect_preset_data(self)
+        if save_preset(name, data):
+            self._loaded_preset_data = data.copy()
+            self._preset_modified = False
+            self._update_combo_text_without_star()
+            self._update_preset_button_states()
+
+    def _on_preset_new(self):
+        """📝 새로 — 새 프리셋 저장."""
+        name, ok = QInputDialog.getText(
+            self, "새 프리셋", "프리셋 이름을 입력하세요:",
+        )
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+
+        # 이름 중복 확인
+        if preset_exists(name):
+            reply = QMessageBox.question(
+                self, "프리셋 중복",
+                f"프리셋 '{name}'이(가) 이미 존재합니다. 덮어쓰시겠습니까?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        data = collect_preset_data(self)
+        if save_preset(name, data):
+            self._current_preset_name = name
+            self._loaded_preset_data = data.copy()
+            self._preset_modified = False
+
+            # 콤보 새로고침 + 선택
+            self._refresh_preset_combo(select_name=name)
+            self._update_preset_button_states()
+
+            # ★ 트레이 메뉴 갱신 (main_window에서 연결)
+            self.config_applied.emit()
+
+    def _on_preset_revert(self):
+        """↩ 되돌리기 — 프리셋 원래 값으로 복원."""
+        if not self._loaded_preset_data:
+            return
+
+        self._apply_preset_to_ui(self._loaded_preset_data)
+        self._preset_modified = False
+        self._update_combo_text_without_star()
+        self._update_preset_button_states()
+
+        if self._is_running:
+            self._push_params_to_engine()
+
+    def _on_preset_delete(self):
+        """🗑️ 삭제 — 현재 프리셋 삭제."""
+        if not self._current_preset_name:
+            return
+
+        name = self._current_preset_name
+        reply = QMessageBox.question(
+            self, "프리셋 삭제",
+            f"프리셋 '{name}'을(를) 삭제하시겠습니까?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        if delete_preset(name):
+            # ★ 삭제된 프리셋이 기본 프리셋이면 기본 설정도 해제
+            opts = self.config.get("options", {})
+            if opts.get("default_preset") == name:
+                opts["default_preset"] = None
+
+            self._current_preset_name = None
+            self._loaded_preset_data = None
+            self._preset_modified = False
+
+            self._refresh_preset_combo()
+            self._update_preset_button_states()
+
+            # ★ 트레이 메뉴 갱신
+            self.config_applied.emit()
+
+    def _on_preset_set_default(self):
+        """⭐ 기본 — 현재 프리셋을 앱 시작 시 기본값으로 설정."""
+        if not self._current_preset_name:
+            return
+
+        name = self._current_preset_name
+        opts = self.config.setdefault("options", {})
+        old_default = opts.get("default_preset")
+
+        if old_default == name:
+            # 이미 기본 → 해제
+            opts["default_preset"] = None
+            self.config_applied.emit()
+            self._refresh_preset_combo(select_name=name)
+            self._update_preset_button_states()
+            return
+
+        # 새 기본 설정
+        opts["default_preset"] = name
+        self.config_applied.emit()
+
+        # 콤보 갱신 (⭐ 표시 반영)
+        self._refresh_preset_combo(select_name=name)
+        self._update_preset_button_states()
+
+        # 버튼 피드백
+        self.btn_preset_default.setText("✅")
+        QTimer.singleShot(1500, lambda: self.btn_preset_default.setText("⭐"))
+
+    # ── 프리셋 → UI 적용 ────────────────────────────────────────
+
+    def _apply_preset_to_ui(self, data):
+        """프리셋 dict를 전체 UI에 적용.
+
+        순서:
+        1. 토글 (blockSignals)
+        2. master 밝기
+        3. 각 섹션 apply_from_preset()
+        4. 패널 펼침/접힘
+        5. flowing 상태 동기화
+        """
+        # ── 1. 토글 ──
+        if "display_enabled" in data:
+            self._display_on = data["display_enabled"]
+            self.toggle_display.blockSignals(True)
+            self.toggle_display.setChecked(self._display_on)
+            self.toggle_display.blockSignals(False)
+
+        if "audio_enabled" in data:
+            self._audio_on = data["audio_enabled"]
+            self.toggle_audio.blockSignals(True)
+            self.toggle_audio.setChecked(self._audio_on)
+            self.toggle_audio.blockSignals(False)
+
+        if "media_color_enabled" in data:
+            self._media_on = data["media_color_enabled"]
+            self.toggle_media.blockSignals(True)
+            self.toggle_media.setChecked(self._media_on)
+            self.toggle_media.blockSignals(False)
+
+        # 미디어 토글 활성화 상태 동기화
+        self.toggle_media.setEnabled(self._display_on and HAS_MEDIA_SESSION)
+
+        # ── 2. master 밝기 ──
+        if "master_brightness" in data:
+            self.slider_master_brightness.blockSignals(True)
+            self.slider_master_brightness.setValue(int(data["master_brightness"]))
+            self.slider_master_brightness.blockSignals(False)
+            self.lbl_master_brightness.setText(f"{int(data['master_brightness'])}%")
+
+        # ── 3. 각 섹션 ──
+        if hasattr(self, 'section_mirror'):
+            self.section_mirror.apply_from_preset(data)
+        if hasattr(self, 'section_color'):
+            self.section_color.apply_from_preset(data)
+        if hasattr(self, 'section_audio'):
+            self.section_audio.set_display_enabled(self._display_on)
+            self.section_audio.apply_from_preset(data)
+
+        # ── 4. 패널 펼침/접힘 ──
+        self._update_toggle_panels(animate=False)
+
+        # ── 5. flowing 동기화 ──
+        self._sync_flowing_state()
+
+        # ── 6. 미러링 패널 미디어 상태 ──
+        if hasattr(self, 'section_mirror'):
+            self.section_mirror.set_media_active(self._media_on and self._display_on)
+
+    # ── 변경 감지 ────────────────────────────────────────────────
+
+    def _check_preset_modified(self):
+        """현재 UI 상태와 로드된 프리셋을 비교하여 변경 여부 갱신."""
+        if self._loaded_preset_data is None:
+            return
+
+        current = collect_preset_data(self)
+        was_modified = self._preset_modified
+        self._preset_modified = preset_differs(current, self._loaded_preset_data)
+
+        if self._preset_modified != was_modified:
+            if self._preset_modified:
+                self._update_combo_text_with_star()
+            else:
+                self._update_combo_text_without_star()
+            self._update_preset_button_states()
+
+    def _update_combo_text_with_star(self):
+        """콤보 텍스트에 * 추가."""
+        if self._current_preset_name is None:
+            return
+        idx = self.combo_preset.currentIndex()
+        text = self.combo_preset.itemText(idx)
+        if not text.endswith(" *"):
+            self.combo_preset.setItemText(idx, text + " *")
+
+    def _update_combo_text_without_star(self):
+        """콤보 텍스트에서 * 제거."""
+        if self._current_preset_name is None:
+            return
+        idx = self.combo_preset.currentIndex()
+        text = self.combo_preset.itemText(idx)
+        if text.endswith(" *"):
+            self.combo_preset.setItemText(idx, text[:-2])
+
+    def _update_preset_button_states(self):
+        """프리셋 버튼 활성/비활성 상태 갱신.
+
+        | 상태                    | 💾 저장 | 📝 새로 | ↩ 되돌리기 | ⭐ 기본 | 🗑️ |
+        |------------------------|---------|---------|------------|--------|-----|
+        | 미선택                  | 비활성  | 활성    | 비활성     | 비활성  | 비활성 |
+        | 선택, 변경 없음          | 비활성  | 활성    | 비활성     | 활성    | 활성   |
+        | 선택, 변경됨 (*)         | 활성    | 활성    | 활성       | 활성    | 활성   |
+        """
+        has_preset = self._current_preset_name is not None
+        modified = self._preset_modified and has_preset
+
+        self.btn_preset_save.setEnabled(modified)
+        self.btn_preset_new.setEnabled(True)
+        self.btn_preset_revert.setEnabled(modified)
+        self.btn_preset_default.setEnabled(has_preset)
+        self.btn_preset_delete.setEnabled(has_preset)
+
+        # ⭐ 버튼 시각적 피드백: 이미 기본이면 밝게
+        if has_preset:
+            default_name = self.config.get("options", {}).get("default_preset")
+            is_default = (self._current_preset_name == default_name)
+            if is_default:
+                self.btn_preset_default.setStyleSheet(
+                    "QPushButton{background:#b7950b;color:white;font-size:13px;"
+                    "border-radius:5px;}"
+                    "QPushButton:hover{background:#d4ac0d;}"
+                )
+            else:
+                self.btn_preset_default.setStyleSheet(
+                    "QPushButton{background:#555;color:#ccc;font-size:13px;"
+                    "border-radius:5px;}"
+                    "QPushButton:hover{background:#b7950b;color:white;}"
+                    "QPushButton:disabled{background:#444;color:#777;}"
+                )
+
+    # ── 트레이/외부에서 프리셋 선택 ──────────────────────────────
+
+    def select_preset_by_name(self, name):
+        """외부(트레이 등)에서 이름으로 프리셋 선택."""
+        for i in range(self.combo_preset.count()):
+            if self.combo_preset.itemData(i) == name:
+                self.combo_preset.setCurrentIndex(i)
+                return True
+        return False
 
     # ══════════════════════════════════════════════════════════════
     #  토글 이벤트
@@ -542,6 +1002,7 @@ class ControlTab(QWidget):
             self.section_mirror.set_media_active(self._media_on and checked)
 
         self._sync_flowing_state()
+        self._check_preset_modified()
         if self._is_running:
             self._sync_config_from_ui()
             # ★ 엔진 재시작 전 직전 확정값 보존
@@ -557,6 +1018,7 @@ class ControlTab(QWidget):
         if checked and self._display_on and hasattr(self, 'section_audio'):
             self.section_audio.set_display_enabled(self._display_on)
         self._sync_flowing_state()
+        self._check_preset_modified()
         if self._is_running:
             self._sync_config_from_ui()
             # ★ 엔진 재시작 전 직전 확정값 보존
@@ -581,6 +1043,7 @@ class ControlTab(QWidget):
         else:
             self._media_thumbnail_timer.stop()
 
+        self._check_preset_modified()
         if self._is_running:
             self._push_params_to_engine()
 
@@ -645,33 +1108,6 @@ class ControlTab(QWidget):
         if hasattr(self, 'section_mirror'):
             self.section_mirror.set_media_active(self._media_on and self._display_on)
 
-    def _on_set_default_toggles(self):
-        opts = self.config.setdefault("options", {})
-        opts["default_display_enabled"] = self._display_on
-        opts["default_audio_enabled"] = self._audio_on
-        opts["default_media_enabled"] = self._media_on
-        self._applied_snapshot.setdefault("options", {})["default_display_enabled"] = self._display_on
-        self._applied_snapshot.setdefault("options", {})["default_audio_enabled"] = self._audio_on
-        self._applied_snapshot.setdefault("options", {})["default_media_enabled"] = self._media_on
-        self.config_applied.emit()
-        self._update_toggle_default_hint()
-        self.btn_set_default.setText("✅ 저장됨")
-        QTimer.singleShot(2000, lambda: self.btn_set_default.setText(
-            "현재 토글 설정을 기본값으로 설정"
-        ))
-
-    def _update_toggle_default_hint(self):
-        opts = self.config.get("options", {})
-        d_on = opts.get("default_display_enabled", False)
-        a_on = opts.get("default_audio_enabled", False)
-        m_on = opts.get("default_media_enabled", False)
-        parts = [
-            f"디스플레이 {'ON' if d_on else 'OFF'}",
-            f"오디오 {'ON' if a_on else 'OFF'}",
-            f"미디어 {'ON' if m_on else 'OFF'}",
-        ]
-        self.lbl_toggle_default_hint.setText(f"기본값: {' / '.join(parts)}")
-
     # ══════════════════════════════════════════════════════════════
     #  ★ 미디어 썸네일 + 곡 정보 툴팁 + 현재 소스 상태 갱신
     # ══════════════════════════════════════════════════════════════
@@ -694,7 +1130,6 @@ class ControlTab(QWidget):
             if frame is not None:
                 self.section_mirror.update_media_thumbnail(frame)
             else:
-                # ★ 프레임 없음 → 썸네일 플레이스홀더 복귀
                 self.section_mirror.lbl_media_thumbnail.clear()
                 self.section_mirror.lbl_media_thumbnail.setText("🎵")
                 self.section_mirror.lbl_media_thumbnail.setStyleSheet(
@@ -718,8 +1153,7 @@ class ControlTab(QWidget):
                 song_text = "재생 중인 미디어 없음"
             self.section_mirror.lbl_media_song.setText(song_text)
             self.section_mirror.lbl_media_thumbnail.setToolTip(song_text)
-            
-            # ★ 미디어 없으면 소스 라벨 초기 상태로
+
             if not info:
                 self.section_mirror.lbl_media_source.setText("미디어 연동 활성")
                 self.section_mirror.lbl_media_source.setStyleSheet(
@@ -734,7 +1168,7 @@ class ControlTab(QWidget):
             self.section_mirror.update_current_source(decision, state)
 
     def _on_refresh_thumbnail_requested(self):
-        """★ 썸네일 새로고침 버튼 클릭 — MediaFrameProvider 캐시 리셋 + 즉시 재폴링."""
+        """★ 썸네일 새로고침 버튼 클릭."""
         if not self._engine_ctrl or not self._engine_ctrl.engine:
             return
 
@@ -743,11 +1177,9 @@ class ControlTab(QWidget):
         if provider is None:
             return
 
-        # 미디어 해시를 0으로 리셋 → 다음 폴링에서 강제 재추출
         with provider._lock:
             provider._media_hash = 0
 
-        # 판별 상태 초기화 → Phase 1부터 재시작
         engine._media_detect_state = "phase1"
         engine._media_detect_decision = "media"
         engine._media_detect_start_time = __import__('time').monotonic()
@@ -755,7 +1187,6 @@ class ControlTab(QWidget):
         engine._media_detect_phase1_dynamic_hits = 0
         engine._media_detect_prev_frame = None
 
-        # 즉시 썸네일 갱신 시도
         self._update_media_thumbnail()
 
     # ══════════════════════════════════════════════════════════════
@@ -769,10 +1200,12 @@ class ControlTab(QWidget):
     def _on_master_brightness_changed(self, value):
         self.lbl_master_brightness.setText(f"{value}%")
         self.config.setdefault("mirror", {})["master_brightness"] = value / 100.0
+        self._check_preset_modified()
         if self._is_running:
             self._push_params_to_engine()
 
     def _on_display_params_changed(self):
+        self._check_preset_modified()
         if self._is_running:
             self._push_params_to_engine()
 
@@ -791,18 +1224,13 @@ class ControlTab(QWidget):
             self.request_mode_switch.emit(self._get_engine_mode_string())
 
     def _on_audio_params_changed(self):
+        self._check_preset_modified()
         if self._is_running:
             self._push_params_to_engine()
 
     def _on_audio_mode_changed(self, mode_key):
         self._sync_flowing_state()
-
-    def _on_default_mode_saved(self):
-        audio_state = self.config.get("options", {}).get("audio_state", {})
-        snap_state = (self._applied_snapshot
-                      .setdefault("options", {})
-                      .setdefault("audio_state", {}))
-        snap_state["default_audio_mode"] = audio_state.get("default_audio_mode", "pulse")
+        self._check_preset_modified()
 
     def _on_preview_toggled(self, checked):
         self.monitor_preview.setVisible(checked)
@@ -810,60 +1238,6 @@ class ControlTab(QWidget):
         self.btn_preview_toggle.setText(
             "👁 프리뷰 숨기기" if checked else "👁 프리뷰 보기"
         )
-
-    # ══════════════════════════════════════════════════════════════
-    #  저장 / 되돌리기
-    # ══════════════════════════════════════════════════════════════
-
-    def _on_apply(self):
-        self._sync_config_from_ui()
-        self._applied_snapshot = copy.deepcopy(self.config)
-        self.config_applied.emit()
-        self.btn_apply.setText("✅ 저장됨")
-        QTimer.singleShot(2000, lambda: self.btn_apply.setText("💾 저장"))
-
-    def _on_revert(self):
-        for key in self._applied_snapshot:
-            self.config[key] = copy.deepcopy(self._applied_snapshot[key])
-        self._load_from_config()
-        if self._is_running:
-            self._push_params_to_engine()
-
-    def _sync_config_from_ui(self):
-        m = self.config.setdefault("mirror", {})
-        m["orientation"] = {0: "auto", 1: "landscape", 2: "portrait"}.get(
-            self.combo_orientation.currentIndex(), "auto"
-        )
-        m["portrait_rotation"] = "cw" if self.combo_rotation.currentIndex() == 0 else "ccw"
-        m["target_fps"] = self.spin_target_fps.value()
-        self.config.setdefault("options", {})["audio_device_index"] = (
-            self.combo_audio_device.currentData()
-        )
-        self.section_color.apply_to_config()
-        self.section_mirror.apply_to_config()
-        self.section_audio.apply_to_config()
-
-    def _load_from_config(self):
-        m = self.config.get("mirror", {})
-        self.combo_orientation.setCurrentIndex(
-            {"auto": 0, "landscape": 1, "portrait": 2}.get(m.get("orientation", "auto"), 0)
-        )
-        self.combo_rotation.setCurrentIndex(
-            0 if m.get("portrait_rotation", "cw") == "cw" else 1
-        )
-        self.spin_target_fps.setValue(m.get("target_fps", 60))
-        self.section_color.load_from_config()
-        self.section_mirror.load_from_config()
-        self.section_audio.load_from_config()
-
-        # ★ 미디어 토글 복원
-        opts = self.config.get("options", {})
-        self._media_on = opts.get("default_media_enabled", False)
-        self.toggle_media.blockSignals(True)
-        self.toggle_media.setChecked(self._media_on)
-        self.toggle_media.blockSignals(False)
-
-        self._update_toggle_default_hint()
 
     # ══════════════════════════════════════════════════════════════
     #  ★ 오디오 모드 순환 (핫키/트레이 메뉴에서 호출)
@@ -883,24 +1257,15 @@ class ControlTab(QWidget):
     }
 
     def cycle_audio_mode(self):
-        """오디오 모드 순환 — circular 방식.
-
-        기본 모드(default_audio_mode)부터 시작하여 전체를 한 바퀴 돌고 OFF.
-        디스플레이 OFF면 flowing을 스킵.
-
-        Returns:
-            dict — {"action": "on"|"off", "mode": str, "display_name": str}
-            None — 변경 없음 (이론상 발생 안 함)
-        """
+        """오디오 모드 순환 — circular 방식."""
         from ui.panels.audio_reactive_section import _MODE_TO_INDEX
 
-        # 현재 사용 가능한 모드 목록 (디스플레이 OFF면 flowing 제외)
         available = [m for m in self._AUDIO_CYCLE_BASE
                      if m != "flowing" or self._display_on]
 
         if not self._audio_on:
-            # ── OFF → ON: 기본 모드로 시작 ──
-            default_mode = self.section_audio._default_mode
+            # ★ 프리셋 기본 기능이 기본 모드를 대체하므로 pulse로 시작
+            default_mode = "pulse"
             if default_mode not in available:
                 default_mode = available[0] if available else "pulse"
 
@@ -909,7 +1274,6 @@ class ControlTab(QWidget):
             self.toggle_audio.setChecked(True)
             self.toggle_audio.blockSignals(False)
 
-            # 콤보박스 설정 (UI 동기화)
             self.section_audio.combo_audio_mode.blockSignals(True)
             self.section_audio._mode_key = default_mode
             self.section_audio._load_mode_params(default_mode)
@@ -921,42 +1285,38 @@ class ControlTab(QWidget):
 
             self._update_toggle_panels(animate=False)
             self._sync_flowing_state()
+            self._check_preset_modified()
 
             if self._is_running:
                 self._sync_config_from_ui()
                 self.request_mode_switch.emit(self._get_engine_mode_string())
-            
+
             return {
                 "action": "on",
                 "mode": default_mode,
                 "display_name": self._AUDIO_MODE_DISPLAY_NAMES.get(default_mode, default_mode),
             }
 
-        # ── ON → 다음 모드 (circular) ──
         current = self.section_audio._mode_key
-
-        # 기본 모드부터 시작하는 circular 순서 만들기
-        default_mode = self.section_audio._default_mode
+        default_mode = "pulse"
         if default_mode not in available:
             default_mode = available[0]
 
         start_idx = available.index(default_mode)
-        # rotate: [default, default+1, ..., last, first, ..., default-1]
         rotated = available[start_idx:] + available[:start_idx]
 
         if current not in rotated:
-            # 현재 모드가 순환 목록에 없으면 (이론상 없지만 방어)
             next_mode = rotated[0]
         else:
             current_pos = rotated.index(current)
             if current_pos >= len(rotated) - 1:
-                # 마지막 모드 (= 기본 모드 직전) → OFF
                 self._audio_on = False
                 self.toggle_audio.blockSignals(True)
                 self.toggle_audio.setChecked(False)
                 self.toggle_audio.blockSignals(False)
                 self._update_toggle_panels(animate=False)
                 self._sync_flowing_state()
+                self._check_preset_modified()
                 if self._is_running:
                     self._sync_config_from_ui()
                     self.request_mode_switch.emit(self._get_engine_mode_string())
@@ -964,7 +1324,6 @@ class ControlTab(QWidget):
             else:
                 next_mode = rotated[current_pos + 1]
 
-        # ── 다음 모드로 전환 ──
         self.section_audio._save_mode_params(current)
         self.section_audio._mode_key = next_mode
         self.section_audio._load_mode_params(next_mode)
@@ -975,6 +1334,7 @@ class ControlTab(QWidget):
         self.section_audio.combo_audio_mode.blockSignals(False)
         self.section_audio._update_mode_visibility()
         self._sync_flowing_state()
+        self._check_preset_modified()
 
         if self._is_running:
             self._push_params_to_engine()
@@ -1002,8 +1362,14 @@ class ControlTab(QWidget):
         return self._media_on
 
     @property
+    def current_preset_name(self) -> str:
+        """현재 선택된 프리셋 이름 (None이면 미선택)."""
+        return self._current_preset_name
+
+    @property
     def saved_config(self):
-        return self._applied_snapshot
+        """★ auto-save: 현재 config를 직접 반환 (스냅샷 불필요)."""
+        return self.config
 
     def set_engine_ctrl(self, ctrl):
         self._engine_ctrl = ctrl
@@ -1107,6 +1473,20 @@ class ControlTab(QWidget):
         if HAS_PYAUDIO:
             for idx, name, sr, ch in list_loopback_devices():
                 self.combo_audio_device.addItem(f"{name} ({sr}Hz, {ch}ch)", idx)
+
+    def _sync_config_from_ui(self):
+        m = self.config.setdefault("mirror", {})
+        m["orientation"] = {0: "auto", 1: "landscape", 2: "portrait"}.get(
+            self.combo_orientation.currentIndex(), "auto"
+        )
+        m["portrait_rotation"] = "cw" if self.combo_rotation.currentIndex() == 0 else "ccw"
+        m["target_fps"] = self.spin_target_fps.value()
+        self.config.setdefault("options", {})["audio_device_index"] = (
+            self.combo_audio_device.currentData()
+        )
+        self.section_color.apply_to_config()
+        self.section_mirror.apply_to_config()
+        self.section_audio.apply_to_config()
 
     def _update_resource_usage(self):
         try:

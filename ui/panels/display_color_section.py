@@ -261,6 +261,77 @@ class DisplayColorSection(QWidget):
                 f"background:rgb({r},{g},{b});border:1px solid #555;border-radius:4px;"
             )
 
+    # ══════════════════════════════════════════════════════════════
+    #  프리셋 수집/적용 (Step 2a)
+    # ══════════════════════════════════════════════════════════════
+
+    def collect_for_preset(self):
+        """현재 색상 설정을 프리셋용 raw 값으로 수집.
+
+        collect_params()와 달리 엔진 변환 없이 슬라이더 정수값과 색상값을 그대로 반환.
+        """
+        return {
+            "rainbow": self._is_rainbow,
+            "base_color": list(self._current_color),
+            "color_effect": self._color_effect,
+            "gradient_speed": self.slider_gradient_speed.value(),
+            "gradient_hue": self.slider_gradient_hue.value(),
+            "gradient_sv": self.slider_gradient_sv.value(),
+        }
+
+    def apply_from_preset(self, data):
+        """프리셋 dict에서 색상 설정을 UI에 적용.
+
+        blockSignals로 시그널 재귀 방지. 호출부에서 일괄 emit.
+        """
+        # ── 색상 효과 콤보 ──
+        if "color_effect" in data:
+            from core.engine_utils import (
+                COLOR_EFFECT_STATIC, COLOR_EFFECT_GRADIENT_CW,
+                COLOR_EFFECT_GRADIENT_CCW, COLOR_EFFECT_RAINBOW_TIME,
+            )
+            effect_to_idx = {
+                COLOR_EFFECT_STATIC: 0,
+                COLOR_EFFECT_GRADIENT_CW: 1,
+                COLOR_EFFECT_GRADIENT_CCW: 2,
+                COLOR_EFFECT_RAINBOW_TIME: 3,
+            }
+            idx = effect_to_idx.get(data["color_effect"], 0)
+            self.combo_color_effect.blockSignals(True)
+            self.combo_color_effect.setCurrentIndex(idx)
+            self.combo_color_effect.blockSignals(False)
+            self._color_effect = data["color_effect"]
+            self._update_effect_visibility()
+            self._update_preset_enabled()
+
+        # ── 무지개 / 솔리드 색상 ──
+        if "rainbow" in data:
+            self._is_rainbow = data["rainbow"]
+        if "base_color" in data:
+            c = data["base_color"]
+            if isinstance(c, (list, tuple)) and len(c) == 3:
+                self._current_color = (int(c[0]), int(c[1]), int(c[2]))
+        self._update_color_preview()
+
+        # ── 그라데이션 슬라이더 ──
+        if "gradient_speed" in data:
+            self.slider_gradient_speed.blockSignals(True)
+            self.slider_gradient_speed.setValue(int(data["gradient_speed"]))
+            self.slider_gradient_speed.blockSignals(False)
+            self.lbl_gradient_speed.setText(f"{data['gradient_speed']}%")
+
+        if "gradient_hue" in data:
+            self.slider_gradient_hue.blockSignals(True)
+            self.slider_gradient_hue.setValue(int(data["gradient_hue"]))
+            self.slider_gradient_hue.blockSignals(False)
+            self.lbl_gradient_hue.setText(f"{data['gradient_hue']}%")
+
+        if "gradient_sv" in data:
+            self.slider_gradient_sv.blockSignals(True)
+            self.slider_gradient_sv.setValue(int(data["gradient_sv"]))
+            self.slider_gradient_sv.blockSignals(False)
+            self.lbl_gradient_sv.setText(f"{data['gradient_sv']}%")
+
     # ── collect / apply / load ───────────────────────────────────
 
     def collect_params(self):

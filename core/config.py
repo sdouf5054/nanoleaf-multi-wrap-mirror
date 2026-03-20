@@ -180,6 +180,8 @@ DEFAULT_CONFIG = {
         },
         "auto_start_engine": False,
         "turn_off_on_lock": True,
+        "last_preset": None,
+        "default_preset": None,
     },
 }
 

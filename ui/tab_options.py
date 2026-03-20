@@ -166,7 +166,7 @@ class OptionsTab(QWidget):
         # ★ 오디오 모드 순환 설명
         audio_cycle_hint = QLabel(
             "OFF → 기본 모드로 ON · ON → 다음 모드 순환 · 한 바퀴 후 OFF\n"
-            "기본 모드부터 시작하여 전체를 한 바퀴 돕니다"
+            "Pulse부터 시작하여 전체를 한 바퀴 돕니다"
         )
         audio_cycle_hint.setStyleSheet("color:#888;font-size:10px;font-style:italic;")
         audio_cycle_hint.setWordWrap(True)

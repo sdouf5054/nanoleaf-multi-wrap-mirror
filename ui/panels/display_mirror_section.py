@@ -537,6 +537,113 @@ class DisplayMirrorSection(QWidget):
         except Exception:
             pass
 
+    # ══════════════════════════════════════════════════════════════
+    #  프리셋 수집/적용 (Step 2a)
+    # ══════════════════════════════════════════════════════════════
+
+    def collect_for_preset(self):
+        """현재 미러링 설정을 프리셋용 raw 슬라이더 값으로 수집.
+
+        collect_params()와 달리 엔진 변환 없이 슬라이더 정수값을 그대로 반환.
+        미러링 색상 효과는 mirror_ 접두사로 디스플레이 OFF 색상과 구분.
+        """
+        return {
+            "smoothing_factor": self.slider_smoothing.value(),
+            "mirror_n_zones": self.combo_zone_count.currentData() or -1,
+            "color_extract_mode": self.combo_extract_mode.currentData() or "average",
+            "mirror_color_effect": self._color_effect,
+            "mirror_gradient_speed": self.slider_gradient_speed.value(),
+            "mirror_gradient_hue": self.slider_gradient_hue.value(),
+            "mirror_gradient_sv": self.slider_gradient_sv.value(),
+            "media_source_override": self.combo_media_source.currentData() or "auto",
+        }
+
+    def apply_from_preset(self, data):
+        """프리셋 dict에서 미러링 설정을 UI에 적용.
+
+        blockSignals로 시그널 재귀 방지. 호출부에서 일괄 emit.
+        """
+        # ── 스무딩 ──
+        if "smoothing_factor" in data:
+            self.slider_smoothing.blockSignals(True)
+            self.slider_smoothing.setValue(int(data["smoothing_factor"]))
+            self.slider_smoothing.blockSignals(False)
+            self.lbl_smoothing.setText(f"{data['smoothing_factor'] / 100:.2f}")
+
+        # ── 구역 수 ──
+        if "mirror_n_zones" in data:
+            self.combo_zone_count.blockSignals(True)
+            target = data["mirror_n_zones"]
+            for i in range(self.combo_zone_count.count()):
+                if self.combo_zone_count.itemData(i) == target:
+                    self.combo_zone_count.setCurrentIndex(i)
+                    break
+            self.combo_zone_count.blockSignals(False)
+
+        # ── 추출 방식 ──
+        if "color_extract_mode" in data:
+            self.combo_extract_mode.blockSignals(True)
+            target = data["color_extract_mode"]
+            for i in range(self.combo_extract_mode.count()):
+                if self.combo_extract_mode.itemData(i) == target:
+                    self.combo_extract_mode.setCurrentIndex(i)
+                    break
+            self.combo_extract_mode.blockSignals(False)
+
+        # ── 미러링 색상 효과 ──
+        if "mirror_color_effect" in data:
+            from core.engine_utils import (
+                COLOR_EFFECT_STATIC, COLOR_EFFECT_GRADIENT_CW,
+                COLOR_EFFECT_GRADIENT_CCW,
+            )
+            effect_to_idx = {
+                COLOR_EFFECT_STATIC: 0,
+                COLOR_EFFECT_GRADIENT_CW: 1,
+                COLOR_EFFECT_GRADIENT_CCW: 2,
+            }
+            idx = effect_to_idx.get(data["mirror_color_effect"], 0)
+            self.combo_color_effect.blockSignals(True)
+            self.combo_color_effect.setCurrentIndex(idx)
+            self.combo_color_effect.blockSignals(False)
+            self._color_effect = data["mirror_color_effect"]
+            # 효과 슬라이더 가시성 갱신
+            is_static = self._color_effect == COLOR_EFFECT_STATIC
+            self._row_speed.setVisible(not is_static)
+            self._row_hue.setVisible(not is_static)
+            self._row_sv.setVisible(not is_static)
+
+        # ── 미러링 그라데이션 슬라이더 ──
+        if "mirror_gradient_speed" in data:
+            self.slider_gradient_speed.blockSignals(True)
+            self.slider_gradient_speed.setValue(int(data["mirror_gradient_speed"]))
+            self.slider_gradient_speed.blockSignals(False)
+            self.lbl_gradient_speed.setText(f"{data['mirror_gradient_speed']}%")
+
+        if "mirror_gradient_hue" in data:
+            self.slider_gradient_hue.blockSignals(True)
+            self.slider_gradient_hue.setValue(int(data["mirror_gradient_hue"]))
+            self.slider_gradient_hue.blockSignals(False)
+            self.lbl_gradient_hue.setText(f"{data['mirror_gradient_hue']}%")
+
+        if "mirror_gradient_sv" in data:
+            self.slider_gradient_sv.blockSignals(True)
+            self.slider_gradient_sv.setValue(int(data["mirror_gradient_sv"]))
+            self.slider_gradient_sv.blockSignals(False)
+            self.lbl_gradient_sv.setText(f"{data['mirror_gradient_sv']}%")
+
+        # ── 미디어 소스 오버라이드 ──
+        if "media_source_override" in data:
+            self.combo_media_source.blockSignals(True)
+            target = data["media_source_override"]
+            for i in range(self.combo_media_source.count()):
+                if self.combo_media_source.itemData(i) == target:
+                    self.combo_media_source.setCurrentIndex(i)
+                    break
+            self.combo_media_source.blockSignals(False)
+            # 전환 버튼 활성화 상태 동기화
+            if hasattr(self, "btn_toggle_source"):
+                self.btn_toggle_source.setEnabled(target == "auto")
+
     # ── collect / apply / load ───────────────────────────────────
 
     def collect_params(self):
