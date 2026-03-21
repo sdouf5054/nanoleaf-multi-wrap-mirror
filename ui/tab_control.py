@@ -339,7 +339,7 @@ class ControlTab(QWidget):
         bright_row.addWidget(self.lbl_master_brightness)
         lay.addLayout(bright_row)
 
-        hint = QLabel("모든 모드의 최대 밝기. 오디오 모드에서는 최대 밝기로 기능합니다.")
+        hint = QLabel("모든 모드에 공통 적용되는 최대 밝기.")
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
         lay.addWidget(hint)

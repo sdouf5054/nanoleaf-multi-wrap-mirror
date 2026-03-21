@@ -652,7 +652,7 @@ QPushButton#btnPresetDelete:disabled {{ background: {border}; color: {text_dim};
 
 QPushButton#btnPreviewToggle {{
     background: {preview_toggle_bg};
-    color: {preview_toggle_text};
+    color: white;
     border: none;
     border-radius: 4px;
     padding: 5px;
@@ -660,7 +660,7 @@ QPushButton#btnPreviewToggle {{
 }}
 QPushButton#btnPreviewToggle:checked {{
     background: {preview_toggle_checked};
-    color: white;
+    color: {preview_toggle_text};
 }}
 
 

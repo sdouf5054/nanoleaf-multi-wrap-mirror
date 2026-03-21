@@ -309,15 +309,19 @@ class SetupTab(DeviceOwnerMixin, QWidget):
 
         # 버튼
         btn_layout = QHBoxLayout()
+
         btn_generate = QPushButton("세그먼트 생성")
         btn_generate.clicked.connect(self._generate_segments)
         btn_layout.addWidget(btn_generate)
+
         btn_reset = QPushButton("↩ 저장된 값 복원")
         btn_reset.clicked.connect(self._reset_to_saved)
         btn_layout.addWidget(btn_reset)
-        btn_save = QPushButton("설정 저장")
+
+        btn_save = QPushButton("LED 레이아웃 저장")
         btn_save.clicked.connect(self._save)
         btn_layout.addWidget(btn_save)
+        
         layout.addLayout(btn_layout)
 
     # ── ★ 바퀴 수 동적 변경 ──

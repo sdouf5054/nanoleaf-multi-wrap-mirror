@@ -164,9 +164,9 @@ LIGHT = {
     "border_focus":     "#2e86c1",
 
     # ── 액센트 ──
-    "accent_blue":          "#2874a6",
-    "accent_blue_hover":    "#2e86c1",
-    "accent_blue_light":    "#3498db",
+    "accent_blue":          "#2e86c1",
+    "accent_blue_hover":    "#3498db",
+    "accent_blue_light":    "#5dade2",
     "accent_green":         "#27864a",
     "accent_green_hover":   "#2d9d52",
     "accent_green_bright":  "#229954",
@@ -181,9 +181,9 @@ LIGHT = {
     "accent_gold_hover":    "#d4ac0d",
 
     # ── 슬라이더 ──
-    "slider_groove":        "#cccccc",
-    "slider_handle":        "#888888",
-    "slider_handle_hover":  "#666666",
+    "slider_groove":        "#aaaaaa",
+    "slider_handle":        "#666666",
+    "slider_handle_hover":  "#444444",
     "slider_sub":           "#6ea8d6",
 
     # ── 에너지 바 ──
@@ -228,9 +228,9 @@ LIGHT = {
     "hotkey_listen_border": "#2e86c1",
 
     # ── 프리뷰 토글 ──
-    "preview_toggle_bg":        "#d5d8dc",
+    "preview_toggle_bg":        "#2e86c1",
     "preview_toggle_text":      "#5d6d7e",
-    "preview_toggle_checked":   "#2e86c1",
+    "preview_toggle_checked":   "#d5d8dc",
 
     # ── 미러링 패널 버튼 ──
     "btn_refresh_bg":       "#e8e8ec",

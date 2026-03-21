@@ -165,7 +165,7 @@ class OptionsTab(QWidget):
         self.combo_theme.setCurrentIndex(0 if saved_theme == "light" else 1)
         self.combo_theme.currentIndexChanged.connect(self._on_theme_changed)
         theme_layout.addWidget(self.combo_theme)
-        theme_hint = QLabel("변경 시 즉시 미리보기. 저장해야 유지됩니다.")
+        theme_hint = QLabel("옵션 저장해야 유지됩니다.")
         theme_hint.setProperty("role", "hint")
         theme_layout.addWidget(theme_hint)
         theme_layout.addStretch()

@@ -293,7 +293,7 @@ class DisplayMirrorSection(QWidget):
 
         # ── 스무딩 (슬라이더 하나, 0=off) ──
         smooth_row = QHBoxLayout()
-        smooth_row.addWidget(QLabel("스무딩 계수:"))
+        smooth_row.addWidget(QLabel("스무딩:"))
         self.slider_smoothing = NoScrollSlider(Qt.Orientation.Horizontal)
         self.slider_smoothing.setRange(0, 95)
         self.slider_smoothing.setValue(50)
@@ -306,10 +306,6 @@ class DisplayMirrorSection(QWidget):
         gl.addLayout(smooth_row)
 
         self._smoothing_row_widgets = [self.slider_smoothing, self.lbl_smoothing]
-
-        hint_smooth = QLabel("0 = 스무딩 꺼짐")
-        hint_smooth.setProperty("role", "hint")
-        gl.addWidget(hint_smooth)
 
         # ── 구분선 ──
         sep = QFrame()

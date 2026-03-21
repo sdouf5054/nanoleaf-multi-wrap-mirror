@@ -178,15 +178,19 @@ class ColorTab(DeviceOwnerMixin, QWidget):
 
         # 버튼
         btn_layout = QHBoxLayout()
-        btn_save = QPushButton("설정 저장")
-        btn_save.clicked.connect(self._save)
-        btn_layout.addWidget(btn_save)
-        btn_reset = QPushButton("↩ 기본값 복원")
-        btn_reset.clicked.connect(self._reset_defaults)
-        btn_layout.addWidget(btn_reset)
+
         btn_off = QPushButton("LED 끄기")
         btn_off.clicked.connect(self._turn_off_leds)
         btn_layout.addWidget(btn_off)
+
+        btn_reset = QPushButton("↩ 기본값 복원")
+        btn_reset.clicked.connect(self._reset_defaults)
+        btn_layout.addWidget(btn_reset)
+
+        btn_save = QPushButton("보정값 저장")
+        btn_save.clicked.connect(self._save)
+        btn_layout.addWidget(btn_save)
+
         layout.addLayout(btn_layout)
 
     # ── 색상 보정 로직 ──
