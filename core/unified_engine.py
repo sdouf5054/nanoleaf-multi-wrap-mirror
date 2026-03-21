@@ -47,6 +47,11 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
 - _render_frame(): 렌더링 경로 분기 → (raw_rgb, grb_data)
 - _send_frame_and_emit_signals(): USB 전송 + 시그널 emit
 - MirrorFrameResult: NamedTuple로 반환값 구조화
+
+[dxcam fallback 호환 패치]
+- _downsample_if_needed(): dxcam 풀 해상도 → grid 크기 다운샘플 게이트
+- _grab_frame(): 모든 캡처 반환 경로에 다운샘플 적용
+- _resolve_media_source(): MSE 측정용 캡처에도 다운샘플 적용
 """
 
 import time
@@ -91,6 +96,9 @@ from core.flowing import FlowPalette, render_flowing
 
 # ★ 미디어 연동 import (v2: 프레임 제공 방식)
 from core.media_session import MediaFrameProvider, HAS_MEDIA_SESSION
+
+# ★ dxcam fallback용 cv2 import
+import cv2
 
 # ── stale detection 상수 ──
 _STALE_THRESHOLD = 3.0
@@ -265,6 +273,48 @@ class UnifiedEngine(BaseEngine):
             self.status_changed.emit(msg)
 
     # ══════════════════════════════════════════════════════════════
+    #  ★ dxcam fallback 다운샘플 게이트
+    # ══════════════════════════════════════════════════════════════
+
+    def _downsample_if_needed(self, frame):
+        """dxcam 풀 해상도 프레임을 grid 크기로 다운샘플.
+
+        네이티브 캡처(fast_capture.dll)는 DLL 내부에서 이미
+        grid 크기(cols×rows)로 서브샘플링하므로 이 함수는 no-op.
+        dxcam fallback에서만 실제 cv2.resize를 수행합니다.
+
+        MediaFrameProvider 프레임은 이미 grid 크기이므로 스킵됩니다.
+
+        이 게이트를 _grab_frame()과 _resolve_media_source()에서
+        캡처 프레임 반환 직전에 적용하면, 이후 모든 경로
+        (zone, distinctive, hybrid, flowing, MSE 측정)에서
+        네이티브와 동일한 (grid_rows, grid_cols, 3) 프레임을 받습니다.
+
+        Args:
+            frame: numpy 배열 또는 None
+
+        Returns:
+            (grid_rows, grid_cols, 3) numpy 배열 또는 None
+        """
+        if frame is None:
+            return None
+        # 네이티브 캡처는 이미 grid 크기
+        if getattr(self, '_native_capture', False):
+            return frame
+        # 이미 grid 크기면 스킵 (미디어 프레임 등)
+        try:
+            h, w = frame.shape[:2]
+        except (AttributeError, ValueError):
+            return frame
+        if h == self._active_grid_rows and w == self._active_grid_cols:
+            return frame
+        return cv2.resize(
+            frame,
+            (self._active_grid_cols, self._active_grid_rows),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+    # ══════════════════════════════════════════════════════════════
     #  ★ 캡처 소스 선택 — 미디어 연동의 핵심 (v6)
     # ══════════════════════════════════════════════════════════════
 
@@ -276,6 +326,9 @@ class UnifiedEngine(BaseEngine):
           2) "auto" → _resolve_media_source()로 자동판별 결과 사용
           
         미디어 연동 OFF → 화면 캡처
+
+        ★ dxcam fallback 호환: 모든 캡처 반환 경로에
+        _downsample_if_needed()를 적용하여 grid 크기를 보장합니다.
 
         Returns:
             numpy 프레임 또는 None
@@ -289,18 +342,22 @@ class UnifiedEngine(BaseEngine):
                 if override == "media":
                     return media_frame
                 elif override == "mirror":
-                    return self._capture.grab() if self._capture else None
+                    return self._downsample_if_needed(
+                        self._capture.grab()
+                    ) if self._capture else None
 
                 # ── 자동 판별 (override == "auto") ──
                 source = self._resolve_media_source(media_frame)
                 if source == "media":
                     return media_frame
                 else:
-                    return self._capture.grab() if self._capture else None
+                    return self._downsample_if_needed(
+                        self._capture.grab()
+                    ) if self._capture else None
 
         # 미디어 OFF 또는 프레임 없음
         if self._capture is not None:
-            return self._capture.grab()
+            return self._downsample_if_needed(self._capture.grab())
         return None
 
     def _get_audio_energy_total(self):
@@ -337,6 +394,9 @@ class UnifiedEngine(BaseEngine):
         [audio_idle] 오디오 무음으로 미러링에 복귀한 상태
           오디오 에너지 임계치 초과 → Phase 1 재진입
           MSE 기반 감지는 일시 중단
+
+        ★ dxcam fallback 호환: MSE 측정용 캡처에도
+        _downsample_if_needed()를 적용하여 임계값 스케일을 통일합니다.
 
         Returns:
             "media" 또는 "mirror"
@@ -408,7 +468,8 @@ class UnifiedEngine(BaseEngine):
         if self._capture is None:
             return self._media_detect_decision
 
-        current_capture = self._capture.grab()
+        # ★ dxcam fallback 호환: grid 크기로 다운샘플하여 MSE 임계값 통일
+        current_capture = self._downsample_if_needed(self._capture.grab())
         if current_capture is None:
             return self._media_detect_decision
 
@@ -1056,6 +1117,10 @@ class UnifiedEngine(BaseEngine):
 
         ★ v2: _grab_frame()로 소스 선택 — 미디어 ON이면 앨범아트,
         OFF이면 화면 캡처. 이후 파이프라인 완전 동일.
+
+        ★ dxcam fallback 호환: _grab_frame()이 이미
+        _downsample_if_needed()를 적용하여 grid 크기를 반환하므로
+        zone/distinctive/gradient 모든 경로에서 안전합니다.
         """
         pipeline = self._pipeline
 
@@ -1084,22 +1149,14 @@ class UnifiedEngine(BaseEngine):
                 return None
 
             if not getattr(self, '_native_capture', False):
-                if current_h != self._active_h or current_w != self._active_w:
-                    self._active_w, self._active_h = current_w, current_h
-                    self._capture.screen_w = current_w
-                    self._capture.screen_h = current_h
-                    new_gc, new_gr = self._resolve_grid_size(current_w, current_h)
-                    if (new_gc != self._active_grid_cols
-                            or new_gr != self._active_grid_rows):
-                        self._display_change_flag.set()
-                        return None
-                    try:
-                        self._weight_matrix = self._build_layout(current_w, current_h)
-                        self._rebuild_pipeline()
-                        pipeline = self._pipeline
-                        prev_colors = None
-                    except (ValueError, IndexError, np.linalg.LinAlgError):
-                        pass
+                # ★ dxcam fallback: _grab_frame()이 이미 grid 크기로 다운샘플.
+                # 해상도 변경은 capture.screen_w/h로 감지합니다.
+                cap_w = getattr(self._capture, 'screen_w', 0)
+                cap_h = getattr(self._capture, 'screen_h', 0)
+                if (cap_w > 0 and cap_h > 0
+                        and (cap_w != self._active_w or cap_h != self._active_h)):
+                    self._display_change_flag.set()
+                    return None
             else:
                 cap_w = self._capture.screen_w
                 cap_h = self._capture.screen_h
@@ -1171,7 +1228,6 @@ class UnifiedEngine(BaseEngine):
 
             else:
                 try:
-                    import cv2
                     grid = cv2.resize(
                         frame,
                         (pipeline.grid_cols, pipeline.grid_rows),
@@ -1532,6 +1588,8 @@ class UnifiedEngine(BaseEngine):
         """화면/미디어 프레임 → per_led_colors 갱신 + base_colors 재빌드.
 
         ★ v2: _grab_frame()으로 소스 선택 — 미디어/화면 구분 없이 동일 처리.
+        ★ dxcam fallback 호환: _grab_frame()이 이미 grid 크기를 반환하므로
+        weight_matrix와의 차원이 항상 일치합니다.
         """
         screen_frame = self._grab_frame(ep)
         if screen_frame is None:
