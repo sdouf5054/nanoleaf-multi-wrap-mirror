@@ -4,8 +4,8 @@
 하드웨어 종속 설정(레이아웃, 디바이스, 색상 보정)은 제외.
 
 [저장 위치]
-  exe 실행: exe 폴더/presets/
-  스크립트 실행: 프로젝트 루트/presets/
+  config.json과 동일한 디렉토리의 presets/ 하위 폴더.
+  → config.py의 get_config_dir()를 공유하여 portable / APPDATA 자동 대응.
 
 [파일 형식]
   presets/{name}.json — UTF-8, indent=2
@@ -95,16 +95,13 @@ _FLOAT_TOLERANCE = 0.001
 
 
 # ══════════════════════════════════════════════════════════════════
-#  경로
+#  경로 — ★ config.py의 get_config_dir() 공유
 # ══════════════════════════════════════════════════════════════════
 
 def _presets_dir():
-    """presets/ 폴더 경로 — exe 실행 시 exe 폴더, 스크립트 실행 시 루트 폴더."""
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, "presets")
+    """presets/ 폴더 경로 — config.json과 동일한 디렉토리 기준."""
+    from core.config import get_config_dir
+    return os.path.join(get_config_dir(), "presets")
 
 
 def _ensure_presets_dir():

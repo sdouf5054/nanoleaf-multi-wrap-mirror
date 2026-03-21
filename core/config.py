@@ -17,6 +17,12 @@
 
 [미디어 연동 추가]
 - options에 default_media_enabled: False 추가
+
+[exe 배포]
+- ★ _config_dir(): 쓰기 가능한 디렉토리를 결정하는 단일 함수 추가
+  - exe 폴더에 쓰기 가능하면 그대로 사용 (portable 배포)
+  - 실패 시 %APPDATA%/NanoleafMirror/ 로 fallback
+- save_config / load_config / _config_path 가 _config_dir() 공유
 """
 
 import json
@@ -267,13 +273,76 @@ def _migrate_config(config):
     return config
 
 
-def _config_path():
-    """config.json 경로 — exe 실행 시 exe 폴더, 스크립트 실행 시 루트 폴더"""
+# ══════════════════════════════════════════════════════════════════
+#  ★ 경로 결정 — portable 우선, fallback to %APPDATA%
+# ══════════════════════════════════════════════════════════════════
+
+def _exe_dir():
+    """exe(또는 스크립트) 기준 디렉토리."""
     if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.dirname(__file__))
-    return os.path.join(base_dir, "config.json")
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(__file__))
+
+
+def _appdata_dir():
+    """%APPDATA%/NanoleafMirror/ 경로."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return os.path.join(appdata, "NanoleafMirror")
+    # APPDATA 환경변수가 없는 경우 (극히 드묾) → exe 옆에 저장
+    return _exe_dir()
+
+
+def _is_writable(directory):
+    """디렉토리에 쓰기 가능한지 테스트."""
+    try:
+        test_path = os.path.join(directory, ".write_test")
+        with open(test_path, "w") as f:
+            f.write("t")
+        os.remove(test_path)
+        return True
+    except OSError:
+        return False
+
+
+# ★ 캐시: 앱 수명 동안 한 번만 결정
+_resolved_config_dir = None
+
+
+def _config_dir():
+    """config.json과 presets/를 저장할 디렉토리를 결정.
+
+    우선순위:
+    1. exe 폴더에 config.json이 이미 존재 → exe 폴더 (기존 설정 유지)
+    2. exe 폴더에 쓰기 가능 → exe 폴더 (portable 배포)
+    3. 위 두 조건 모두 실패 → %APPDATA%/NanoleafMirror/
+    """
+    global _resolved_config_dir
+    if _resolved_config_dir is not None:
+        return _resolved_config_dir
+
+    exe = _exe_dir()
+
+    # 기존 config.json이 exe 폴더에 있으면 무조건 거기 사용
+    if os.path.exists(os.path.join(exe, "config.json")):
+        _resolved_config_dir = exe
+        return exe
+
+    # exe 폴더에 쓰기 가능하면 portable 모드
+    if _is_writable(exe):
+        _resolved_config_dir = exe
+        return exe
+
+    # fallback: %APPDATA%
+    appdata = _appdata_dir()
+    os.makedirs(appdata, exist_ok=True)
+    _resolved_config_dir = appdata
+    return appdata
+
+
+def _config_path():
+    """config.json 경로."""
+    return os.path.join(_config_dir(), "config.json")
 
 
 def load_config():
@@ -298,8 +367,20 @@ def load_config():
 def save_config(config):
     """config.json 저장."""
     path = _config_path()
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    except OSError:
+        pass  # 쓰기 실패 — 무시 (로그 없는 환경에서 조용히 실패)
+
+
+def get_config_dir():
+    """외부에서 config 디렉토리를 참조할 때 사용 (preset.py 등).
+
+    ★ 공개 API — _config_dir()의 래퍼.
+    """
+    return _config_dir()
 
 
 def get_audio_mode_defaults(mode_name):

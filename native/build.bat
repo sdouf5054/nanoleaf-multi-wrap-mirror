@@ -27,7 +27,7 @@ if errorlevel 1 (
 )
 
 echo [2/3] Compiling...
-cl /LD /O2 /EHsc fast_capture.cpp /link d3d11.lib dxgi.lib /OUT:fast_capture.dll
+cl /LD /O2 /EHsc /MT fast_capture.cpp /link d3d11.lib dxgi.lib /OUT:fast_capture.dll
 if errorlevel 1 (
     echo.
     echo [ERROR] Compilation failed. Check error messages above.

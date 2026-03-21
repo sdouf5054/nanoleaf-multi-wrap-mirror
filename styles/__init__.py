@@ -14,14 +14,27 @@ import sys
 from styles.palette import get_palette, set_current
 
 
+def _get_base_dir():
+    """프로젝트 루트 (frozen/스크립트 공용)."""
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def _get_assets_dir():
     """assets 디렉토리의 절대 경로를 반환."""
+    return os.path.join(_get_base_dir(), "assets")
+
+
+def _get_styles_dir():
+    """styles 디렉토리의 절대 경로를 반환.
+
+    frozen 환경에서는 __file__이 _MEIPASS 내부를 가리키지 않을 수 있으므로
+    _get_base_dir() 기준으로 명시적으로 해석.
+    """
     if getattr(sys, 'frozen', False):
-        base = sys._MEIPASS
-    else:
-        # styles/ 의 부모 = 프로젝트 루트
-        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, "assets")
+        return os.path.join(sys._MEIPASS, "styles")
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def load_theme(app, theme="light"):
@@ -53,7 +66,7 @@ def load_theme(app, theme="light"):
     pal_with_icons["chevron_down"] = chevron_down.replace("\\", "/")
     pal_with_icons["chevron_up"] = chevron_up.replace("\\", "/")
 
-    styles_dir = os.path.dirname(os.path.abspath(__file__))
+    styles_dir = _get_styles_dir()
     qss_path = os.path.join(styles_dir, "theme.qss")
 
     with open(qss_path, encoding="utf-8") as f:

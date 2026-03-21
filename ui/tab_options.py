@@ -14,6 +14,10 @@
 [QSS 테마] 인라인 setStyleSheet → palette 참조 + property 기반으로 전환.
   - HotkeyEdit: idle/listening 동적 스타일은 인라인 유지 (palette 참조)
   - 힌트 라벨: setProperty("role", "hint")
+
+[exe 배포]
+- ★ verify_startup_path(): 등록된 경로가 현재 exe와 다르면 자동 갱신
+  - _save()에서 호출 + main.py 초기화에서 호출 권장
 """
 
 import os
@@ -66,7 +70,6 @@ class HotkeyEdit(QLineEdit):
         self.setPlaceholderText(placeholder); self.setReadOnly(True); self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("hotkeyEdit")
         self.setMinimumHeight(20)
-        # ★ 인라인 스타일 제거 — theme.qss에서 처리
 
     def _set_idle_style(self):
         self.setProperty("editState", "idle")
@@ -139,6 +142,41 @@ def _unregister_startup():
     except Exception: pass
 
 
+def verify_startup_path():
+    """★ 시작프로그램에 등록된 경로가 현재 exe와 다르면 자동 갱신.
+
+    exe를 이동하거나 업데이트한 뒤에도 시작프로그램이 정상 동작하도록 보장.
+    앱 초기화 시(main.py 또는 OptionsTab.__init__) 한 번 호출.
+
+    비-frozen 환경(스크립트 실행)에서도 동작하지만,
+    frozen 환경에서 가장 유의미함.
+    """
+    if not _is_startup_registered():
+        return  # 등록 안 되어 있으면 할 일 없음
+
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY, 0, winreg.KEY_READ)
+        registered_cmd, _ = winreg.QueryValueEx(key, _REG_NAME)
+        winreg.CloseKey(key)
+    except Exception:
+        return  # 읽기 실패 → 무시
+
+    # 현재 환경의 올바른 커맨드 계산
+    if getattr(sys, 'frozen', False):
+        expected_cmd = f'"{sys.executable}" --startup'
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = sys.executable
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        main_py = os.path.join(project_root, "main.py")
+        expected_cmd = f'"{pythonw}" "{main_py}" --startup'
+
+    if registered_cmd.strip('"').lower() != expected_cmd.strip('"').lower():
+        _register_startup()
+
+
 class OptionsTab(QWidget):
     def __init__(self, config, main_window=None, parent=None):
         super().__init__(parent)
@@ -147,6 +185,9 @@ class OptionsTab(QWidget):
         self.opt = self.config["options"]
         self._saved_theme = self.opt.get("theme", "light")  # ★ 저장된 테마 추적
         self._build_ui()
+
+        # ★ 앱 시작 시 시작프로그램 경로 자동 검증
+        verify_startup_path()
 
     def _build_ui(self):
         layout = QVBoxLayout(self); layout.setSpacing(14)
@@ -242,7 +283,7 @@ class OptionsTab(QWidget):
     def _on_hotkey_enabled_changed(self, state):
         enabled = bool(state)
         self.edit_toggle.setEnabled(enabled); self.edit_bright_up.setEnabled(enabled); self.edit_bright_down.setEnabled(enabled)
-        self.edit_audio_cycle.setEnabled(enabled) 
+        self.edit_audio_cycle.setEnabled(enabled)
         self.edit_compact_view.setEnabled(enabled)
     def _reset_hotkeys(self):
         self.edit_toggle.setText("ctrl+shift+o"); self.edit_bright_up.setText("ctrl+shift+up"); self.edit_bright_down.setText("ctrl+shift+down")
@@ -257,17 +298,12 @@ class OptionsTab(QWidget):
         load_theme(QApplication.instance(), new_theme)
 
     def revert_theme(self):
-        """★ 저장 없이 옵션 탭을 떠날 때 원래 테마로 복귀.
-
-        MainWindow에서 탭 전환 또는 창 닫기 시 호출할 수 있습니다.
-        현재 콤보 값이 저장된 테마와 다르면 복귀합니다.
-        """
+        """★ 저장 없이 옵션 탭을 떠날 때 원래 테마로 복귀."""
         current_combo = self.combo_theme.currentData()
         if current_combo != self._saved_theme:
             from PySide6.QtWidgets import QApplication
             from styles import load_theme
             load_theme(QApplication.instance(), self._saved_theme)
-            # 콤보도 원래 값으로
             self.combo_theme.blockSignals(True)
             self.combo_theme.setCurrentIndex(
                 0 if self._saved_theme == "light" else 1
@@ -275,9 +311,9 @@ class OptionsTab(QWidget):
             self.combo_theme.blockSignals(False)
 
     def _save(self):
-        # ★ 테마 — 콤보에서 이미 미리보기 적용됨, 여기서는 config에 기록만
+        # ★ 테마
         self.opt["theme"] = self.combo_theme.currentData()
-        self._saved_theme = self.opt["theme"]  # 저장된 테마 갱신
+        self._saved_theme = self.opt["theme"]
 
         self.opt["tray_enabled"] = self.chk_tray.isChecked()
         self.opt["hotkey_enabled"] = self.chk_hotkey.isChecked()
@@ -299,6 +335,9 @@ class OptionsTab(QWidget):
                 if not _register_startup(): msg_warning(self, "오류", "시작프로그램 등록에 실패했습니다.")
         else:
             if _is_startup_registered(): _unregister_startup()
+
+        # ★ 시작프로그램 경로 검증 (저장 시마다)
+        verify_startup_path()
 
         if self.main_window and hasattr(self.main_window, "tray"):
             if self.opt["tray_enabled"]: self.main_window.tray.show()

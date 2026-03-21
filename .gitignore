@@ -8,10 +8,13 @@ build/
 dist/
 *.spec
 Nanoleaf Mirror.lnk
-fast_capture.dll
+*.dll
 personal_config.json
 .pytest_cache/
 *.egg-info/
 config.json
 tree_nopycache.txt
 presets/
+!nanoleaf_mirror.spec
+*.manifest
+*.pdb
