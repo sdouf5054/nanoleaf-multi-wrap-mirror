@@ -547,7 +547,9 @@ class CompactWindow(QWidget):
         """★ 미디어 카드 갱신 — source_color만 동적, 나머지는 theme.qss."""
         self.btn_media_source.setText(source_text)
         # ★ color만 동적 오버라이드 (나머지 속성은 theme.qss #compactMediaSourceBtn)
-        self.btn_media_source.setStyleSheet(f"color: {source_color};")
+        self.btn_media_source.setStyleSheet(
+        f"#compactMediaSourceBtn {{ color: {source_color}; }}"
+        )
         self.lbl_media_song.setText(song_text)
         if thumb_pixmap is not None:
             self.lbl_media_thumb.setPixmap(thumb_pixmap)

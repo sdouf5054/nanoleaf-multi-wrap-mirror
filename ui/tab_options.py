@@ -64,22 +64,19 @@ class HotkeyEdit(QLineEdit):
         super().__init__(parent)
         self._listening = False; self._original_text = ""
         self.setPlaceholderText(placeholder); self.setReadOnly(True); self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._set_idle_style()
+        self.setObjectName("hotkeyEdit")
+        self.setMinimumHeight(20)
+        # ★ 인라인 스타일 제거 — theme.qss에서 처리
 
     def _set_idle_style(self):
-        # ★ palette 참조로 하드코딩 제거
-        self.setStyleSheet(
-            f"QLineEdit{{background:{_pal_current()['bg_tertiary']};color:{_pal_current()['text_primary']};"
-            f"border:1px solid {_pal_current()['border']};border-radius:4px;padding:3px 6px;}}"
-            f"QLineEdit:hover{{border-color:{_pal_current()['border_hover']};}}"
-        )
+        self.setProperty("editState", "idle")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def _set_listening_style(self):
-        self.setStyleSheet(
-            f"QLineEdit{{background:{_pal_current()['hotkey_listen_bg']};color:{_pal_current()['hotkey_listen_text']};"
-            f"border:2px solid {_pal_current()['hotkey_listen_border']};border-radius:4px;"
-            "padding:3px 6px;font-style:italic;}}"
-        )
+        self.setProperty("editState", "listening")
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton: self._start_listening()
