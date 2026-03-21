@@ -3,22 +3,11 @@
 일반 윈도우 (최대화 비활성). Always-on-top.
 ControlTab을 Single Source of Truth로 두고, CompactBridge가 양방향 동기화.
 
-[v3 변경]
-- 일반 윈도우로 전환 (프레임리스/Tool 제거) → 닫기/최소화 OS 제공, 태스크바 표시
-- 최대화 비활성 (WindowMaximizeButtonHint 제거)
-- 가로폭 롤백: 340~420
-- CPU/RAM: objectName = cpuLabel/ramLabel (기존 ControlTab QSS 셀렉터 재사용)
-- 미디어 소스 문구/색상: 기존 DisplayMirrorSection의 palette 기반 그대로 사용
-- 인라인 setStyleSheet 최소화 — objectName + 기존 QSS 재사용
-- 동적 세로 크기: sizePolicy Fixed→Preferred, _update_conditional_sections에서 resize hint
-- 색상 섹션을 오디오 섹션 위로 배치 (D=OFF 시 색상이 먼저)
-- 새로고침 버튼: clicked → media_refresh 시그널 연결 확인
-- 소스 전환 버튼: fix=ON일 때만 동작 확인
-- Unicode 문자 그대로 사용 (escape 아님)
-
-[QSS 테마] sync_media_info()의 인라인 setStyleSheet 제거.
-  - sourceState property 기반으로 전환 (A1과 동일 패턴).
-  - theme.qss의 #compactMediaSourceBtn[sourceState=...] 셀렉터 사용.
+[★ Mirror Flowing 추가]
+- D=ON 전용 미러 효과 콤보: 정적/CW/CCW/Flowing
+- D=OFF 색상 효과 콤보와 동일한 디자인/레이아웃
+- mirror_effect_changed(str) 시그널 추가
+- _update_conditional_sections: D=ON → 미러 효과 표시, D=OFF → 색상 효과 표시
 """
 
 from PySide6.QtWidgets import (
@@ -53,6 +42,15 @@ _COLOR_EFFECTS = [
     ("그라데이션 CCW",  "gradient_ccw"),
     ("무지개 (시간)",   "rainbow_time"),
 ]
+
+# ★ 미러링 색상 효과 (D=ON 전용)
+_MIRROR_EFFECTS = [
+    ("정적",              "static"),
+    ("그라데이션 (CW)",    "gradient_cw"),
+    ("그라데이션 (CCW)",   "gradient_ccw"),
+    ("Flowing",           "flowing"),
+]
+
 _AUDIO_MODES = [
     ("Pulse",       "pulse"),
     ("Spectrum",    "spectrum"),
@@ -86,16 +84,15 @@ class CompactWindow(QWidget):
     color_preset_changed = Signal(str, object)
     color_effect_changed = Signal(str)
     effect_speed_changed = Signal(int)
+    mirror_effect_changed = Signal(str)    # ★ D=ON 미러 효과 변경
     media_fix_changed = Signal(bool)
     media_source_swap = Signal()
     media_refresh = Signal()
     close_requested = Signal()
-    expand_requested = Signal()      # ★ 상태 라벨 더블클릭 → 메인 GUI 열기
+    expand_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # ★ 일반 윈도우 + Always-on-top + 최대화 비활성
-        # ★ 최대화 비활성: CustomizeWindowHint + 필요한 것만 명시
         self.setWindowFlags(
             Qt.WindowType.Window
             | Qt.WindowType.CustomizeWindowHint
@@ -129,8 +126,11 @@ class CompactWindow(QWidget):
         self._build_brightness_row(root)
         self._build_sep(root)
 
-        # ★ 색상 섹션을 오디오 위에 배치
+        # ★ D=ON 미러 효과 (색상 섹션 위에 배치)
+        self._build_mirror_effect_section(root)
+        # D=OFF 색상 섹션
         self._build_static_section(root)
+        # 오디오 섹션
         self._build_audio_section(root)
         self._build_media_section(root)
 
@@ -152,7 +152,6 @@ class CompactWindow(QWidget):
         self.lbl_status.mouseDoubleClickEvent = lambda e: self.expand_requested.emit()
         row.addWidget(self.lbl_status)
 
-        # ★ 작은 확장 힌트
         lbl_expand = QLabel("+")
         lbl_expand.setObjectName("compactExpandHint")
         lbl_expand.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -241,7 +240,34 @@ class CompactWindow(QWidget):
         row.addWidget(self.lbl_brightness)
         parent.addLayout(row)
 
-    # ── ⑤ 정적 LED 색상 섹션 (D=OFF 시 항상, 오디오 위에) ──
+    # ── ⑤ ★ D=ON 미러 효과 섹션 ────────────────────────────────
+
+    def _build_mirror_effect_section(self, parent):
+        """D=ON일 때 표시되는 미러링 색상 효과 콤보."""
+        self._mirror_effect_container = QWidget()
+        self._mirror_effect_container.setVisible(False)
+        lay = QVBoxLayout(self._mirror_effect_container)
+        lay.setContentsMargins(0, 2, 0, 2)
+        lay.setSpacing(4)
+
+        effect_row = QHBoxLayout()
+        effect_row.setSpacing(4)
+        lbl_e = QLabel("효과")
+        lbl_e.setFixedWidth(28)
+        effect_row.addWidget(lbl_e)
+        self.combo_mirror_effect = QComboBox()
+        self.combo_mirror_effect.setFixedHeight(24)
+        for name, key in _MIRROR_EFFECTS:
+            self.combo_mirror_effect.addItem(name, key)
+        self.combo_mirror_effect.currentIndexChanged.connect(
+            self._on_mirror_effect_changed
+        )
+        effect_row.addWidget(self.combo_mirror_effect, 1)
+        lay.addLayout(effect_row)
+
+        parent.addWidget(self._mirror_effect_container)
+
+    # ── ⑥ D=OFF 색상 섹션 ──────────────────────────────────────
 
     def _build_static_section(self, parent):
         self._static_container = QWidget()
@@ -300,7 +326,7 @@ class CompactWindow(QWidget):
 
         parent.addWidget(self._static_container)
 
-    # ── ⑥ 오디오 섹션 ──
+    # ── ⑦ 오디오 섹션 ──
 
     def _build_audio_section(self, parent):
         self._audio_container = QWidget()
@@ -309,7 +335,6 @@ class CompactWindow(QWidget):
         lay.setContentsMargins(0, 2, 0, 2)
         lay.setSpacing(4)
 
-        # ★ 모드 줄
         mode_row = QHBoxLayout()
         mode_row.setSpacing(4)
         lbl_m = QLabel("모드")
@@ -323,12 +348,11 @@ class CompactWindow(QWidget):
         mode_row.addWidget(self.combo_audio_mode, 1)
         lay.addLayout(mode_row)
 
-        # ★ 에너지 바
         self.energy_bar = CompactEnergyBar()
         lay.addWidget(self.energy_bar)
         parent.addWidget(self._audio_container)
 
-    # ── ⑦ 미디어 섹션 ──
+    # ── ⑧ 미디어 섹션 ──
 
     def _build_media_section(self, parent):
         self._media_container = QWidget()
@@ -352,7 +376,6 @@ class CompactWindow(QWidget):
         source_row = QHBoxLayout()
         source_row.setSpacing(4)
 
-        # ★ 소스 상태 — sourceState property 기반 (인라인 setStyleSheet 제거)
         self.btn_media_source = QPushButton("미디어 연동 활성")
         self.btn_media_source.setObjectName("compactMediaSourceBtn")
         self.btn_media_source.setFlat(True)
@@ -371,7 +394,6 @@ class CompactWindow(QWidget):
         self.chk_media_fix.toggled.connect(self._on_media_fix_toggled)
         source_row.addWidget(self.chk_media_fix)
 
-        # ★ 새로고침 버튼
         self.btn_media_refresh = QPushButton("↻")
         self.btn_media_refresh.setObjectName("btnRefreshThumb")
         self.btn_media_refresh.setFixedSize(28, 28)
@@ -397,17 +419,16 @@ class CompactWindow(QWidget):
     def _update_conditional_sections(self):
         self._audio_container.setVisible(self._audio_on)
         self._media_container.setVisible(self._media_on and self._display_on)
+        # ★ D=ON → 미러 효과 표시, D=OFF → 색상 효과 표시 (상호 배타)
+        self._mirror_effect_container.setVisible(self._display_on)
         self._static_container.setVisible(not self._display_on)
         self.toggle_media.setEnabled(self._display_on)
         self._update_flowing_availability()
-        # ★ 동적 세로 크기 — 콘텐츠에 맞게 축소/확대
         QTimer.singleShot(0, self._fit_height)
 
     def _fit_height(self):
-        """콘텐츠에 맞게 윈도우 높이를 조절 — geometry 경고 방지."""
         hint = self.sizeHint()
         target_h = hint.height()
-        # ★ 현재와 동일하면 resize 호출 안 함 (불필요한 setGeometry 방지)
         if abs(self.height() - target_h) > 2:
             self.resize(self.width(), target_h)
 
@@ -483,6 +504,12 @@ class CompactWindow(QWidget):
         self.lbl_effect_speed.setText(f"{value}%")
         self.effect_speed_changed.emit(value)
 
+    # ★ D=ON 미러 효과 변경
+    def _on_mirror_effect_changed(self, index):
+        key = self.combo_mirror_effect.itemData(index)
+        if key:
+            self.mirror_effect_changed.emit(key)
+
     def _on_media_fix_toggled(self, checked):
         self.media_fix_changed.emit(checked)
 
@@ -543,17 +570,7 @@ class CompactWindow(QWidget):
             self.energy_bar.set_values(bass, mid, high)
 
     def sync_media_info(self, source_text, source_state, song_text, thumb_pixmap=None):
-        """★ 미디어 카드 갱신 — sourceState property 기반 (인라인 setStyleSheet 제거).
-
-        Args:
-            source_text: str — 소스 상태 텍스트
-            source_state: str — "active" / "phase1" / "mirror" / "idle"
-                (compact_bridge에서 색상 대신 상태 문자열을 전달)
-            song_text: str — 곡 정보
-            thumb_pixmap: QPixmap 또는 None
-        """
         self.btn_media_source.setText(source_text)
-        # ★ property 기반 — theme.qss의 #compactMediaSourceBtn[sourceState=...] 셀렉터
         _set_property(self.btn_media_source, "sourceState", source_state)
         self.lbl_media_song.setText(song_text)
         if thumb_pixmap is not None:
@@ -580,6 +597,7 @@ class CompactWindow(QWidget):
         _set_property(self.btn_preset_default, "isDefault", "true" if is_default else "false")
 
     def sync_color_state(self, rainbow, base_color, effect, speed):
+        """D=OFF 색상 상태 동기화."""
         self.combo_color.blockSignals(True)
         if rainbow:
             self.combo_color.setCurrentIndex(0)
@@ -605,6 +623,15 @@ class CompactWindow(QWidget):
         self.lbl_effect_speed.setText(f"{speed}%")
         self._speed_row.setVisible(effect != "static")
 
+    def sync_mirror_effect(self, effect_key):
+        """★ D=ON 미러 효과 상태 동기화."""
+        self.combo_mirror_effect.blockSignals(True)
+        for i in range(self.combo_mirror_effect.count()):
+            if self.combo_mirror_effect.itemData(i) == effect_key:
+                self.combo_mirror_effect.setCurrentIndex(i)
+                break
+        self.combo_mirror_effect.blockSignals(False)
+
     # ══════════════════════════════════════════════════════════════
     #  헬퍼
     # ══════════════════════════════════════════════════════════════
@@ -621,7 +648,6 @@ class CompactWindow(QWidget):
         parent.addWidget(sep)
 
     def closeEvent(self, event):
-        """닫기 → 숨기기 (파괴하지 않음)."""
         event.ignore()
         self.hide()
         self.close_requested.emit()

@@ -1,17 +1,9 @@
 """CompactBridge v3 — CompactWindow ↔ ControlTab 양방향 동기화 중재자
 
-[v3 변경]
-- 미디어 소스 문구/색상: DisplayMirrorSection.update_current_source()와
-  완전 동일한 로직 + palette 색상 사용
-- sync_media_info에 source_color 파라미터 추가
-- 프리셋 되돌리기 시 밝기 동기화 누락 수정
-- 새로고침 버튼 시그널 연결 재확인
-- on_compact_shown에서 즉시 미디어+리소스 갱신
-
-[QSS 테마 패치]
-- _update_media_card(): source_color → source_state 문자열로 전환.
-  CompactWindow.sync_media_info()가 property 기반으로 변경되었으므로
-  palette에서 색상을 조회할 필요 없이 상태 문자열만 전달.
+[★ Mirror Flowing 추가]
+- mirror_effect_changed 시그널 연결: 컴팩트 → 미러링 패널
+- _poll_sync: 미러 효과 콤보 역방향 동기화 추가
+- _sync_mirror_effect_state: 초기/전체 동기화 시 미러 효과 반영
 """
 
 import os
@@ -59,6 +51,7 @@ class CompactBridge(QObject):
     def connect_all(self):
         self._connect_compact_to_tab()
         self._connect_engine_to_compact()
+        self._connect_tab_to_compact()  # ★ 메인→컴팩트 시그널
         self._initial_sync()
 
     def _connect_compact_to_tab(self):
@@ -75,6 +68,7 @@ class CompactBridge(QObject):
         c.color_preset_changed.connect(self._on_compact_color)
         c.color_effect_changed.connect(self._on_compact_effect)
         c.effect_speed_changed.connect(self._on_compact_speed)
+        c.mirror_effect_changed.connect(self._on_compact_mirror_effect)  # ★
         c.media_fix_changed.connect(self._on_compact_media_fix)
         c.media_source_swap.connect(self._on_compact_media_swap)
         c.media_refresh.connect(self._on_compact_media_refresh)
@@ -86,6 +80,18 @@ class CompactBridge(QObject):
         ctrl.status_changed.connect(self._compact.sync_status)
         ctrl.running_changed.connect(self._on_running_changed)
         ctrl.energy_updated.connect(self._compact.sync_energy)
+
+    def _connect_tab_to_compact(self):
+        """★ 메인 GUI → 컴팩트 시그널 기반 동기화.
+
+        폴링 대신 시그널로 즉시 반영 — 경쟁 상태 없음.
+        """
+        t = self._tab
+        # 미러 효과 변경 (메인 GUI에서 콤보 변경 시)
+        if hasattr(t, 'section_mirror'):
+            t.section_mirror.color_effect_changed.connect(
+                self._on_main_mirror_effect_changed
+            )
 
     def _initial_sync(self):
         t = self._tab
@@ -100,6 +106,7 @@ class CompactBridge(QObject):
         )
         self._sync_preset_list()
         self._sync_color_state()
+        self._sync_mirror_effect_state()  # ★
         c.toggle_media.setEnabled(t._display_on and HAS_MEDIA_SESSION)
 
     # ══════════════════════════════════════════════════════════════
@@ -138,10 +145,18 @@ class CompactBridge(QObject):
         section.combo_audio_mode.setCurrentIndex(idx)
         section.combo_audio_mode.blockSignals(False)
         section._update_mode_visibility()
+
+        # ★ 미러 flowing ↔ 오디오 flowing 동기화
+        if hasattr(self._tab, 'section_mirror'):
+            self._tab.section_mirror.on_audio_mode_changed(mode_key)
+
         self._tab._sync_flowing_state()
         self._tab._check_preset_modified()
         if self._tab._is_running:
             self._tab._push_params_to_engine()
+
+        # ★ 컴팩트 미러 효과 콤보도 동기화
+        self._sync_mirror_effect_state()
 
     def _on_compact_preset(self, name):
         self._tab.select_preset_by_name(name)
@@ -182,6 +197,60 @@ class CompactBridge(QObject):
     def _on_compact_speed(self, value):
         self._tab.section_color.slider_gradient_speed.setValue(value)
 
+    # ★ 미러 효과 변경: 컴팩트 → 미러링 패널
+    def _on_compact_mirror_effect(self, effect_key):
+        """컴팩트의 미러 효과 콤보 변경 → 미러링 패널 + 오디오 모드 동기화."""
+        section = self._tab.section_mirror
+
+        # ★ 메인 GUI의 combo_color_effect는 addItems()로 추가되어 itemData가 None.
+        #   _MIRROR_EFFECT_TO_INDEX로 직접 인덱스를 찾아 설정.
+        from ui.panels.display_mirror_section import _MIRROR_EFFECT_TO_INDEX
+        idx = _MIRROR_EFFECT_TO_INDEX.get(effect_key)
+        if idx is not None:
+            section.combo_color_effect.setCurrentIndex(idx)
+
+        # ★ 오디오 모드 동기화 (하이브리드일 때)
+        from core.engine_utils import COLOR_EFFECT_FLOWING
+        if self._tab._audio_on and self._tab._display_on:
+            from ui.panels.audio_reactive_section import _MODE_TO_INDEX
+            audio_section = self._tab.section_audio
+            if effect_key == COLOR_EFFECT_FLOWING:
+                if audio_section._mode_key != "flowing":
+                    audio_section._save_mode_params(audio_section._mode_key)
+                    audio_section._mode_key = "flowing"
+                    audio_section._load_mode_params("flowing")
+                    audio_section.combo_audio_mode.blockSignals(True)
+                    audio_section.combo_audio_mode.setCurrentIndex(
+                        _MODE_TO_INDEX.get("flowing", 5)
+                    )
+                    audio_section.combo_audio_mode.blockSignals(False)
+                    audio_section._update_mode_visibility()
+            else:
+                if audio_section._mode_key == "flowing":
+                    audio_section._save_mode_params("flowing")
+                    audio_section._mode_key = "pulse"
+                    audio_section._load_mode_params("pulse")
+                    audio_section.combo_audio_mode.blockSignals(True)
+                    audio_section.combo_audio_mode.setCurrentIndex(
+                        _MODE_TO_INDEX.get("pulse", 0)
+                    )
+                    audio_section.combo_audio_mode.blockSignals(False)
+                    audio_section._update_mode_visibility()
+
+        self._tab._sync_flowing_state()
+        self._tab._check_preset_modified()
+        if self._tab._is_running:
+            self._tab._push_params_to_engine()
+
+        # ★ 컴팩트 오디오 모드 콤보도 동기화
+        audio_mode = self._tab.section_audio._mode_key
+        self._compact.combo_audio_mode.blockSignals(True)
+        for i in range(self._compact.combo_audio_mode.count()):
+            if self._compact.combo_audio_mode.itemData(i) == audio_mode:
+                self._compact.combo_audio_mode.setCurrentIndex(i)
+                break
+        self._compact.combo_audio_mode.blockSignals(False)
+
     def _on_compact_media_fix(self, checked):
         section = self._tab.section_mirror
         if checked:
@@ -195,13 +264,11 @@ class CompactBridge(QObject):
                 break
 
     def _on_compact_media_swap(self):
-        """소스 전환 — 큰 GUI의 '⇄ 전환' 버튼 클릭과 동일."""
         section = self._tab.section_mirror
         if hasattr(section, 'btn_toggle_source'):
             section.btn_toggle_source.click()
 
     def _on_compact_media_refresh(self):
-        """★ 컴팩트 새로고침 → ControlTab의 기존 로직 호출."""
         self._tab._on_refresh_thumbnail_requested()
         QTimer.singleShot(500, self._update_media_card)
 
@@ -231,6 +298,7 @@ class CompactBridge(QObject):
         )
         self._sync_preset_list()
         self._sync_color_state()
+        self._sync_mirror_effect_state()  # ★
 
     def notify_tab_changed(self):
         if self._compact.isVisible():
@@ -269,7 +337,6 @@ class CompactBridge(QObject):
             pass
 
     def _update_media_card(self):
-        """★ 미디어 문구/상태를 sourceState 문자열로 전달 (palette 조회 불필요)."""
         if not self._compact.isVisible():
             return
         if not self._tab._media_on or not self._tab._is_running:
@@ -282,7 +349,6 @@ class CompactBridge(QObject):
         if provider is None:
             return
 
-        # ── 소스 상태 + sourceState 문자열 (A1과 동일 로직) ──
         decision = getattr(engine, '_media_detect_decision', "media")
         state = getattr(engine, '_media_detect_state', "idle")
         override = self._tab.section_mirror.combo_media_source.currentData()
@@ -312,7 +378,6 @@ class CompactBridge(QObject):
             source_text = "미러링 사용 중 (고정)"
             source_state = "mirror"
 
-        # ── 곡 정보 ──
         info = provider.get_media_info()
         if info:
             artist = info.get("artist", "")
@@ -328,7 +393,6 @@ class CompactBridge(QObject):
             source_text = "미디어 연동 활성"
             source_state = "active"
 
-        # ── 썸네일 ──
         thumb_pixmap = None
         frame = provider.get_frame()
         if frame is not None:
@@ -345,10 +409,8 @@ class CompactBridge(QObject):
             except Exception:
                 pass
 
-        # ★ source_color 대신 source_state 문자열을 전달
         self._compact.sync_media_info(source_text, source_state, song_text, thumb_pixmap)
 
-        # fix 체크박스 동기화
         current_override = self._tab.section_mirror.combo_media_source.currentData()
         is_fixed = current_override in ("media", "mirror")
         self._compact.chk_media_fix.blockSignals(True)
@@ -373,6 +435,19 @@ class CompactBridge(QObject):
             effect=section._color_effect,
             speed=section.slider_gradient_speed.value(),
         )
+
+    def _sync_mirror_effect_state(self):
+        """★ 미러 효과 콤보 동기화 (초기/전체 동기화용)."""
+        if hasattr(self._tab, 'section_mirror'):
+            effect = self._tab.section_mirror._color_effect
+            self._compact.sync_mirror_effect(effect)
+
+    def _on_main_mirror_effect_changed(self, effect_key):
+        """★ 메인 GUI에서 미러 효과 변경 → 컴팩트에 즉시 반영.
+
+        시그널 기반이므로 폴링 경쟁 상태 없음.
+        """
+        self._compact.sync_mirror_effect(effect_key)
 
     def _get_current_media_decision(self):
         if self._engine_ctrl and self._engine_ctrl.engine:

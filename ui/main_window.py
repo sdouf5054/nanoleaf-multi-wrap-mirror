@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
 
         # ── 색상 상태 (D=OFF) ──
         self._compact_bridge._sync_color_state()
-
+  
         # ── ★ 미디어 카드 (1초마다 = 5틱마다) ──
         self._compact_poll_count += 1
         if self._compact_poll_count >= 5:
