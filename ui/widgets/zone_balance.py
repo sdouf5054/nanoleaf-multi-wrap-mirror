@@ -1,10 +1,16 @@
-"""대역 비율(Zone Balance) 조절 위젯 — Bass/Mid/High 합계 100%."""
+"""대역 비율(Zone Balance) 조절 위젯 — Bass/Mid/High 합계 100%.
+
+[QSS 테마] 라벨 색상을 palette에서 읽도록 전환.
+  - 하드코딩 "#e74c3c" 등 → palette의 bar_bass/bar_mid/bar_high
+  - 테마 전환 시 에너지 바와 라벨 색상이 동시에 반영
+"""
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel
 from PySide6.QtCore import Qt, Signal
 
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.gradient_preview import GradientPreview
+from styles.palette import current as _pal_current
 
 
 class ZoneBalanceWidget(QWidget):
@@ -21,14 +27,23 @@ class ZoneBalanceWidget(QWidget):
         self.gradient_preview = GradientPreview()
         layout.addWidget(self.gradient_preview)
 
+        # ★ palette에서 색상 읽기
+        pal = _pal_current()
+        _BAND_COLORS = {
+            "Bass": pal["bar_bass"],
+            "Mid":  pal["bar_mid"],
+            "High": pal["bar_high"],
+        }
+
         self._sliders = {}
         self._labels = {}
-        for name, default, color in [
-            ("Bass", bass, "#e74c3c"), ("Mid", mid, "#27ae60"), ("High", high, "#3498db"),
-        ]:
+        self._color_labels = {}  # ★ 테마 전환 시 갱신용 참조 보관
+        for name, default in [("Bass", bass), ("Mid", mid), ("High", high)]:
+            color = _BAND_COLORS[name]
             row = QHBoxLayout()
             ln = QLabel(f"{name}:")
             ln.setMinimumWidth(35)
+            # ★ palette 참조 — 인라인이지만 palette에서 읽은 값
             ln.setStyleSheet(f"color:{color};font-weight:bold;")
             row.addWidget(ln)
             s = NoScrollSlider(Qt.Orientation.Horizontal)
@@ -43,7 +58,24 @@ class ZoneBalanceWidget(QWidget):
             layout.addLayout(row)
             self._sliders[name] = s
             self._labels[name] = lv
+            self._color_labels[name] = ln
         self._update_gradient()
+
+    def _refresh_label_colors(self):
+        """★ 테마 전환 시 라벨 색상을 palette에서 다시 읽어 적용."""
+        pal = _pal_current()
+        _BAND_COLORS = {
+            "Bass": pal["bar_bass"],
+            "Mid":  pal["bar_mid"],
+            "High": pal["bar_high"],
+        }
+        for name, ln in self._color_labels.items():
+            ln.setStyleSheet(f"color:{_BAND_COLORS[name]};font-weight:bold;")
+
+    def showEvent(self, event):
+        """위젯이 표시될 때 palette 색상 갱신 — 테마 전환 반영."""
+        super().showEvent(event)
+        self._refresh_label_colors()
 
     def _on_slider_changed(self, changed_name, new_value):
         if self._updating:

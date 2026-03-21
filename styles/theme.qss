@@ -717,6 +717,58 @@ QPushButton#btnAdvanced {{
 QPushButton#btnAdvanced:hover {{ color: {accent_blue_hover}; }}
 
 
+/* ── 2-6a. 미디어 소스 상태 라벨 (property 기반) ── */
+
+QLabel#lblMediaSource {{
+    font-size: 12px;
+    font-weight: bold;
+    border: none;
+    background: transparent;
+}}
+
+QLabel#lblMediaSource[sourceState="active"] {{
+    color: {media_active};
+}}
+
+QLabel#lblMediaSource[sourceState="phase1"] {{
+    color: {media_phase1};
+}}
+
+QLabel#lblMediaSource[sourceState="mirror"] {{
+    color: {media_mirror};
+}}
+
+QLabel#lblMediaSource[sourceState="idle"] {{
+    color: {media_idle};
+}}
+
+
+/* ── 미러링 패널: 미디어 소스 상태 라벨 ── */
+
+QLabel#lblMediaSource {{
+    font-size: 12px;
+    font-weight: bold;
+    border: none;
+    background: transparent;
+}}
+
+QLabel#lblMediaSource[sourceState="active"] {{
+    color: {media_active};
+}}
+
+QLabel#lblMediaSource[sourceState="phase1"] {{
+    color: {media_phase1};
+}}
+
+QLabel#lblMediaSource[sourceState="mirror"] {{
+    color: {media_mirror};
+}}
+
+QLabel#lblMediaSource[sourceState="idle"] {{
+    color: {media_idle};
+}}
+
+
 /* ── 2-7. 에너지 바 ── */
 
 QProgressBar#barBass::chunk {{ background: {bar_bass}; border-radius: 3px; }}
@@ -868,9 +920,11 @@ QLabel#lblFlowingHint {{
     background: transparent;
 }}
 
-/* ── 컴팩트 미디어 소스 버튼 (flat QPushButton) ── */
+
+/* ── 컴팩트 뷰: 미디어 소스 버튼 (기존 셀렉터 교체) ── */
+/* 기존의 고정 color 셀렉터를 삭제하고 아래로 교체하세요 */
+
 #compactMediaSourceBtn {{
-    color: {media_active};
     text-align: left;
     padding: 0;
     border: none;
@@ -878,9 +932,27 @@ QLabel#lblFlowingHint {{
     font-weight: bold;
     font-size: 11px;
 }}
+
 #compactMediaSourceBtn:hover {{
     text-decoration: underline;
 }}
+
+#compactMediaSourceBtn[sourceState="active"] {{
+    color: {media_active};
+}}
+
+#compactMediaSourceBtn[sourceState="phase1"] {{
+    color: {media_phase1};
+}}
+
+#compactMediaSourceBtn[sourceState="mirror"] {{
+    color: {media_mirror};
+}}
+
+#compactMediaSourceBtn[sourceState="idle"] {{
+    color: {media_idle};
+}}
+
 
 /* ── 컴팩트 확장 힌트 (+) ── */
 #compactExpandHint {{

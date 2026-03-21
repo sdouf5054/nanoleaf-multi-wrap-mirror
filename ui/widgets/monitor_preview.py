@@ -1,4 +1,10 @@
-"""모니터 LED 프리뷰 위젯."""
+"""모니터 LED 프리뷰 위젯.
+
+[QSS 테마] paintEvent 색상을 palette에서 읽도록 전환.
+  - 모니터 배경: preview_monitor_bg
+  - LED 미할당 색: preview_led_off
+  - LED 테두리: preview_led_border
+"""
 
 import numpy as np
 from PySide6.QtWidgets import QWidget
@@ -6,6 +12,7 @@ from PySide6.QtGui import QPainter, QColor, QBrush
 from PySide6.QtCore import Qt
 
 from core.layout import get_led_positions
+from styles.palette import current as _pal_current
 
 
 class MonitorPreview(QWidget):
@@ -55,7 +62,8 @@ class MonitorPreview(QWidget):
             self.update()
 
     def _get_led_color(self, li):
-        if self._led_colors is None: return (60, 60, 60)
+        if self._led_colors is None:
+            return None  # ★ None → paintEvent에서 palette 참조
         nc = len(self._led_colors)
         if nc >= self._led_count:
             c = self._led_colors[li]
@@ -64,12 +72,19 @@ class MonitorPreview(QWidget):
         elif nc == 1:
             c = self._led_colors[0]
         else:
-            return (60, 60, 60)
+            return None
         return (int(c[0]), int(c[1]), int(c[2]))
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # ★ palette에서 색상 읽기 — 테마 전환 즉시 반영
+        pal = _pal_current()
+        monitor_bg = QColor(pal["preview_monitor_bg"])
+        led_off_color = QColor(pal["preview_led_off"])
+        led_border_color = QColor(pal["preview_led_border"])
+
         w, h = self.width(), self.height()
         ls, wg = 11, 19
         lm = wg * 2 + 20
@@ -82,9 +97,12 @@ class MonitorPreview(QWidget):
         else:
             mw = aw; mh = int(mw / asp)
         mx, my = (w - mw) // 2, (h - mh) // 2
-        p.setPen(QColor(80, 80, 80))
-        p.setBrush(QBrush(QColor(45, 45, 48)))
+
+        # ★ 모니터 배경 — palette 참조
+        p.setPen(led_border_color)
+        p.setBrush(QBrush(monitor_bg))
         p.drawRoundedRect(mx, my, mw, mh, 3, 3)
+
         if self._positions is None:
             p.end(); return
         hl = ls // 2
@@ -98,8 +116,16 @@ class MonitorPreview(QWidget):
             elif side == "bottom": py = my + mh + d - ls
             elif side == "left": px = mx - d
             elif side == "right": px = mx + mw + d - ls
-            r, g, b = self._get_led_color(i)
-            p.setBrush(QBrush(QColor(r, g, b)))
-            p.setPen(QColor(70, 70, 70))
+
+            rgb = self._get_led_color(i)
+            if rgb is not None:
+                r, g, b = rgb
+                p.setBrush(QBrush(QColor(r, g, b)))
+            else:
+                # ★ LED 미할당 색 — palette 참조
+                p.setBrush(QBrush(led_off_color))
+
+            # ★ LED 테두리 — palette 참조
+            p.setPen(led_border_color)
             p.drawRoundedRect(int(px - hl), int(py - hl), ls, ls, 2, 2)
         p.end()

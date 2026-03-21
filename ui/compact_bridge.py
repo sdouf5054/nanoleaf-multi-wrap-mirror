@@ -7,6 +7,11 @@
 - 프리셋 되돌리기 시 밝기 동기화 누락 수정
 - 새로고침 버튼 시그널 연결 재확인
 - on_compact_shown에서 즉시 미디어+리소스 갱신
+
+[QSS 테마 패치]
+- _update_media_card(): source_color → source_state 문자열로 전환.
+  CompactWindow.sync_media_info()가 property 기반으로 변경되었으므로
+  palette에서 색상을 조회할 필요 없이 상태 문자열만 전달.
 """
 
 import os
@@ -16,7 +21,6 @@ from PySide6.QtWidgets import QColorDialog
 
 from core.preset import list_presets
 from core.media_session import HAS_MEDIA_SESSION
-from styles.palette import current as _pal_current
 
 try:
     import psutil
@@ -191,9 +195,7 @@ class CompactBridge(QObject):
                 break
 
     def _on_compact_media_swap(self):
-        """소스 전환 — 큰 GUI의 '⇄ 전환' 버튼 클릭과 동일.
-        DisplayMirrorSection.btn_toggle_source.click()을 직접 호출.
-        """
+        """소스 전환 — 큰 GUI의 '⇄ 전환' 버튼 클릭과 동일."""
         section = self._tab.section_mirror
         if hasattr(section, 'btn_toggle_source'):
             section.btn_toggle_source.click()
@@ -201,7 +203,6 @@ class CompactBridge(QObject):
     def _on_compact_media_refresh(self):
         """★ 컴팩트 새로고침 → ControlTab의 기존 로직 호출."""
         self._tab._on_refresh_thumbnail_requested()
-        # 즉시 미디어 카드도 갱신
         QTimer.singleShot(500, self._update_media_card)
 
     def _on_compact_close(self):
@@ -268,8 +269,7 @@ class CompactBridge(QObject):
             pass
 
     def _update_media_card(self):
-        """★ 미디어 문구/색상을 기존 DisplayMirrorSection.update_current_source()와
-        완전 동일한 로직으로 구성."""
+        """★ 미디어 문구/상태를 sourceState 문자열로 전달 (palette 조회 불필요)."""
         if not self._compact.isVisible():
             return
         if not self._tab._media_on or not self._tab._is_running:
@@ -282,9 +282,7 @@ class CompactBridge(QObject):
         if provider is None:
             return
 
-        pal = _pal_current()
-
-        # ── 소스 상태 + 색상 (기존 DisplayMirrorSection과 동일) ──
+        # ── 소스 상태 + sourceState 문자열 (A1과 동일 로직) ──
         decision = getattr(engine, '_media_detect_decision', "media")
         state = getattr(engine, '_media_detect_state', "idle")
         override = self._tab.section_mirror.combo_media_source.currentData()
@@ -293,28 +291,28 @@ class CompactBridge(QObject):
             if decision == "media":
                 if state == "phase1":
                     source_text = "미디어 (판별 중...)"
-                    source_color = pal["media_phase1"]
+                    source_state = "phase1"
                 else:
                     source_text = "미디어 사용 중"
-                    source_color = pal["media_active"]
+                    source_state = "active"
             else:
                 if state == "audio_idle":
                     source_text = "미러링 (오디오 무음)"
-                    source_color = pal["media_idle"]
+                    source_state = "idle"
                 elif state == "phase1":
                     source_text = "미러링 (판별 중...)"
-                    source_color = pal["media_phase1"]
+                    source_state = "phase1"
                 else:
                     source_text = "미러링 사용 중"
-                    source_color = pal["media_mirror"]
+                    source_state = "mirror"
         elif override == "media":
             source_text = "미디어 사용 중 (고정)"
-            source_color = pal["media_active"]
+            source_state = "active"
         else:
             source_text = "미러링 사용 중 (고정)"
-            source_color = pal["media_mirror"]
+            source_state = "mirror"
 
-        # ── 곡 정보 (기존 tab_control._update_media_thumbnail과 동일) ──
+        # ── 곡 정보 ──
         info = provider.get_media_info()
         if info:
             artist = info.get("artist", "")
@@ -328,7 +326,7 @@ class CompactBridge(QObject):
         else:
             song_text = "재생 중인 미디어 없음"
             source_text = "미디어 연동 활성"
-            source_color = pal["media_active"]
+            source_state = "active"
 
         # ── 썸네일 ──
         thumb_pixmap = None
@@ -347,7 +345,8 @@ class CompactBridge(QObject):
             except Exception:
                 pass
 
-        self._compact.sync_media_info(source_text, source_color, song_text, thumb_pixmap)
+        # ★ source_color 대신 source_state 문자열을 전달
+        self._compact.sync_media_info(source_text, source_state, song_text, thumb_pixmap)
 
         # fix 체크박스 동기화
         current_override = self._tab.section_mirror.combo_media_source.currentData()

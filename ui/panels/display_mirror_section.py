@@ -28,9 +28,10 @@
 
 [Hotfix] flowing 모드 활성 시 미러링 설정 비활성화
 
-[QSS 테마] 인라인 setStyleSheet → objectName + QSS 기반으로 전환.
-  - 동적 색상 (lbl_media_source, lbl_media_thumbnail 플레이스홀더)은
-    palette.py 참조로 변경.
+[QSS 테마] lbl_media_source 인라인 setStyleSheet 제거.
+  - sourceState property ("active"/"phase1"/"mirror"/"idle") 기반으로 전환.
+  - font-size, font-weight, border, background는 theme.qss에서 처리.
+  - Python에서는 _set_property(widget, "sourceState", value)만 호출.
 """
 
 from PySide6.QtWidgets import (
@@ -47,7 +48,6 @@ from core.engine_utils import (
     COLOR_EFFECT_GRADIENT_CCW,
     gradient_speed_from_slider,
 )
-from styles.palette import current as _pal_current
 
 # ── 구역 수 옵션 ──
 _ZONE_OPTIONS = [
@@ -84,6 +84,13 @@ _MEDIA_SOURCE_KEYS = [k for k, _ in _MEDIA_SOURCE_ITEMS]
 # ── 레이아웃 상수 ──
 _GROUP_MARGINS = (6, 6, 6, 8)
 _GROUP_SPACING = 6
+
+
+def _set_property(widget, name, value):
+    """QSS dynamic property를 설정하고 스타일을 다시 적용."""
+    widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
 
 
 class DisplayMirrorSection(QWidget):
@@ -142,12 +149,11 @@ class DisplayMirrorSection(QWidget):
         text_col.setContentsMargins(0, 0, 0, 0)
         text_col.setSpacing(2)
 
+        # ★ 소스 라벨 — objectName + sourceState property 기반
+        #   인라인 setStyleSheet 제거 → theme.qss에서 처리
         self.lbl_media_source = QLabel("미디어 연동 활성")
         self.lbl_media_source.setObjectName("lblMediaSource")
-        self.lbl_media_source.setStyleSheet(
-            f"color:{_pal_current()['media_active']};font-size:11px;font-weight:bold;"
-            "border:none;background:transparent;"
-        )
+        _set_property(self.lbl_media_source, "sourceState", "active")
         text_col.addWidget(self.lbl_media_source)
 
         self.lbl_media_song = QLabel("")
@@ -429,7 +435,7 @@ class DisplayMirrorSection(QWidget):
         self.slider_smoothing.setEnabled(not active)
         self.lbl_flowing_hint.setVisible(active)
 
-    # ── ★ 미디어 연동 소스 상태 ──────────────────────────────────
+    # ── ★ 미디어 연동 소스 상태 — QSS property 기반 ──────────────
 
     def set_media_active(self, active):
         self._media_active = active
@@ -437,10 +443,8 @@ class DisplayMirrorSection(QWidget):
             self._media_card.setVisible(True)
             self._lbl_source_off.setVisible(False)
             self.lbl_media_source.setText("미디어 연동 활성")
-            self.lbl_media_source.setStyleSheet(
-                f"color:{_pal_current()['media_active']};font-size:12px;font-weight:bold;"
-                "border:none;background:transparent;"
-            )
+            # ★ property 기반 — 인라인 setStyleSheet 제거
+            _set_property(self.lbl_media_source, "sourceState", "active")
             self.lbl_media_song.setText("미디어 정보 대기 중...")
             self.lbl_media_thumbnail.setText("♪")
             self._media_source_row.setVisible(True)
@@ -454,33 +458,34 @@ class DisplayMirrorSection(QWidget):
             self._media_source_row.setVisible(False)
 
     def update_current_source(self, decision, state):
-        """★ 현재 실제 소스 판별 결과를 라벨에 실시간 표시."""
+        """★ 현재 실제 소스 판별 결과를 라벨에 실시간 표시.
+
+        QSS property(sourceState)로 색상 전환 — 인라인 setStyleSheet 없음.
+        """
         if not self._media_active:
             return
 
         if decision == "media":
             if state == "phase1":
                 text = "미디어 (판별 중...)"
-                color = _pal_current()["media_phase1"]
+                source_state = "phase1"
             else:
                 text = "미디어 사용 중"
-                color = _pal_current()["media_active"]
+                source_state = "active"
         else:
             if state == "audio_idle":
                 text = "미러링 (오디오 무음)"
-                color = _pal_current()["media_idle"]
+                source_state = "idle"
             elif state == "phase1":
                 text = "미러링 (판별 중...)"
-                color = _pal_current()["media_phase1"]
+                source_state = "phase1"
             else:
                 text = "미러링 사용 중"
-                color = _pal_current()["media_mirror"]
+                source_state = "mirror"
 
         self.lbl_media_source.setText(text)
-        self.lbl_media_source.setStyleSheet(
-            f"color:{color};font-size:12px;font-weight:bold;"
-            "border:none;background:transparent;"
-        )
+        # ★ property 기반 — theme.qss의 QLabel#lblMediaSource[sourceState=...] 셀렉터
+        _set_property(self.lbl_media_source, "sourceState", source_state)
 
     def update_media_thumbnail(self, frame):
         """앨범아트 프레임을 썸네일로 표시."""

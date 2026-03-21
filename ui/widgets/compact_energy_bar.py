@@ -3,6 +3,10 @@
 QPainter 기반. 높이 14px. 색상으로 구분 (빨강=Bass, 초록=Mid, 파랑=High).
 라벨을 제거하여 왼쪽 여백 없이 바가 전체 폭을 사용.
 
+[QSS 테마] 하드코딩 QColor → palette 참조로 전환.
+  - bar_bass / bar_mid / bar_high / bar_bg 키 사용
+  - paintEvent에서 매번 palette를 읽어 테마 전환 즉시 반영
+
 사용법:
     bar = CompactEnergyBar()
     bar.set_values(0.8, 0.4, 0.2)
@@ -12,11 +16,7 @@ from PySide6.QtWidgets import QWidget
 from PySide6.QtGui import QPainter, QColor, QBrush
 from PySide6.QtCore import Qt, QRectF
 
-
-_COLOR_BASS = QColor("#e74c3c")
-_COLOR_MID = QColor("#27ae60")
-_COLOR_HIGH = QColor("#3498db")
-_COLOR_BG = QColor(55, 55, 60)
+from styles.palette import current as _pal_current
 
 
 class CompactEnergyBar(QWidget):
@@ -42,6 +42,13 @@ class CompactEnergyBar(QWidget):
             return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        # ★ palette에서 색상을 매번 읽음 — 테마 전환 즉시 반영
+        pal = _pal_current()
+        color_bass = QColor(pal["bar_bass"])
+        color_mid = QColor(pal["bar_mid"])
+        color_high = QColor(pal["bar_high"])
+        color_bg = QColor(pal["bar_bg"])
+
         w = self.width()
         h = self.height()
 
@@ -50,9 +57,9 @@ class CompactEnergyBar(QWidget):
         bar_r = 3          # 라운드
 
         sections = [
-            (self._bass, _COLOR_BASS),
-            (self._mid, _COLOR_MID),
-            (self._high, _COLOR_HIGH),
+            (self._bass, color_bass),
+            (self._mid, color_mid),
+            (self._high, color_high),
         ]
         n = len(sections)
         total_gap = gap * (n - 1)
@@ -64,7 +71,7 @@ class CompactEnergyBar(QWidget):
         for value, color in sections:
             # 배경
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QBrush(_COLOR_BG))
+            p.setBrush(QBrush(color_bg))
             p.drawRoundedRect(QRectF(x, bar_y, bar_w, bar_h), bar_r, bar_r)
 
             # 값

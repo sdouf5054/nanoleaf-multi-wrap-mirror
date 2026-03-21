@@ -3,10 +3,12 @@
 QCheckBox를 상속하여 기존 시그널(stateChanged, toggled) 사용 가능.
 스타일시트 indicator 대신 직접 그려서 QPainter engine==0 경고 방지.
 
-[QSS 테마] paintEvent 텍스트 색상을 palette에서 읽도록 변경.
-  - QColor("#000000") → self.palette().color(QPalette.ColorRole.WindowText)
-  - QSS ToggleSwitch { color: ... } 가 반영됨.
-  - __init__의 인라인 setStyleSheet() 제거 → dark.qss의 ToggleSwitch 셀렉터로 이전.
+[QSS 테마] paintEvent의 모든 색상을 palette에서 읽도록 변경.
+  - 트랙 ON: accent_blue
+  - 트랙 OFF: slider_groove
+  - 트랙 테두리: border_light
+  - 놉: 흰색 고정 (테마 무관 — 항상 대비 확보)
+  - 텍스트: QPalette.WindowText (QSS color 속성 반영)
 
 사용법:
     toggle = ToggleSwitch("디스플레이 미러링")
@@ -17,6 +19,8 @@ QCheckBox를 상속하여 기존 시그널(stateChanged, toggled) 사용 가능.
 from PySide6.QtWidgets import QCheckBox
 from PySide6.QtCore import Qt, QRectF, QSize
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPalette
+
+from styles.palette import current as _pal_current
 
 
 class ToggleSwitch(QCheckBox):
@@ -29,7 +33,6 @@ class ToggleSwitch(QCheckBox):
 
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
-        # ★ 인라인 setStyleSheet 제거 → dark.qss의 ToggleSwitch 셀렉터로 이전
 
     def sizeHint(self):
         base = super().sizeHint()
@@ -44,6 +47,7 @@ class ToggleSwitch(QCheckBox):
             return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
+        pal = _pal_current()
         checked = self.isChecked()
         tw, th = self._TRACK_W, self._TRACK_H
         km = self._KNOB_MARGIN
@@ -52,17 +56,19 @@ class ToggleSwitch(QCheckBox):
         # 트랙 위치: 수직 중앙
         y = (self.height() - th) / 2
 
-        # ── 트랙 ──
+        # ── 트랙 — palette 참조 ──
         track_rect = QRectF(0, y, tw, th)
         if checked:
-            track_color = QColor("#2e86c1")
+            track_color = QColor(pal["accent_blue"])
         else:
-            track_color = QColor("#3a3a42")
-        painter.setPen(QPen(QColor("#555") if not checked else track_color, 1))
+            track_color = QColor(pal["slider_groove"])
+
+        border_color = QColor(pal["border_light"]) if not checked else track_color
+        painter.setPen(QPen(border_color, 1))
         painter.setBrush(QBrush(track_color))
         painter.drawRoundedRect(track_rect, th / 2, th / 2)
 
-        # ── 놉 ──
+        # ── 놉 — 흰색 고정 (테마 무관, 항상 대비 확보) ──
         if checked:
             knob_x = tw - km - knob_d
         else:
@@ -72,10 +78,9 @@ class ToggleSwitch(QCheckBox):
         painter.setBrush(QBrush(QColor("#ffffff")))
         painter.drawEllipse(knob_rect)
 
-        # ── 텍스트 ──
+        # ── 텍스트 — QPalette에서 읽음 (QSS color 반영) ──
         text = self.text()
         if text:
-            # ★ 팔레트에서 텍스트 색상을 읽음 → QSS color 속성이 반영됨
             text_color = self.palette().color(QPalette.ColorRole.WindowText)
             painter.setPen(text_color)
             font = self.font()

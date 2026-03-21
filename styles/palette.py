@@ -147,6 +147,11 @@ DARK = {
     "compact_thumb_bg":     "#3a3a42",
     "compact_song":         "#aaaaaa",
     "compact_fix":          "#bbbbbb",
+
+    # ── ★ LED 프리뷰 (monitor_preview) ──
+    "preview_monitor_bg":   "#2d2d30",
+    "preview_led_off":      "#505055",
+    "preview_led_border":   "#464648",
 }
 
 
@@ -264,4 +269,9 @@ LIGHT = {
     "compact_thumb_bg":     "#eeeeee",
     "compact_song":         "#666666",
     "compact_fix":          "#888888",
+
+    # ── ★ LED 프리뷰 (monitor_preview) ──
+    "preview_monitor_bg":   "#d8d8dc",
+    "preview_led_off":      "#505055",
+    "preview_led_border":   "#464648",
 }
