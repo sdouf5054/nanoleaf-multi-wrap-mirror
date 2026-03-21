@@ -14,18 +14,14 @@
 4. 모드 세부 설정 (모드별 조건부 표시):
    - Wave: wave 속도
    - Spectrum/BassDetail: 대역 비율
-   - Flowing: palette 프리뷰 + 갱신 주기 + 흐름 속도
+   - Flowing: 팔레트 프리뷰만 (갱신 주기/흐름 속도는 미러링 패널로 이동)
 
-[변경]
-- ★ min_brightness를 모드별로 독립 저장/로드
-- ★ 기본 모드 버튼/힌트 제거 (프리셋 ⭐ 기본 기능으로 대체)
-- ★ collect_for_preset() + apply_from_preset() 추가
-
-[QSS 테마] 인라인 setStyleSheet → objectName + property 기반으로 전환.
-  - 에너지 바: objectName barBass/barMid/barHigh → QSS chunk 색상
-  - 섹션 헤더: setProperty("role", "sectionHeader")
-  - 힌트 라벨: setProperty("role", "hint")
-  - _make_bar()에서 인라인 스타일 제거
+[★ Mirror Flowing 변경]
+- Flowing 설정(갱신 주기, 흐름 속도)을 DisplayMirrorSection으로 이동
+  → 미러 flowing + 하이브리드 오디오 flowing 공용
+- 이 패널에는 팔레트 프리뷰만 유지
+- collect_params()에서 flowing_interval/flowing_speed 제거
+  → EngineParams 빌드 시 미러링 섹션의 display_params에서 가져옴
 """
 
 from PySide6.QtWidgets import (
@@ -37,7 +33,6 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from ui.widgets.no_scroll_slider import NoScrollSlider
 from ui.widgets.spectrum import SpectrumWidget
 from ui.widgets.zone_balance import ZoneBalanceWidget
-from ui.widgets.flow_palette_preview import FlowPalettePreview
 from core.engine_utils import wave_speed_from_slider
 from core.config import save_config
 
@@ -279,55 +274,20 @@ class AudioReactiveSection(QWidget):
         parent_layout.addWidget(self._zone_container)
         self._zone_container.setVisible(False)
 
-        # ── Flowing 설정 ──
+        # ── ★ Flowing — 힌트만 (설정+팔레트는 미러링 패널로 이동) ──
         self._flowing_container = QWidget()
         fl = QVBoxLayout(self._flowing_container)
         fl.setContentsMargins(0, 0, 0, 0)
         fl.setSpacing(3)
-        lbl_flow = QLabel("Flowing 설정")
-        lbl_flow.setProperty("role", "sectionHeader")
-        fl.addWidget(lbl_flow)
 
-        pal_row = QHBoxLayout()
-        pal_row.addWidget(QLabel("현재 팔레트:"))
-        self.flow_palette_preview = FlowPalettePreview(n_swatches=5)
-        pal_row.addWidget(self.flow_palette_preview, 1)
-        fl.addLayout(pal_row)
-
-        fi_row = QHBoxLayout()
-        fi_row.addWidget(QLabel("갱신 주기:"))
-        self.slider_flowing_interval = NoScrollSlider(Qt.Orientation.Horizontal)
-        self.slider_flowing_interval.setRange(10, 100)
-        self.slider_flowing_interval.setValue(30)
-        self.slider_flowing_interval.valueChanged.connect(self._on_param_changed)
-        fi_row.addWidget(self.slider_flowing_interval)
-        self.lbl_flowing_interval = QLabel("3.0초")
-        self.lbl_flowing_interval.setMinimumWidth(40)
-        self.lbl_flowing_interval.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        fi_row.addWidget(self.lbl_flowing_interval)
-        fl.addLayout(fi_row)
-
-        fs_row = QHBoxLayout()
-        fs_row.addWidget(QLabel("흐름 속도:"))
-        self.slider_flowing_speed = NoScrollSlider(Qt.Orientation.Horizontal)
-        self.slider_flowing_speed.setRange(0, 100)
-        self.slider_flowing_speed.setValue(50)
-        self.slider_flowing_speed.valueChanged.connect(self._on_param_changed)
-        fs_row.addWidget(self.slider_flowing_speed)
-        self.lbl_flowing_speed = QLabel("50%")
-        self.lbl_flowing_speed.setMinimumWidth(40)
-        self.lbl_flowing_speed.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        fs_row.addWidget(self.lbl_flowing_speed)
-        fl.addLayout(fs_row)
-
-        hint_f = QLabel("갱신 주기 ↑ = 안정적 · 속도 ↑ = 빠른 회전")
+        hint_f = QLabel("Flowing 설정 · 팔레트 프리뷰는 미러링 패널에 있습니다")
         hint_f.setProperty("role", "hint")
         fl.addWidget(hint_f)
         parent_layout.addWidget(self._flowing_container)
         self._flowing_container.setVisible(False)
 
     # ══════════════════════════════════════════════════════════════
-    #  이벤트 — 원본과 동일 (변경 없음)
+    #  이벤트
     # ══════════════════════════════════════════════════════════════
 
     def _on_mode_changed(self, idx):
@@ -356,8 +316,6 @@ class AudioReactiveSection(QWidget):
         self.lbl_attack.setText(f"{self.slider_attack.value() / 100:.2f}")
         self.lbl_release.setText(f"{self.slider_release.value() / 100:.2f}")
         self.lbl_wave_speed.setText(f"{self.slider_wave_speed.value()}%")
-        self.lbl_flowing_interval.setText(f"{self.slider_flowing_interval.value() / 10:.1f}초")
-        self.lbl_flowing_speed.setText(f"{self.slider_flowing_speed.value()}%")
 
     def _update_mode_visibility(self):
         mode = self._mode_key
@@ -381,7 +339,7 @@ class AudioReactiveSection(QWidget):
         self._flowing_container.setVisible(is_flowing)
 
     # ══════════════════════════════════════════════════════════════
-    #  디스플레이 토글 연동 — 원본과 동일
+    #  디스플레이 토글 연동
     # ══════════════════════════════════════════════════════════════
 
     def set_display_enabled(self, enabled):
@@ -398,7 +356,7 @@ class AudioReactiveSection(QWidget):
                     self.combo_audio_mode.setCurrentIndex(0)
 
     # ══════════════════════════════════════════════════════════════
-    #  에너지 / 스펙트럼 갱신 — 원본과 동일
+    #  에너지 / 스펙트럼 갱신
     # ══════════════════════════════════════════════════════════════
 
     def update_energy(self, bass, mid, high):
@@ -409,12 +367,8 @@ class AudioReactiveSection(QWidget):
     def update_spectrum(self, spec):
         self.spectrum_widget.set_values(spec)
 
-    def update_flow_palette(self, colors, ratios=None):
-        if self.flow_palette_preview.isVisible():
-            self.flow_palette_preview.set_colors(colors, ratios)
-
     # ══════════════════════════════════════════════════════════════
-    #  모드별 파라미터 저장/로드 — 원본과 동일
+    #  모드별 파라미터 저장/로드
     # ══════════════════════════════════════════════════════════════
 
     def _save_mode_params(self, mode_name):
@@ -455,10 +409,11 @@ class AudioReactiveSection(QWidget):
         self._updating = False
 
     # ══════════════════════════════════════════════════════════════
-    #  프리셋 수집/적용 — 원본과 동일
+    #  프리셋 수집/적용
     # ══════════════════════════════════════════════════════════════
 
     def collect_for_preset(self):
+        """★ flowing_interval/flowing_speed 제거 — 미러링 섹션에서 수집."""
         zb, zm, zh = self.zone_balance.get_values()
         return {
             "audio_mode": self._mode_key,
@@ -470,11 +425,10 @@ class AudioReactiveSection(QWidget):
             "release": self.slider_release.value(),
             "zone_weights": [zb, zm, zh],
             "wave_speed": self.slider_wave_speed.value(),
-            "flowing_interval": self.slider_flowing_interval.value(),
-            "flowing_speed": self.slider_flowing_speed.value(),
         }
 
     def apply_from_preset(self, data):
+        """★ flowing_interval/flowing_speed 제거 — 미러링 섹션에서 적용."""
         self._updating = True
 
         if "audio_mode" in data:
@@ -525,26 +479,17 @@ class AudioReactiveSection(QWidget):
             self.slider_wave_speed.setValue(int(data["wave_speed"]))
             self.slider_wave_speed.blockSignals(False)
 
-        if "flowing_interval" in data:
-            self.slider_flowing_interval.blockSignals(True)
-            self.slider_flowing_interval.setValue(int(data["flowing_interval"]))
-            self.slider_flowing_interval.blockSignals(False)
-
-        if "flowing_speed" in data:
-            self.slider_flowing_speed.blockSignals(True)
-            self.slider_flowing_speed.setValue(int(data["flowing_speed"]))
-            self.slider_flowing_speed.blockSignals(False)
-
         self._update_labels()
         self._update_mode_visibility()
 
         self._updating = False
 
     # ══════════════════════════════════════════════════════════════
-    #  collect / apply / load — 원본과 동일
+    #  collect / apply / load
     # ══════════════════════════════════════════════════════════════
 
     def collect_params(self):
+        """★ flowing_interval/flowing_speed 제거 — 미러링 섹션의 collect_params()에서 제공."""
         zb, zm, zh = self.zone_balance.get_values()
         return {
             "audio_mode": self._mode_key,
@@ -556,21 +501,13 @@ class AudioReactiveSection(QWidget):
             "release": self.slider_release.value() / 100.0,
             "zone_weights": (zb, zm, zh),
             "wave_speed": wave_speed_from_slider(self.slider_wave_speed.value()),
-            "flowing_interval": self.slider_flowing_interval.value() / 10.0,
-            "flowing_speed": self._flowing_speed_from_slider(),
         }
-
-    def _flowing_speed_from_slider(self):
-        t = self.slider_flowing_speed.value() / 100.0
-        return 0.02 + t * 0.18
 
     def apply_to_config(self):
         self._save_mode_params(self._mode_key)
         state = self._config.setdefault("options", {}).setdefault("audio_state", {})
         state["sub_mode"] = self._mode_key
         state["min_brightness"] = self.slider_min_brightness.value()
-        state["flowing_interval"] = self.slider_flowing_interval.value()
-        state["flowing_speed"] = self.slider_flowing_speed.value()
 
     def load_from_config(self):
         state = self._config.get("options", {}).get("audio_state", {})
@@ -586,13 +523,6 @@ class AudioReactiveSection(QWidget):
         self.combo_audio_mode.setCurrentIndex(_MODE_TO_INDEX.get(initial_mode, 0))
         self.combo_audio_mode.blockSignals(False)
 
-        self.slider_flowing_interval.blockSignals(True)
-        self.slider_flowing_interval.setValue(state.get("flowing_interval", 30))
-        self.slider_flowing_interval.blockSignals(False)
-        self.slider_flowing_speed.blockSignals(True)
-        self.slider_flowing_speed.setValue(state.get("flowing_speed", 50))
-        self.slider_flowing_speed.blockSignals(False)
-
         self._load_mode_params(initial_mode)
         self._update_mode_visibility()
         self._update_labels()
@@ -606,14 +536,12 @@ class AudioReactiveSection(QWidget):
 
     @staticmethod
     def _make_bar(grid, row, name, object_name):
-        """★ 에너지 바 생성 — objectName 기반, 인라인 스타일 없음."""
         grid.addWidget(QLabel(name), row, 0)
         bar = QProgressBar()
         bar.setObjectName(object_name)
         bar.setRange(0, 100)
         bar.setTextVisible(False)
         bar.setFixedHeight(14)
-        # ★ 인라인 setStyleSheet 제거 → dark.qss의 QProgressBar#barBass 등으로 이전
         grid.addWidget(bar, row, 1)
         return bar
 

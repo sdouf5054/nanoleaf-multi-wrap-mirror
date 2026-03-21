@@ -8,6 +8,11 @@ engine_utils.py에서 분리. hsv_utils + audio_render 의존.
   build_base_color_array_animated    — 시간 기반 색상 효과
   apply_mirror_gradient_modulation   — 미러링 HSV 변조
   _has_mirror_gradient_effect        — 효과 활성 판단
+
+[Mirror Flowing 추가]
+- COLOR_EFFECT_FLOWING 상수 추가
+- _has_mirror_gradient_effect()에서 flowing은 별도 경로이므로 False 반환 유지
+  → flowing은 gradient 변조가 아닌 FlowPalette 렌더링을 사용하기 때문
 """
 
 import numpy as np
@@ -25,6 +30,7 @@ COLOR_EFFECT_STATIC = "static"
 COLOR_EFFECT_GRADIENT_CW = "gradient_cw"
 COLOR_EFFECT_GRADIENT_CCW = "gradient_ccw"
 COLOR_EFFECT_RAINBOW_TIME = "rainbow_time"
+COLOR_EFFECT_FLOWING = "flowing"  # ★ 미러링 전용 flowing (오디오 반응 없음)
 
 # 그라데이션 물결 파라미터
 _GRADIENT_V_PHASE_OFFSET = np.pi / 3
@@ -89,6 +95,7 @@ def build_base_color_array_animated(
     """시간 기반 색상 효과가 적용된 base_colors 생성.
 
     color_effect가 "static"이면 기존 build_base_color_array()와 동일.
+    ★ "flowing"은 이 함수로 처리하지 않음 — FlowPalette 경로를 사용.
     """
     if screen_colors is not None:
         return screen_colors.copy()
@@ -154,7 +161,7 @@ def build_base_color_array_animated(
             v = np.clip(base_v * v_mod, 0, 1)
             return _hsv_to_rgb_array(h, s, v)
 
-    # fallback
+    # fallback (flowing 포함 — flowing은 이 함수에서 처리하지 않으므로 static fallback)
     return build_base_color_array(
         led_band_indices, n_bands,
         rainbow=rainbow, solid_color=solid_color,
@@ -166,8 +173,13 @@ def build_base_color_array_animated(
 # ══════════════════════════════════════════════════════════════════
 
 def _has_mirror_gradient_effect(color_effect, gradient_sv_range, gradient_hue_range):
-    """미러링 그라데이션 효과가 실질적으로 활성화되어 있는지 판단."""
+    """미러링 그라데이션 효과가 실질적으로 활성화되어 있는지 판단.
+
+    ★ flowing은 gradient 변조가 아닌 별도 FlowPalette 경로이므로 False.
+    """
     if color_effect == COLOR_EFFECT_STATIC:
+        return False
+    if color_effect == COLOR_EFFECT_FLOWING:
         return False
     if color_effect not in (COLOR_EFFECT_GRADIENT_CW, COLOR_EFFECT_GRADIENT_CCW):
         return False

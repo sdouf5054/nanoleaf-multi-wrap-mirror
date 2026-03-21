@@ -61,7 +61,9 @@ def _qt_message_handler(mode, context, message):
         return
     # QPainter 스타일 캐시 경고 무시 (Windows Fusion 스타일 + 스타일시트 조합에서
     # Qt가 내부 QPixmap 캐시에 그릴 때 발생하는 cosmetic 경고. 기능 영향 없음.)
-    if "QPainter" in message:
+    if "QPainter" in message: 
+        return
+    if "CreateFontFaceFromHDC" in message: # Windows에서 폰트 렌더링 시 발생하는 경고. 기능 영향 없음.
         return
     # 나머지 메시지는 stderr로 출력
     import sys as _sys

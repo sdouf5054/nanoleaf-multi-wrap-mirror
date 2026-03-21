@@ -120,6 +120,7 @@ from core.color_effects import (  # noqa: E402, F401
     COLOR_EFFECT_GRADIENT_CW,
     COLOR_EFFECT_GRADIENT_CCW,
     COLOR_EFFECT_RAINBOW_TIME,
+    COLOR_EFFECT_FLOWING,          # ★ 미러링 전용 flowing
     GradientPhase,
     gradient_speed_from_slider,
     build_base_color_array_animated,

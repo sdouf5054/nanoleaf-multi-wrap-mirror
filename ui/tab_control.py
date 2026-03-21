@@ -460,6 +460,10 @@ class ControlTab(QWidget):
         self.section_mirror.params_changed.connect(self._on_display_params_changed)
         self.section_mirror.layout_params_changed.connect(self._on_layout_changed)
         self.section_mirror.zone_count_changed.connect(self._on_zone_count_changed)
+        # ★ 색상 효과 변경 시그널 연결 (미러 flowing 동기화)
+        self.section_mirror.color_effect_changed.connect(
+            self._on_mirror_color_effect_changed
+        )
         # ★ 썸네일 새로고침 시그널 연결
         self.section_mirror.refresh_thumbnail_requested.connect(
             self._on_refresh_thumbnail_requested
@@ -961,6 +965,22 @@ class ControlTab(QWidget):
         self._update_toggle_panels(animate=True)
         if checked and self._display_on and hasattr(self, 'section_audio'):
             self.section_audio.set_display_enabled(self._display_on)
+ 
+        # ★ 오디오 ON + 색상 효과 flowing → 오디오 모드를 flowing으로 강제
+        if (checked and self._display_on
+                and hasattr(self, 'section_mirror')
+                and self.section_mirror.is_mirror_flowing):
+            from ui.panels.audio_reactive_section import _MODE_TO_INDEX
+            self.section_audio._save_mode_params(self.section_audio._mode_key)
+            self.section_audio._mode_key = "flowing"
+            self.section_audio._load_mode_params("flowing")
+            self.section_audio.combo_audio_mode.blockSignals(True)
+            self.section_audio.combo_audio_mode.setCurrentIndex(
+                _MODE_TO_INDEX.get("flowing", 5)
+            )
+            self.section_audio.combo_audio_mode.blockSignals(False)
+            self.section_audio._update_mode_visibility()
+ 
         self._sync_flowing_state()
         self._check_preset_modified()
         if self._is_running:
@@ -1153,8 +1173,57 @@ class ControlTab(QWidget):
             self._push_params_to_engine()
 
     def _on_audio_mode_changed(self, mode_key):
+        # ★ 오디오 모드 ↔ 미러 색상 효과 양방향 동기화
+        if hasattr(self, 'section_mirror'):
+            self.section_mirror.on_audio_mode_changed(mode_key)
         self._sync_flowing_state()
         self._check_preset_modified()
+
+    def _on_mirror_color_effect_changed(self, effect_key):
+        """★ 미러링 색상 효과 변경 시 호출.
+
+        하이브리드(D+A ON)에서 색상 효과가 flowing으로 바뀌면
+        오디오 모드도 flowing으로 강제 동기화.
+        flowing이 아닌 효과로 바뀌면 오디오 모드가 flowing일 때 pulse로 전환.
+        """
+        if not self._audio_on or not self._display_on:
+            # 오디오 OFF일 때는 동기화 불필요 — 미러 flowing이 독립 동작
+            if self._is_running:
+                self._push_params_to_engine()
+            return
+
+        from ui.panels.audio_reactive_section import _MODE_TO_INDEX
+        from core.engine_utils import COLOR_EFFECT_FLOWING
+
+        if effect_key == COLOR_EFFECT_FLOWING:
+            # 색상 효과 flowing → 오디오 모드도 flowing으로 강제
+            if self.section_audio._mode_key != "flowing":
+                self.section_audio._save_mode_params(self.section_audio._mode_key)
+                self.section_audio._mode_key = "flowing"
+                self.section_audio._load_mode_params("flowing")
+                self.section_audio.combo_audio_mode.blockSignals(True)
+                self.section_audio.combo_audio_mode.setCurrentIndex(
+                    _MODE_TO_INDEX.get("flowing", 5)
+                )
+                self.section_audio.combo_audio_mode.blockSignals(False)
+                self.section_audio._update_mode_visibility()
+        else:
+            # 색상 효과 flowing 해제 → 오디오 flowing이면 pulse로 전환
+            if self.section_audio._mode_key == "flowing":
+                self.section_audio._save_mode_params("flowing")
+                self.section_audio._mode_key = "pulse"
+                self.section_audio._load_mode_params("pulse")
+                self.section_audio.combo_audio_mode.blockSignals(True)
+                self.section_audio.combo_audio_mode.setCurrentIndex(
+                    _MODE_TO_INDEX.get("pulse", 0)
+                )
+                self.section_audio.combo_audio_mode.blockSignals(False)
+                self.section_audio._update_mode_visibility()
+
+        self._sync_flowing_state()
+        self._check_preset_modified()
+        if self._is_running:
+            self._push_params_to_engine()
 
     def _on_preview_toggled(self, checked):
         self.monitor_preview.setVisible(checked)
@@ -1329,13 +1398,14 @@ class ControlTab(QWidget):
             self.section_audio.update_energy(bass, mid, high)
 
     def update_spectrum(self, spec):
-        if hasattr(self, 'section_audio'):
-            if isinstance(spec, dict) and spec.get("type") == "flow_palette":
-                self.section_audio.update_flow_palette(
+        if isinstance(spec, dict) and spec.get("type") == "flow_palette":
+            # ★ 팔레트 프리뷰가 미러링 패널로 이동
+            if hasattr(self, 'section_mirror'):
+                self.section_mirror.update_flow_palette(
                     spec["colors"], spec.get("ratios")
                 )
-            else:
-                self.section_audio.update_spectrum(spec)
+        elif hasattr(self, 'section_audio'):
+            self.section_audio.update_spectrum(spec)
 
     def update_pause_button(self, is_paused):
         self.btn_pause.setText("▶ 재개" if is_paused else "∥ 일시정지")
@@ -1363,14 +1433,25 @@ class ControlTab(QWidget):
     # ══════════════════════════════════════════════════════════════
 
     def _build_engine_params(self):
+        display_params = None
+        audio_params = None
+ 
+        if self._display_on:
+            display_params = self.section_mirror.collect_params()
+ 
+        if self._audio_on:
+            audio_params = self.section_audio.collect_params()
+            # ★ flowing 파라미터는 display_params에서 제공됨 (미러링 패널 UI).
+            #   display OFF일 때는 flowing 자체가 불가능하므로 문제 없음.
+ 
         return self._params_builder.build(
             display_enabled=self._display_on,
             audio_enabled=self._audio_on,
             media_color_enabled=self._media_on,
             master_brightness=self.slider_master_brightness.value() / 100.0,
-            display_params=self.section_mirror.collect_params() if self._display_on else None,
+            display_params=display_params,
             color_params=self.section_color.collect_params() if not self._display_on else None,
-            audio_params=self.section_audio.collect_params() if self._audio_on else None,
+            audio_params=audio_params,
         )
 
     def _push_params_to_engine(self):
