@@ -360,7 +360,7 @@ class MainWindow(QMainWindow):
             # 메인 윈도우 우측에 배치
             main_geo = self.geometry()
             x = main_geo.right() + 10
-            y = main_geo.top()
+            y = main_geo.top() - 30
         else:
             # 화면 우측 하단
             screen = QApplication.primaryScreen()
