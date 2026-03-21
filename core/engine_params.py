@@ -18,6 +18,11 @@
   → "media": 항상 앨범아트 사용 (강제)
   → "mirror": 항상 미러링 사용 (강제)
 
+[min_brightness_mode 추가]
+- min_brightness_mode: str = "floor"
+  → "floor": 기존 방식. max(min_b, energy) — min_b 이하 클램핑
+  → "remap": min_b + energy * (1.0 - min_b) — 전 구간 선형 리매핑
+
 [설계 원칙]
 - frozen=True: UI가 빌드한 스냅샷을 엔진이 atomic swap
 - 모든 필드에 안전한 기본값 → UI에서 부분 갱신 시에도 동작
@@ -73,6 +78,7 @@ class EngineParams:
     # ── 오디오 계열 ──
     audio_mode: str = "pulse"         # pulse, spectrum, bass_detail, wave, dynamic, flowing
     min_brightness: float = 0.02      # 오디오 최소 밝기
+    min_brightness_mode: str = "remap"  # ★ "floor" | "remap"
     bass_sensitivity: float = 1.0
     mid_sensitivity: float = 1.0
     high_sensitivity: float = 1.0

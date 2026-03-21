@@ -1434,6 +1434,7 @@ class UnifiedEngine(BaseEngine):
                 self._wave_pulses,
                 ep.min_brightness, ep.master_brightness,
                 speed=ep.wave_speed,
+                min_brightness_mode=ep.min_brightness_mode,
             )
 
         elif audio_mode == AUDIO_DYNAMIC:
@@ -1456,6 +1457,7 @@ class UnifiedEngine(BaseEngine):
                 frame_base_colors, self._dyn_clockwise_t,
                 self._dyn_ripples, high,
                 ep.min_brightness, ep.master_brightness,
+                min_brightness_mode=ep.min_brightness_mode,
             )
 
         elif audio_mode == AUDIO_FLOWING and ep.display_enabled:
@@ -1471,19 +1473,23 @@ class UnifiedEngine(BaseEngine):
             return vectorized_render_spectrum(
                 frame_base_colors, self._led_band_indices,
                 bd_spec, ep.min_brightness, ep.master_brightness,
+                min_brightness_mode=ep.min_brightness_mode,
             )
 
         elif audio_mode == AUDIO_SPECTRUM:
             return vectorized_render_spectrum(
                 frame_base_colors, self._led_band_indices,
                 spec, ep.min_brightness, ep.master_brightness,
+                min_brightness_mode=ep.min_brightness_mode,
             )
 
         else:  # AUDIO_PULSE (또는 flowing + D=OFF → pulse fallback)
             return vectorized_render_pulse(
                 frame_base_colors, bass, mid, high,
                 ep.min_brightness, ep.master_brightness,
+                min_brightness_mode=ep.min_brightness_mode,
             )
+ 
 
     def _render_flowing_mode(self, ep, bass, mid, high,
                              frame_interval, loop_start, frame_base_colors):
@@ -1515,6 +1521,7 @@ class UnifiedEngine(BaseEngine):
             raw_rgb = vectorized_render_pulse(
                 frame_base_colors, bass, mid, high,
                 ep.min_brightness, ep.master_brightness,
+                min_brightness_mode=ep.min_brightness_mode,
             )
             self._flow_palette_colors = None
             self._flow_palette_ratios = None

@@ -11,6 +11,11 @@ engine_utils.py에서 분리. 순수 numpy 모듈.
   vectorized_render_dynamic   — Dynamic 모드 렌더링
   WavePulse, wave_tick_pulses — Wave 상태 관리
   DynamicRipple, dynamic_tick_ripples — Dynamic 상태 관리
+
+[min_brightness_mode 추가]
+  4개 렌더러에 min_brightness_mode 파라미터 추가:
+  - "floor": 기존 방식. max(min_b, energy) — min_b 이하 클램핑
+  - "remap": min_b + energy * (1.0 - min_b) — 전 구간 선형 리매핑
 """
 
 import numpy as np
@@ -77,13 +82,49 @@ def build_base_color_array(led_band_indices, n_bands, rainbow=True,
 
 
 # ══════════════════════════════════════════════════════════════════
+#  min_brightness 적용 헬퍼
+# ══════════════════════════════════════════════════════════════════
+
+def _apply_min_brightness_scalar(min_brightness, raw_energy, mode="floor"):
+    """스칼라 에너지 값에 min_brightness 적용.
+
+    floor:  max(min_b, raw) — min_b 이하 클램핑
+    remap:  min_b + raw * (1.0 - min_b) — 전 구간 선형 리매핑
+    """
+    if mode == "remap":
+        return min_brightness + raw_energy * (1.0 - min_brightness)
+    else:
+        return max(min_brightness, raw_energy)
+
+
+def _apply_min_brightness_array(min_brightness, raw_energy, mode="floor"):
+    """배열 에너지 값에 min_brightness 적용.
+
+    floor:  np.maximum(min_b, raw) — min_b 이하 클램핑
+    remap:  min_b + raw * (1.0 - min_b) — 전 구간 선형 리매핑
+    """
+    if mode == "remap":
+        return min_brightness + raw_energy * (1.0 - min_brightness)
+    else:
+        return np.maximum(min_brightness, raw_energy)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  Pulse 렌더링
 # ══════════════════════════════════════════════════════════════════
 
 def vectorized_render_pulse(base_colors, bass, mid, high,
-                            min_brightness, audio_brightness):
-    """벡터화된 Pulse 렌더링."""
-    intensity = max(min_brightness, bass) * audio_brightness
+                            min_brightness, audio_brightness,
+                            min_brightness_mode="floor"):
+    """벡터화된 Pulse 렌더링.
+
+    min_brightness_mode:
+        "floor": intensity = max(min_b, bass) * brightness
+        "remap": intensity = (min_b + bass * (1 - min_b)) * brightness
+    """
+    intensity = _apply_min_brightness_scalar(
+        min_brightness, bass, min_brightness_mode
+    ) * audio_brightness
 
     saturation_boost = 1.0 + mid * 0.3
     leds = np.clip(base_colors * saturation_boost, 0, 255)
@@ -100,8 +141,14 @@ def vectorized_render_pulse(base_colors, bass, mid, high,
 # ══════════════════════════════════════════════════════════════════
 
 def vectorized_render_spectrum(base_colors, led_band_indices, spectrum,
-                               min_brightness, audio_brightness):
-    """벡터화된 Spectrum 렌더링."""
+                               min_brightness, audio_brightness,
+                               min_brightness_mode="floor"):
+    """벡터화된 Spectrum 렌더링.
+
+    min_brightness_mode:
+        "floor": intensity = max(min_b, energy) * brightness
+        "remap": intensity = (min_b + energy * (1 - min_b)) * brightness
+    """
     n_bands = len(spectrum)
 
     band_lo = np.clip(np.floor(led_band_indices).astype(np.int32), 0, n_bands - 1)
@@ -109,7 +156,9 @@ def vectorized_render_spectrum(base_colors, led_band_indices, spectrum,
     frac = led_band_indices - np.floor(led_band_indices)
 
     energy = spectrum[band_lo] * (1.0 - frac) + spectrum[band_hi] * frac
-    intensity = np.maximum(min_brightness, energy) * audio_brightness
+    intensity = _apply_min_brightness_array(
+        min_brightness, energy, min_brightness_mode
+    ) * audio_brightness
 
     leds = base_colors * intensity[:, np.newaxis]
 
@@ -177,10 +226,18 @@ def wave_tick_pulses(pulses, dt, bass, prev_bass, last_spawn_time,
 
 def vectorized_render_wave(base_colors, led_norm_y, pulses,
                            min_brightness, audio_brightness,
-                           speed=WAVE_SPEED_DEFAULT):
-    """Wave 모드 렌더링 — 비대칭 가우시안 + additive blending."""
+                           speed=WAVE_SPEED_DEFAULT,
+                           min_brightness_mode="floor"):
+    """Wave 모드 렌더링 — 비대칭 가우시안 + additive blending.
+
+    min_brightness_mode:
+        "floor": 바닥이 min_b, 펄스가 그 위에 additive
+        "remap": 펄스 합산(0~1+) → min_b + raw * (1 - min_b) 리매핑
+    """
     n_leds = len(led_norm_y)
-    intensity = np.full(n_leds, min_brightness, dtype=np.float64)
+
+    # ── raw intensity: 펄스 기여만 누적 (바닥 0) ──
+    raw_intensity = np.zeros(n_leds, dtype=np.float64)
 
     speed_ratio = max(speed / WAVE_SPEED_DEFAULT, 1.0)
     width_scale = speed_ratio ** 0.7
@@ -194,10 +251,15 @@ def vectorized_render_wave(base_colors, led_norm_y, pulses,
         dist = led_norm_y - p.position
         two_sigma_sq = np.where(dist >= 0, two_sf_sq, two_st_sq)
         contribution = p.energy * np.exp(-(dist * dist) / two_sigma_sq)
-        intensity += contribution
+        raw_intensity += contribution
 
     tilt_factor = 1.0 + led_norm_y * WAVE_TILT_COMP
-    intensity *= tilt_factor
+    raw_intensity *= tilt_factor
+
+    # ── min_brightness 적용 ──
+    intensity = _apply_min_brightness_array(
+        min_brightness, raw_intensity, min_brightness_mode
+    )
 
     intensity *= audio_brightness
     leds = base_colors * intensity[:, np.newaxis]
@@ -378,10 +440,18 @@ def _pick_position_proportional(side_t_ranges):
 
 
 def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
-                              high, min_brightness, audio_brightness):
-    """Dynamic envelope follower 렌더링."""
+                              high, min_brightness, audio_brightness,
+                              min_brightness_mode="floor"):
+    """Dynamic envelope follower 렌더링.
+
+    min_brightness_mode:
+        "floor": 바닥이 min_b, ripple 기여가 그 위에 additive
+        "remap": ripple 합산(0~1) → min_b + raw * (1 - min_b) 리매핑
+    """
     n_leds = len(perimeter_t)
-    intensity = np.full(n_leds, min_brightness, dtype=np.float64)
+
+    # ── raw intensity: ripple 기여만 누적 (바닥 0) ──
+    raw_intensity = np.zeros(n_leds, dtype=np.float64)
 
     for r in ripples:
         delta = np.abs(perimeter_t - r.center_t)
@@ -395,9 +465,14 @@ def vectorized_render_dynamic(base_colors, perimeter_t, ripples,
         e = r.envelope
         core = e * np.exp(-(delta * delta) / esc_sq)
         halo = e * 0.35 * np.exp(-(delta * delta) / esh_sq)
-        intensity += core + halo
+        raw_intensity += core + halo
 
-    np.minimum(intensity, 1.0, out=intensity)
+    np.minimum(raw_intensity, 1.0, out=raw_intensity)
+
+    # ── min_brightness 적용 ──
+    intensity = _apply_min_brightness_array(
+        min_brightness, raw_intensity, min_brightness_mode
+    )
 
     intensity *= audio_brightness
     leds = base_colors * intensity[:, np.newaxis]
