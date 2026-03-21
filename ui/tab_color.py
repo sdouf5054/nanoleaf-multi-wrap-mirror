@@ -22,6 +22,7 @@ from PySide6.QtCore import Qt, Signal
 
 from core.config import save_config
 from ui.mixins.device_owner import DeviceOwnerMixin
+from ui.dialogs import msg_info
 
 TEST_COLORS = [
     ("흰색", 255, 255, 255), ("빨강", 255, 0, 0), ("초록", 0, 255, 0),
@@ -30,8 +31,8 @@ TEST_COLORS = [
     ("따뜻한 백", 255, 220, 180),
 ]
 
-_GROUP_MARGINS = (6, 16, 6, 4)
-_GROUP_SPACING = 3
+_GROUP_MARGINS = (6, 6, 6, 6)
+_GROUP_SPACING = 6
 
 
 class ColorSliderRow(QWidget):
@@ -229,7 +230,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
         self.color_cfg["gamma_b"] = self.gamma_b.value()
         self.color_cfg["green_red_bleed"] = self.bleed.value()
         save_config(self.config)
-        QMessageBox.information(self, "저장", "색상 설정이 저장되었습니다.")
+        msg_info(self, "저장", "색상 설정이 저장되었습니다.")
 
     def _reset_defaults(self):
         self.wb_r.setValue(1.00); self.wb_g.setValue(0.85); self.wb_b.setValue(0.70)

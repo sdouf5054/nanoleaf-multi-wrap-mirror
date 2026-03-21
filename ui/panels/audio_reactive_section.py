@@ -67,8 +67,8 @@ _AUDIO_DEFAULTS = {
     "flowing":     {"min_brightness": 5, "bass_sens": 100, "mid_sens": 100, "high_sens": 100, "attack": 40, "release": 60, "zone_bass": 33, "zone_mid": 33, "zone_high": 34},
 }
 
-_GROUP_MARGINS = (6, 16, 6, 6)
-_GROUP_SPACING = 4
+_GROUP_MARGINS = (6, 6, 6, 8)
+_GROUP_SPACING = 6
 
 
 class AudioReactiveSection(QWidget):
@@ -93,7 +93,7 @@ class AudioReactiveSection(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(8)
 
         self._build_energy_section(layout)
         self._build_audio_settings(layout)

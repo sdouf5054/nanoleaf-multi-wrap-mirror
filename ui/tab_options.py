@@ -21,12 +21,14 @@ import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QCheckBox, QLabel,
     QPushButton, QMessageBox, QHBoxLayout, QLineEdit, QFormLayout, QFrame,
+    QComboBox,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence
 
 from core.config import save_config
-from styles.palette import DARK as _PAL
+from ui.dialogs import msg_info, msg_warning
+from styles.palette import current as _pal_current
 
 # ── F13~F24 가상 키 매핑 ──
 _FKEY_MAP = {getattr(Qt.Key, f"Key_F{n}", None): f"f{n}" for n in range(13, 25)}
@@ -67,15 +69,15 @@ class HotkeyEdit(QLineEdit):
     def _set_idle_style(self):
         # ★ palette 참조로 하드코딩 제거
         self.setStyleSheet(
-            f"QLineEdit{{background:{_PAL['bg_tertiary']};color:{_PAL['text_primary']};"
-            f"border:1px solid {_PAL['border']};border-radius:4px;padding:3px 6px;}}"
-            f"QLineEdit:hover{{border-color:{_PAL['border_hover']};}}"
+            f"QLineEdit{{background:{_pal_current()['bg_tertiary']};color:{_pal_current()['text_primary']};"
+            f"border:1px solid {_pal_current()['border']};border-radius:4px;padding:3px 6px;}}"
+            f"QLineEdit:hover{{border-color:{_pal_current()['border_hover']};}}"
         )
 
     def _set_listening_style(self):
         self.setStyleSheet(
-            f"QLineEdit{{background:{_PAL['hotkey_listen_bg']};color:{_PAL['hotkey_listen_text']};"
-            f"border:2px solid {_PAL['hotkey_listen_border']};border-radius:4px;"
+            f"QLineEdit{{background:{_pal_current()['hotkey_listen_bg']};color:{_pal_current()['hotkey_listen_text']};"
+            f"border:2px solid {_pal_current()['hotkey_listen_border']};border-radius:4px;"
             "padding:3px 6px;font-style:italic;}}"
         )
 
@@ -146,10 +148,28 @@ class OptionsTab(QWidget):
         self.config = config; self.main_window = main_window
         if "options" not in self.config: self.config["options"] = {}
         self.opt = self.config["options"]
+        self._saved_theme = self.opt.get("theme", "light")  # ★ 저장된 테마 추적
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self); layout.setSpacing(14)
+
+        # 테마
+        theme_group = QGroupBox("테마")
+        theme_layout = QHBoxLayout(theme_group)
+        theme_layout.addWidget(QLabel("UI 테마:"))
+        self.combo_theme = QComboBox()
+        self.combo_theme.addItem("라이트", "light")
+        self.combo_theme.addItem("다크", "dark")
+        saved_theme = self.opt.get("theme", "light")
+        self.combo_theme.setCurrentIndex(0 if saved_theme == "light" else 1)
+        self.combo_theme.currentIndexChanged.connect(self._on_theme_changed)
+        theme_layout.addWidget(self.combo_theme)
+        theme_hint = QLabel("변경 시 즉시 미리보기. 저장해야 유지됩니다.")
+        theme_hint.setProperty("role", "hint")
+        theme_layout.addWidget(theme_hint)
+        theme_layout.addStretch()
+        layout.addWidget(theme_group)
 
         # 시스템 트레이
         tray_group = QGroupBox("시스템 트레이"); tray_layout = QVBoxLayout(tray_group)
@@ -226,7 +246,36 @@ class OptionsTab(QWidget):
         self.edit_toggle.setText("ctrl+shift+o"); self.edit_bright_up.setText("ctrl+shift+up"); self.edit_bright_down.setText("ctrl+shift+down")
         self.edit_audio_cycle.setText("")
 
+    def _on_theme_changed(self, _index):
+        """★ 테마 콤보 변경 시 즉시 미리보기 적용."""
+        new_theme = self.combo_theme.currentData()
+        from PySide6.QtWidgets import QApplication
+        from styles import load_theme
+        load_theme(QApplication.instance(), new_theme)
+
+    def revert_theme(self):
+        """★ 저장 없이 옵션 탭을 떠날 때 원래 테마로 복귀.
+
+        MainWindow에서 탭 전환 또는 창 닫기 시 호출할 수 있습니다.
+        현재 콤보 값이 저장된 테마와 다르면 복귀합니다.
+        """
+        current_combo = self.combo_theme.currentData()
+        if current_combo != self._saved_theme:
+            from PySide6.QtWidgets import QApplication
+            from styles import load_theme
+            load_theme(QApplication.instance(), self._saved_theme)
+            # 콤보도 원래 값으로
+            self.combo_theme.blockSignals(True)
+            self.combo_theme.setCurrentIndex(
+                0 if self._saved_theme == "light" else 1
+            )
+            self.combo_theme.blockSignals(False)
+
     def _save(self):
+        # ★ 테마 — 콤보에서 이미 미리보기 적용됨, 여기서는 config에 기록만
+        self.opt["theme"] = self.combo_theme.currentData()
+        self._saved_theme = self.opt["theme"]  # 저장된 테마 갱신
+
         self.opt["tray_enabled"] = self.chk_tray.isChecked()
         self.opt["hotkey_enabled"] = self.chk_hotkey.isChecked()
         self.opt["minimize_to_tray"] = self.chk_minimize.isChecked()
@@ -243,7 +292,7 @@ class OptionsTab(QWidget):
 
         if self.chk_startup.isChecked():
             if not _is_startup_registered():
-                if not _register_startup(): QMessageBox.warning(self, "오류", "시작프로그램 등록에 실패했습니다.")
+                if not _register_startup(): msg_warning(self, "오류", "시작프로그램 등록에 실패했습니다.")
         else:
             if _is_startup_registered(): _unregister_startup()
 
@@ -253,4 +302,4 @@ class OptionsTab(QWidget):
             if self.opt["hotkey_enabled"]: self.main_window.tray.setup_hotkeys()
             else: self.main_window.tray.cleanup()
 
-        QMessageBox.information(self, "저장", "옵션이 저장되었습니다.")
+        msg_info(self, "저장", "옵션이 저장되었습니다.")

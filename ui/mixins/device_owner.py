@@ -28,7 +28,7 @@
     - self.request_mirror_stop: Signal — 엔진 중지 요청 시그널
 """
 
-from PySide6.QtWidgets import QMessageBox
+from ui.dialogs import msg_warning
 
 
 def _set_property(widget, name, value):
@@ -94,7 +94,7 @@ class DeviceOwnerMixin:
                 self.dm.acquire(self._DEVICE_OWNER)
                 self._set_connected_ui()
             except Exception as e:
-                QMessageBox.warning(self, "연결 실패", str(e))
+                msg_warning(self, "연결 실패", str(e))
 
     def _device_cleanup(self):
         """종료 시 소유권 해제."""

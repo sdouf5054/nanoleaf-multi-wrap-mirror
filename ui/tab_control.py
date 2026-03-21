@@ -101,6 +101,13 @@ def _set_property(widget, name, value):
     widget.style().polish(widget)
 
 
+# ══════════════════════════════════════════════════════════════
+#  아이콘 없는 다이얼로그 헬퍼
+# ══════════════════════════════════════════════════════════════
+
+from ui.dialogs import msg_info, msg_warning, msg_question, input_text
+
+
 # ══════════════════════════════════════════════════════════════════
 #  ControlTab
 # ══════════════════════════════════════════════════════════════════
@@ -174,7 +181,7 @@ class ControlTab(QWidget):
 
         container = QWidget()
         self._main_layout = QVBoxLayout(container)
-        self._main_layout.setSpacing(4)
+        self._main_layout.setSpacing(8)
         self._main_layout.setContentsMargins(6, 4, 6, 4)
         # ★ container.setStyleSheet(...) 제거 → dark.qss로 이전
 
@@ -203,7 +210,7 @@ class ControlTab(QWidget):
     def _build_status_section(self):
         grp = QGroupBox("상태")
         lay = QVBoxLayout(grp)
-        lay.setContentsMargins(6, 16, 6, 6)
+        lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
 
         # 상태 행: 메시지 + 토글 태그 + 자원 + fps
@@ -276,7 +283,7 @@ class ControlTab(QWidget):
     def _build_basic_settings_section(self):
         grp = QGroupBox("기초 설정")
         lay = QVBoxLayout(grp)
-        lay.setContentsMargins(6, 16, 6, 6)
+        lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(6)
 
         # 토글 행
@@ -382,7 +389,8 @@ class ControlTab(QWidget):
                     break
         audio_row.addWidget(self.combo_audio_device)
         btn_refresh = QPushButton("↻")
-        btn_refresh.setFixedWidth(36)
+        btn_refresh.setObjectName("btnRefreshThumb")
+        btn_refresh.setFixedSize(32, 32)
         btn_refresh.clicked.connect(self._refresh_audio_devices)
         audio_row.addWidget(btn_refresh)
         audio_row.addStretch()
@@ -395,7 +403,7 @@ class ControlTab(QWidget):
     def _build_preview_section(self):
         grp = QGroupBox("LED 프리뷰")
         lay = QVBoxLayout(grp)
-        lay.setContentsMargins(6, 16, 6, 4)
+        lay.setContentsMargins(6, 6, 6, 4)
         lay.setSpacing(2)
 
         self.btn_preview_toggle = QPushButton("프리뷰 보기")
@@ -676,13 +684,10 @@ class ControlTab(QWidget):
             return
 
         name = self._current_preset_name
-        reply = QMessageBox.question(
+        if not msg_question(
             self, "프리셋 저장",
             f"프리셋 '{name}'을(를) 현재 설정으로 덮어쓰시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        ):
             return
 
         data = collect_preset_data(self)
@@ -694,9 +699,7 @@ class ControlTab(QWidget):
 
     def _on_preset_new(self):
         """+ 새로 — 새 프리셋 저장."""
-        name, ok = QInputDialog.getText(
-            self, "새 프리셋", "프리셋 이름을 입력하세요:",
-        )
+        name, ok = input_text(self, "새 프리셋", "프리셋 이름을 입력하세요:")
         if not ok or not name.strip():
             return
 
@@ -704,13 +707,10 @@ class ControlTab(QWidget):
 
         # 이름 중복 확인
         if preset_exists(name):
-            reply = QMessageBox.question(
+            if not msg_question(
                 self, "프리셋 중복",
                 f"프리셋 '{name}'이(가) 이미 존재합니다. 덮어쓰시겠습니까?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+            ):
                 return
 
         data = collect_preset_data(self)
@@ -745,13 +745,10 @@ class ControlTab(QWidget):
             return
 
         name = self._current_preset_name
-        reply = QMessageBox.question(
+        if not msg_question(
             self, "프리셋 삭제",
             f"프리셋 '{name}'을(를) 삭제하시겠습니까?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
+        ):
             return
 
         if delete_preset(name):
@@ -1081,10 +1078,10 @@ class ControlTab(QWidget):
             self.section_mirror.lbl_media_thumbnail.setToolTip(song_text)
 
             if not info:
-                from styles.palette import DARK as _PAL
+                from styles.palette import current as _pal_current
                 self.section_mirror.lbl_media_source.setText("미디어 연동 활성")
                 self.section_mirror.lbl_media_source.setStyleSheet(
-                    f"color:{_PAL['media_active']};font-size:11px;font-weight:bold;"
+                    f"color:{_pal_current()['media_active']};font-size:11px;font-weight:bold;"
                     "border:none;background:transparent;"
                 )
 

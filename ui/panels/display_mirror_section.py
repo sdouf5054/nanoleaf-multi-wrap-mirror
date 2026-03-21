@@ -47,7 +47,7 @@ from core.engine_utils import (
     COLOR_EFFECT_GRADIENT_CCW,
     gradient_speed_from_slider,
 )
-from styles.palette import DARK as _PAL
+from styles.palette import current as _pal_current
 
 # ── 구역 수 옵션 ──
 _ZONE_OPTIONS = [
@@ -82,8 +82,8 @@ _MEDIA_SOURCE_ITEMS = [
 _MEDIA_SOURCE_KEYS = [k for k, _ in _MEDIA_SOURCE_ITEMS]
 
 # ── 레이아웃 상수 ──
-_GROUP_MARGINS = (6, 16, 6, 6)
-_GROUP_SPACING = 4
+_GROUP_MARGINS = (6, 6, 6, 8)
+_GROUP_SPACING = 6
 
 
 class DisplayMirrorSection(QWidget):
@@ -115,7 +115,7 @@ class DisplayMirrorSection(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(8)
 
         grp = QGroupBox("디스플레이 미러링 설정")
         gl = QVBoxLayout(grp)
@@ -145,7 +145,7 @@ class DisplayMirrorSection(QWidget):
         self.lbl_media_source = QLabel("미디어 연동 활성")
         self.lbl_media_source.setObjectName("lblMediaSource")
         self.lbl_media_source.setStyleSheet(
-            f"color:{_PAL['media_active']};font-size:11px;font-weight:bold;"
+            f"color:{_pal_current()['media_active']};font-size:11px;font-weight:bold;"
             "border:none;background:transparent;"
         )
         text_col.addWidget(self.lbl_media_source)
@@ -179,7 +179,7 @@ class DisplayMirrorSection(QWidget):
         # ── ★ 미디어 소스 오버라이드 콤보 (미디어 ON 시에만 표시) ──
         self._media_source_row = QWidget()
         msr = QHBoxLayout(self._media_source_row)
-        msr.setContentsMargins(0, 0, 0, 0)
+        msr.setContentsMargins(0, 4, 0, 4)
         msr.addWidget(QLabel("소스 선택:"))
         self.combo_media_source = QComboBox()
         for key, label in _MEDIA_SOURCE_ITEMS:
@@ -204,6 +204,7 @@ class DisplayMirrorSection(QWidget):
         self.lbl_media_source_hint.setProperty("role", "hint")
         msr.addWidget(self.lbl_media_source_hint)
         msr.addStretch()
+        gl.addSpacing(4)
         gl.addWidget(self._media_source_row)
         self._media_source_row.setVisible(False)
 
@@ -441,7 +442,7 @@ class DisplayMirrorSection(QWidget):
             self._lbl_source_off.setVisible(False)
             self.lbl_media_source.setText("미디어 연동 활성")
             self.lbl_media_source.setStyleSheet(
-                f"color:{_PAL['media_active']};font-size:11px;font-weight:bold;"
+                f"color:{_pal_current()['media_active']};font-size:11px;font-weight:bold;"
                 "border:none;background:transparent;"
             )
             self.lbl_media_song.setText("미디어 정보 대기 중...")
@@ -464,20 +465,20 @@ class DisplayMirrorSection(QWidget):
         if decision == "media":
             if state == "phase1":
                 text = "미디어 (판별 중...)"
-                color = _PAL["media_phase1"]
+                color = _pal_current()["media_phase1"]
             else:
                 text = "미디어 사용 중"
-                color = _PAL["media_active"]
+                color = _pal_current()["media_active"]
         else:
             if state == "audio_idle":
                 text = "미러링 (오디오 무음)"
-                color = _PAL["media_idle"]
+                color = _pal_current()["media_idle"]
             elif state == "phase1":
                 text = "미러링 (판별 중...)"
-                color = _PAL["media_phase1"]
+                color = _pal_current()["media_phase1"]
             else:
                 text = "미러링 사용 중"
-                color = _PAL["media_mirror"]
+                color = _pal_current()["media_mirror"]
 
         self.lbl_media_source.setText(text)
         self.lbl_media_source.setStyleSheet(

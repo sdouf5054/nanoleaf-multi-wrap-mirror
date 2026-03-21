@@ -1,17 +1,11 @@
 """LED 캘리브레이션 탭 — 코너 찾기 + 세그먼트 자동 생성 (PySide6)
 
-[ADR-040] 공통 레이아웃 상수 적용 — 색상 보정 탭과 여백/버튼 위치 통일.
-
-[Refactor] DeviceOwnerMixin 적용
-- _toggle_connection, _set_connected_ui, _set_disconnected_ui,
-  _on_force_released, force_disconnect, cleanup 중복 제거
-- _on_device_force_released() 오버라이드: 강제 해제 시 스캔 중지
-- _DEVICE_OWNER = "setup_tab"
-
-[QSS 테마] 인라인 setStyleSheet → objectName 기반으로 전환.
-  - conn_label: objectName="connLabel" + device_owner의 property 방식
-  - spin_current_led: objectName="spinCurrentLed" → QSS 큰 파란 폰트
-  - seg_preview: objectName="segPreview" → QSS 모노스페이스
+[QSS 테마] objectName 기반 스타일링.
+[Refactor] DeviceOwnerMixin 적용.
+[★ 동적 바퀴 수] N_WRAPS를 config에서 읽고, UI 스핀박스로 변경 가능.
+  - 코너 테이블 행 수가 바퀴 수에 맞게 동적 조절.
+  - _load_from_config / _generate_segments가 임의 바퀴 수를 지원.
+  - 모니터 크기 프리셋 힌트 제공.
 """
 
 import time
@@ -19,15 +13,55 @@ import copy
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QSpinBox, QComboBox, QTableWidget, QTableWidgetItem,
-    QMessageBox, QHeaderView, QTextEdit, QScrollArea, QFrame,
+    QHeaderView, QTextEdit, QScrollArea, QFrame,
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
 from core.config import save_config
 from ui.mixins.device_owner import DeviceOwnerMixin
+from ui.dialogs import msg_info, msg_warning
 
-_GROUP_MARGINS = (6, 16, 6, 4)
-_GROUP_SPACING = 3
+_GROUP_MARGINS = (6, 6, 6, 6)
+_GROUP_SPACING = 6
+
+# 모니터 크기 → 권장 바퀴 수 힌트 (75개 LED 기준)
+_MONITOR_PRESETS = [
+    ("직접 설정", None),
+    ("소형 (15~20인치) — 권장 3바퀴", 3),
+    ("24인치 (약 60cm) — 권장 2바퀴", 2),
+    ("27인치 (약 68cm) — 권장 2바퀴", 2),
+    ("32인치 (약 80cm) — 권장 1바퀴", 1),
+    ("34인치 울트라와이드 — 권장 1바퀴", 1),
+]
+
+# 시작 코너 위치 — sides_order + column_headers 매핑
+# sides: 시작 코너에서 시계방향으로 4변의 순서
+# corners: config에 저장되는 코너 약어 (시작→끝 순서)
+# headers: 코너 테이블 열 헤더
+_START_POSITIONS = {
+    "좌하 (기본)": {
+        "sides": ["left", "top", "right", "bottom"],
+        "corners": ("bl", "tl", "tr", "br"),
+        "headers": ["시작(좌하)", "좌상", "우상", "우하", "끝점"],
+    },
+    "좌상": {
+        "sides": ["top", "right", "bottom", "left"],
+        "corners": ("tl", "tr", "br", "bl"),
+        "headers": ["시작(좌상)", "우상", "우하", "좌하", "끝점"],
+    },
+    "우상": {
+        "sides": ["right", "bottom", "left", "top"],
+        "corners": ("tr", "br", "bl", "tl"),
+        "headers": ["시작(우상)", "우하", "좌하", "좌상", "끝점"],
+    },
+    "우하": {
+        "sides": ["bottom", "left", "top", "right"],
+        "corners": ("br", "bl", "tl", "tr"),
+        "headers": ["시작(우하)", "좌하", "좌상", "우상", "끝점"],
+    },
+}
+
+_START_POS_KEYS = list(_START_POSITIONS.keys())
 
 
 class LedScanThread(QThread):
@@ -88,7 +122,6 @@ class LedScanThread(QThread):
 class SetupTab(DeviceOwnerMixin, QWidget):
     """LED 캘리브레이션 탭."""
 
-    N_WRAPS = 2
     _DEVICE_OWNER = "setup_tab"
     request_mirror_stop = Signal()
 
@@ -99,6 +132,12 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self.scan_thread = None
         self._saved_layout = copy.deepcopy(config["layout"])
         self._saved_led_count = config["device"]["led_count"]
+
+        # ★ 바퀴 수: config에서 읽기 (기본 2)
+        self._n_wraps = self.layout_cfg.get("n_wraps", 2)
+        # ★ 시작 위치
+        saved_start = self.layout_cfg.get("start_position", "좌하 (기본)")
+        self._start_position = saved_start if saved_start in _START_POS_KEYS else "좌하 (기본)"
 
         self._init_device_owner(device_manager)
         self._build_ui()
@@ -135,18 +174,61 @@ class SetupTab(DeviceOwnerMixin, QWidget):
 
         # 기본 설정
         basic_group = QGroupBox("기본 설정")
-        basic_layout = QHBoxLayout(basic_group)
+        basic_layout = QVBoxLayout(basic_group)
         basic_layout.setContentsMargins(*_GROUP_MARGINS)
-        basic_layout.addWidget(QLabel("LED 수:"))
+        basic_layout.setSpacing(_GROUP_SPACING)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("LED 수:"))
         self.spin_led_count = QSpinBox()
         self.spin_led_count.setRange(1, 300)
         self.spin_led_count.setValue(self.config["device"]["led_count"])
-        basic_layout.addWidget(self.spin_led_count)
-        basic_layout.addWidget(QLabel("감는 방향:"))
+        row1.addWidget(self.spin_led_count)
+        row1.addWidget(QLabel("감는 방향:"))
         self.combo_direction = QComboBox()
         self.combo_direction.addItems(["시계방향 (LED 번호 감소)", "반시계방향 (LED 번호 증가)"])
-        basic_layout.addWidget(self.combo_direction)
-        basic_layout.addStretch()
+        row1.addWidget(self.combo_direction)
+        row1.addStretch()
+        basic_layout.addLayout(row1)
+
+        # ★ 바퀴 수 + 모니터 프리셋
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("바퀴 수:"))
+        self.spin_wraps = QSpinBox()
+        self.spin_wraps.setRange(1, 5)
+        self.spin_wraps.setValue(self._n_wraps)
+        self.spin_wraps.setToolTip("LED 스트립이 모니터 둘레를 감는 횟수")
+        self.spin_wraps.valueChanged.connect(self._on_wraps_changed)
+        row2.addWidget(self.spin_wraps)
+        row2.addWidget(QLabel("모니터 크기:"))
+        self.combo_monitor = QComboBox()
+        for label, _ in _MONITOR_PRESETS:
+            self.combo_monitor.addItem(label)
+        self.combo_monitor.currentIndexChanged.connect(self._on_monitor_preset_changed)
+        row2.addWidget(self.combo_monitor)
+        row2.addStretch()
+        basic_layout.addLayout(row2)
+
+        # ★ 시작 위치
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("시작 위치:"))
+        self.combo_start_pos = QComboBox()
+        for label in _START_POS_KEYS:
+            self.combo_start_pos.addItem(label)
+        # config에서 복원
+        saved_start = self.layout_cfg.get("start_position", "좌하 (기본)")
+        idx = _START_POS_KEYS.index(saved_start) if saved_start in _START_POS_KEYS else 0
+        self._start_position = _START_POS_KEYS[idx]
+        self.combo_start_pos.setCurrentIndex(idx)
+        self.combo_start_pos.currentIndexChanged.connect(self._on_start_pos_changed)
+        self.combo_start_pos.setToolTip(
+            "LED 스트립이 시작되는 모니터 코너.\n"
+            "선택한 코너부터 시계방향으로 코너를 순서대로 기록합니다."
+        )
+        row3.addWidget(self.combo_start_pos)
+        row3.addStretch()
+        basic_layout.addLayout(row3)
+
         layout.addWidget(basic_group)
 
         # LED 스캔
@@ -199,22 +281,17 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         layout.addWidget(scan_group)
 
         # 코너 테이블
-        corner_group = QGroupBox("코너 데이터 (2바퀴)")
-        corner_layout = QVBoxLayout(corner_group)
+        self._corner_group = QGroupBox(f"코너 데이터 ({self._n_wraps}바퀴)")
+        corner_layout = QVBoxLayout(self._corner_group)
         corner_layout.setSpacing(_GROUP_SPACING)
         corner_layout.setContentsMargins(*_GROUP_MARGINS)
         corner_desc = QLabel("각 바퀴에서 변이 바뀌는 코너 LED 번호를 입력합니다.")
         corner_desc.setWordWrap(True)
         corner_layout.addWidget(corner_desc)
         self.corner_table = QTableWidget()
-        self.corner_table.setRowCount(self.N_WRAPS)
-        self.corner_table.setColumnCount(5)
-        self.corner_table.setHorizontalHeaderLabels(["시작(좌하)", "좌상", "우상", "우하", "끝점"])
-        self.corner_table.setVerticalHeaderLabels(["바퀴 1", "바퀴 2"])
-        self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.corner_table.setFixedHeight(90)
+        self._rebuild_corner_table()
         corner_layout.addWidget(self.corner_table)
-        layout.addWidget(corner_group)
+        layout.addWidget(self._corner_group)
 
         # 세그먼트 미리보기
         seg_group = QGroupBox("세그먼트 (자동 생성)")
@@ -243,17 +320,101 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
 
+    # ── ★ 바퀴 수 동적 변경 ──
+
+    def _rebuild_corner_table(self):
+        """바퀴 수 + 시작 위치에 맞게 코너 테이블을 재구성."""
+        pos_info = _START_POSITIONS[self._start_position]
+        self.corner_table.setRowCount(self._n_wraps)
+        self.corner_table.setColumnCount(5)
+        self.corner_table.setHorizontalHeaderLabels(pos_info["headers"])
+        self.corner_table.setVerticalHeaderLabels(
+            [f"바퀴 {i+1}" for i in range(self._n_wraps)]
+        )
+        self.corner_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.corner_table.setFixedHeight(30 + 30 * self._n_wraps)
+
+    def _on_wraps_changed(self, value):
+        """바퀴 수 스핀박스 변경 시 테이블 재구성."""
+        # 기존 데이터 보존
+        old_data = []
+        for row in range(self.corner_table.rowCount()):
+            row_data = []
+            for col in range(5):
+                item = self.corner_table.item(row, col)
+                row_data.append(item.text() if item else "")
+            old_data.append(row_data)
+
+        self._n_wraps = value
+        self._rebuild_corner_table()
+        self._corner_group.setTitle(f"코너 데이터 ({self._n_wraps}바퀴)")
+
+        # 기존 데이터 복원 (줄어든 행은 잘림, 늘어난 행은 빈칸)
+        for row in range(min(len(old_data), self._n_wraps)):
+            for col in range(5):
+                if old_data[row][col]:
+                    self.corner_table.setItem(
+                        row, col, QTableWidgetItem(old_data[row][col])
+                    )
+
+    def _on_monitor_preset_changed(self, index):
+        """모니터 크기 프리셋 선택 시 바퀴 수 자동 설정."""
+        if index <= 0:
+            return  # "직접 설정"
+        _, wraps = _MONITOR_PRESETS[index]
+        if wraps is not None:
+            self.spin_wraps.setValue(wraps)
+        # 선택 후 "직접 설정"으로 돌려놓기 (한 번만 적용)
+        self.combo_monitor.blockSignals(True)
+        self.combo_monitor.setCurrentIndex(0)
+        self.combo_monitor.blockSignals(False)
+
+    def _on_start_pos_changed(self, index):
+        """시작 위치 콤보 변경 시 테이블 헤더 갱신."""
+        self._start_position = _START_POS_KEYS[index]
+        self._rebuild_corner_table()
+
     # ── config 로드 ──
 
     def _load_from_config(self):
+        # ★ 시작 위치 복원
+        saved_start = self.layout_cfg.get("start_position", "좌하 (기본)")
+        if saved_start in _START_POS_KEYS:
+            self._start_position = saved_start
+        else:
+            self._start_position = "좌하 (기본)"
+        idx = _START_POS_KEYS.index(self._start_position)
+        self.combo_start_pos.blockSignals(True)
+        self.combo_start_pos.setCurrentIndex(idx)
+        self.combo_start_pos.blockSignals(False)
+
+        # ★ 바퀴 수 복원
+        saved_wraps = self.layout_cfg.get("n_wraps", 2)
+        if saved_wraps != self._n_wraps:
+            self._n_wraps = saved_wraps
+            self.spin_wraps.blockSignals(True)
+            self.spin_wraps.setValue(saved_wraps)
+            self.spin_wraps.blockSignals(False)
+
+        self._rebuild_corner_table()
+        self._corner_group.setTitle(f"코너 데이터 ({self._n_wraps}바퀴)")
+
+        # ★ 코너 데이터 복원 — 시작 위치의 corners 순서에 맞게 매핑
+        pos_info = _START_POSITIONS[self._start_position]
+        corner_abbrs = pos_info["corners"]  # (c0, c1, c2, c3)
         corners = self.layout_cfg.get("corners", {})
-        w1 = [corners.get(k, "") for k in ("w1_bl", "w1_tl", "w1_tr", "w1_br", "w1_end")]
-        for col, val in enumerate(w1):
-            self.corner_table.setItem(0, col, QTableWidgetItem(str(val) if val != "" else ""))
-        w2_bl = corners.get("w2_bl", corners.get("w1_end", ""))
-        w2 = [w2_bl, corners.get("w2_tl", ""), corners.get("w2_tr", ""), corners.get("w2_br", ""), corners.get("w2_end", "")]
-        for col, val in enumerate(w2):
-            self.corner_table.setItem(1, col, QTableWidgetItem(str(val) if val != "" else ""))
+        for w in range(self._n_wraps):
+            prefix = f"w{w+1}_"
+            # 열 0~3: 시작 위치 순서대로, 열 4: 끝점
+            col_keys = [f"{prefix}{c}" for c in corner_abbrs] + [f"{prefix}end"]
+            for col, key in enumerate(col_keys):
+                val = corners.get(key, "")
+                self.corner_table.setItem(
+                    w, col,
+                    QTableWidgetItem(str(val) if val != "" else "")
+                )
         self._update_seg_preview()
 
     def _update_seg_preview(self):
@@ -261,17 +422,17 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         lines = [f"LED {seg['start']:>2}→{seg['end']:<2}  {seg['side']}" for seg in segments]
         self.seg_preview.setPlainText("\n".join(lines) if lines else "(세그먼트 없음)")
 
-    # ── 스캔 (원본과 동일) ──
+    # ── 스캔 ──
 
     def _start_auto_scan(self):
         if not self.dm or not self.dm.is_connected:
-            QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요.")
+            msg_warning(self, "연결 필요", "먼저 LED를 연결하세요.")
             return
         self._start_scan(paused=False)
 
     def _start_manual_mode(self):
         if not self.dm or not self.dm.is_connected:
-            QMessageBox.warning(self, "연결 필요", "먼저 LED를 연결하세요.")
+            msg_warning(self, "연결 필요", "먼저 LED를 연결하세요.")
             return
         self._start_scan(paused=True)
 
@@ -330,15 +491,15 @@ class SetupTab(DeviceOwnerMixin, QWidget):
 
     def _mark_corner(self):
         led_idx = str(self.spin_current_led.value())
-        for row in range(self.N_WRAPS):
+        for row in range(self._n_wraps):
             for col in range(5):
                 item = self.corner_table.item(row, col)
                 if item is None or item.text().strip() == "":
                     self.corner_table.setItem(row, col, QTableWidgetItem(led_idx))
                     return
-        QMessageBox.information(self, "코너", "모든 코너가 채워졌습니다.")
+        msg_info(self, "코너", "모든 코너가 채워졌습니다.")
 
-    # ── 세그먼트 생성 (원본과 동일) ──
+    # ── 세그먼트 생성 ──
 
     def _validate_corners(self, corners_all):
         all_corners = []
@@ -358,10 +519,14 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         return True, ""
 
     def _generate_segments(self):
-        sides_order = ["left", "top", "right", "bottom"]
+        pos_info = _START_POSITIONS[self._start_position]
+        sides_order = pos_info["sides"]
+        corner_names = pos_info["corners"]  # 4개: (c0, c1, c2, c3)
+        # 컬럼 순서: 시작(c0), c1, c2, c3, 끝점(=c0 of next wrap)
+
         try:
             corners_all = []
-            for row in range(self.N_WRAPS):
+            for row in range(self._n_wraps):
                 wrap = []
                 for col in range(5):
                     item = self.corner_table.item(row, col)
@@ -370,43 +535,50 @@ class SetupTab(DeviceOwnerMixin, QWidget):
                     wrap.append(int(item.text().strip()))
                 corners_all.append(wrap)
         except ValueError as e:
-            QMessageBox.warning(self, "코너 오류", str(e))
+            msg_warning(self, "코너 오류", str(e))
             return
 
         valid, err = self._validate_corners(corners_all)
         if not valid:
-            QMessageBox.warning(self, "순서 오류", err)
+            msg_warning(self, "순서 오류", err)
             return
 
         segments = []
         corners_dict = {}
         for w, wrap in enumerate(corners_all):
             prefix = f"w{w+1}_"
-            for i, name in enumerate(("bl", "tl", "tr", "br", "end")):
-                corners_dict[prefix + name] = wrap[i]
+            # 4개 코너 + 끝점 저장
+            for i, cname in enumerate(corner_names):
+                corners_dict[f"{prefix}{cname}"] = wrap[i]
+            corners_dict[f"{prefix}end"] = wrap[4]
+            # 4개 세그먼트 생성
             for i in range(4):
                 segments.append({"start": wrap[i], "end": wrap[i + 1], "side": sides_order[i]})
 
         self.layout_cfg["corners"] = corners_dict
         self.layout_cfg["segments"] = segments
+        self.layout_cfg["n_wraps"] = self._n_wraps
+        self.layout_cfg["start_position"] = self._start_position
         self._update_seg_preview()
-        QMessageBox.information(self, "세그먼트", f"{len(segments)}개 세그먼트 생성 완료.")
+        msg_info(self, "세그먼트", f"{len(segments)}개 세그먼트 생성 완료.")
 
     def _reset_to_saved(self):
         self.config["layout"] = copy.deepcopy(self._saved_layout)
         self.layout_cfg = self.config["layout"]
         self.spin_led_count.setValue(self._saved_led_count)
         self._load_from_config()
-        QMessageBox.information(self, "복원", "저장된 설정으로 복원했습니다.")
+        msg_info(self, "복원", "저장된 설정으로 복원했습니다.")
 
     def _save(self):
         self.config["device"]["led_count"] = self.spin_led_count.value()
+        self.layout_cfg["n_wraps"] = self._n_wraps
+        self.layout_cfg["start_position"] = self._start_position
         if not self.layout_cfg.get("segments"):
             self._generate_segments()
         save_config(self.config)
         self._saved_layout = copy.deepcopy(self.config["layout"])
         self._saved_led_count = self.config["device"]["led_count"]
-        QMessageBox.information(self, "저장", "LED 설정이 저장되었습니다.")
+        msg_info(self, "저장", "LED 설정이 저장되었습니다.")
 
     def cleanup(self):
         if self.scan_thread and self.scan_thread.isRunning():

@@ -129,10 +129,10 @@ def main():
     font.setPointSize(10)
     app.setFont(font)
 
-    # === 8.5) ★ QSS 다크 테마 적용 ===
-    load_theme(app)
-
+    # === 8.5) ★ QSS 테마 적용 ===
     config = load_config()
+    theme = config.get("options", {}).get("theme", "light")
+    load_theme(app, theme)
 
     # ★ start_to_tray 플래그를 MainWindow에 전달
     window = MainWindow(config, start_hidden=start_to_tray)
