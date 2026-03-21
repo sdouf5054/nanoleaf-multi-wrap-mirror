@@ -680,7 +680,7 @@ QLabel#lblMediaThumb {{
 
 QLabel#lblMediaSong {{
     color: {text_muted};
-    font-size: 10px;
+    font-size: 12px;
     border: none;
     background: transparent;
 }}
@@ -794,4 +794,100 @@ QLabel#lblFlowingHint {{
     color: {accent_orange};
     font-size: 10px;
     font-style: italic;
+}}
+
+
+/* ══════════════════════════════════════════════════════════════
+ *  4. 컴팩트 뷰 (CompactWindow)
+ *
+ *  대부분의 위젯은 기존 objectName(statusLabel, cpuLabel, ramLabel,
+ *  fpsLabel, btnPresetDefault, lblMediaThumb, btnRefreshThumb,
+ *  lblMediaSong)을 재사용하여 기존 QSS 셀렉터가 그대로 적용됩니다.
+ *  여기에는 컴팩트 전용 objectName만 정의합니다.
+ * ══════════════════════════════════════════════════════════════ */
+
+/* ── 컴팩트 시작/중지 버튼 (btnStart 기반, 폰트 축소) ── */
+#compactStart {{
+    background: {accent_green};
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 3px 8px;
+}}
+#compactStart:hover {{
+    background: {accent_green_hover};
+}}
+#compactStart:disabled {{
+    background: {text_disabled};
+    color: {text_muted};
+}}
+
+/* ── 컴팩트 리소스 라벨 (CPU/RAM/FPS) ── */
+#compactCpu {{
+    font-size: 12px;
+    padding: 0 2px;
+    background: transparent;
+}}
+#compactCpu[level="normal"]  {{ color: {cpu_normal}; }}
+#compactCpu[level="warning"] {{ color: {cpu_warning}; }}
+#compactCpu[level="danger"]  {{ color: {cpu_danger}; }}
+
+#compactRam {{
+    font-size: 12px;
+    color: {ram_color};
+    padding: 0 2px;
+    background: transparent;
+}}
+
+#compactFps {{
+    font-size: 12px;
+    color: {fps_color};
+    padding: 0 2px;
+    background: transparent;
+}}
+
+/* ── 컴팩트 미디어 소스 버튼 (flat QPushButton) ── */
+#compactMediaSourceBtn {{
+    color: {media_active};
+    text-align: left;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-weight: bold;
+    font-size: 11px;
+}}
+#compactMediaSourceBtn:hover {{
+    text-decoration: underline;
+}}
+
+/* ── 컴팩트 확장 힌트 (+) ── */
+#compactExpandHint {{
+    color: {text_dim};
+    font-size: 14px;
+    font-weight: bold;
+    padding: 0;
+    background: transparent;
+}}
+
+/* ── 메인 GUI 탭바: 컴팩트 뷰 토글 버튼 (프리셋 바 스타일 통일) ── */
+#btnCompactView {{
+    background: {text_disabled};
+    color: {text_secondary};
+    border: none;
+    border-radius: 5px;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 2px 10px;      /* 상하 크기 증가 */
+    margin-top: 8px; 
+    margin-right: 22px;      /* 오른쪽 여백 */
+    min-height: 26px;       /* 버튼 높이 확보 */
+}}
+#btnCompactView:hover {{
+    background: {border_hover};
+}}
+#btnCompactView:checked {{
+    background: {accent_blue};
+    color: white;
 }}

@@ -1,4 +1,4 @@
-"""메인 윈도우 — 새 토글 기반 ControlTab + EngineController + 트레이 (Phase 4)
+"""메인 윈도우 — 새 토글 기반 ControlTab + EngineController + 트레이 + ★ 컴팩트 뷰
 
 [변경 이력 — Phase 4]
 - ControlTab의 request_mode_switch 시그널 연결
@@ -24,6 +24,14 @@
 
 [Hotfix] startup 모드에서 창이 뜨는 문제 수정
   - ★ start_hidden 플래그 추가
+
+[★ 컴팩트 뷰 추가]
+- CompactWindow + CompactBridge 인스턴스 관리
+- _connect_reverse_sync: ControlTab → CompactWindow 역방향 동기화
+- toggle_compact_view / _position_compact_window: 열기/닫기 + 위치 배치
+- 트레이 compact_view_requested 시그널 연결
+- _switch_mode / _refresh_tray_presets에 컴팩트 동기화 추가
+- _shutdown에 bridge cleanup 추가
 """
 
 import ctypes
@@ -32,6 +40,7 @@ import copy
 
 from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QMessageBox, QSystemTrayIcon, QApplication,
+    QPushButton,
 )
 from PySide6.QtCore import Qt, QTimer, QAbstractNativeEventFilter
 from PySide6.QtGui import QIcon
@@ -46,6 +55,10 @@ from ui.tab_control import ControlTab
 from ui.tab_color import ColorTab
 from ui.tab_setup import SetupTab
 from ui.tab_options import OptionsTab
+
+# ★ 컴팩트 뷰
+from ui.compact_window import CompactWindow
+from ui.compact_bridge import CompactBridge
 
 # Windows 메시지 상수
 WM_WTSSESSION_CHANGE = 0x02B1
@@ -116,6 +129,14 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_setup, "LED 설정")
         self.tabs.addTab(self.tab_options, "옵션")
 
+        # ★ 컴팩트 뷰 버튼 — 탭바 우측 코너
+        self.btn_compact_view = QPushButton("적게 보기")
+        self.btn_compact_view.setObjectName("btnCompactView")
+        self.btn_compact_view.setCheckable(True)
+        self.btn_compact_view.setToolTip("컴팩트 뷰 열기/닫기")
+        self.btn_compact_view.clicked.connect(self.toggle_compact_view)
+        self.tabs.setCornerWidget(self.btn_compact_view, Qt.Corner.TopRightCorner)
+
         self.tab_color.request_mirror_stop.connect(self._stop_engine_for_tab)
         self.tab_setup.request_mirror_stop.connect(self._stop_engine_for_tab)
 
@@ -147,6 +168,24 @@ class MainWindow(QMainWindow):
 
         # ★ 트레이 프리셋 메뉴 초기화
         self._refresh_tray_presets()
+
+        # ── ★ 컴팩트 뷰 ──
+        self.compact_window = CompactWindow()
+        self._compact_bridge = CompactBridge(
+            compact=self.compact_window,
+            tab=self.tab_control,
+            engine_ctrl=self.engine_ctrl,
+            config=self.config,
+            parent=self,
+        )
+        self._compact_bridge.connect_all()
+        self._connect_reverse_sync()
+        # ★ 컴팩트 창 닫힘 → 코너 버튼 체크 해제
+        self.compact_window.close_requested.connect(
+            lambda: self.btn_compact_view.setChecked(False)
+        )
+        # ★ 컴팩트 더블클릭 → 메인 GUI 열기
+        self.compact_window.expand_requested.connect(self._expand_from_compact)
 
         # ── 잠금 감지 + 디스플레이 변경 + 절전 복귀 ──
         self._was_running_before_lock = False
@@ -190,6 +229,158 @@ class MainWindow(QMainWindow):
         self.tray.preset_selected.connect(self._on_tray_preset_selected)  # ★
         self.tray.show_window_requested.connect(self._show_window)
         self.tray.quit_requested.connect(self._quit)
+        # ★ 컴팩트 뷰
+        if hasattr(self.tray, 'compact_view_requested'):
+            self.tray.compact_view_requested.connect(self.toggle_compact_view)
+
+    # ══════════════════════════════════════════════════════════════
+    #  ★ 컴팩트 뷰 — 역방향 동기화 + 토글
+    # ══════════════════════════════════════════════════════════════
+
+    def _connect_reverse_sync(self):
+        """ControlTab → CompactWindow 역방향 동기화.
+
+        [설계 변경] 개별 시그널 연결 대신 **주기적 폴링** 방식.
+
+        이유:
+        - ControlTab의 토글/슬라이더/프리셋 변경 경로가 매우 다양
+          (toggled, blockSignals+setChecked, _apply_preset_to_ui, 되돌리기 등)
+        - blockSignals로 바뀌는 경우 시그널이 안 나옴 → 누락
+        - 미디어 종속 관계(D=OFF→M=OFF) 등 복잡한 상태 전이
+
+        해결: 200ms 타이머로 ControlTab 상태를 읽어서 CompactWindow에 반영.
+        CPU 비용 무시 가능 (단순 비교 + blockSignals setValue).
+        """
+        self._compact_sync_timer = QTimer(self)
+        self._compact_sync_timer.setInterval(200)
+        self._compact_sync_timer.timeout.connect(self._poll_sync_to_compact)
+        self._compact_sync_timer.start()
+        self._compact_poll_count = 0  # ★ 미디어 카드는 5틱(1초)마다
+
+        # 프리셋 목록 변경은 즉시 반영 (목록 자체가 바뀌는 건 폴링으로 감지 어려움)
+        bridge = self._compact_bridge
+        self.tab_control.config_applied.connect(bridge.notify_preset_changed)
+
+        # ★ ControlTab의 미디어 타이머에 bridge 갱신도 연결 — 즉시 반영
+        self.tab_control._media_thumbnail_timer.timeout.connect(
+            bridge._update_media_card
+        )
+
+    def _poll_sync_to_compact(self):
+        """ControlTab 상태를 주기적으로 CompactWindow에 동기화."""
+        if not self.compact_window.isVisible():
+            return
+
+        tab = self.tab_control
+        compact = self.compact_window
+
+        # ── 토글 동기화 ──
+        for toggle_c, state_tab in [
+            (compact.toggle_display, tab._display_on),
+            (compact.toggle_audio, tab._audio_on),
+            (compact.toggle_media, tab._media_on),
+        ]:
+            if toggle_c.isChecked() != state_tab:
+                toggle_c.blockSignals(True)
+                toggle_c.setChecked(state_tab)
+                toggle_c.blockSignals(False)
+
+        # 내부 상태도 갱신
+        needs_section_update = (
+            compact._display_on != tab._display_on
+            or compact._audio_on != tab._audio_on
+            or compact._media_on != tab._media_on
+        )
+        compact._display_on = tab._display_on
+        compact._audio_on = tab._audio_on
+        compact._media_on = tab._media_on
+        if needs_section_update:
+            compact._update_conditional_sections()
+
+        # ── 밝기 동기화 ──
+        tab_bright = tab.slider_master_brightness.value()
+        if compact.slider_brightness.value() != tab_bright:
+            compact.slider_brightness.blockSignals(True)
+            compact.slider_brightness.setValue(tab_bright)
+            compact.slider_brightness.blockSignals(False)
+            compact.lbl_brightness.setText(f"{tab_bright}%")
+
+        # ── 실행 상태 ──
+        if compact._is_running != tab._is_running:
+            compact.sync_running_state(tab._is_running)
+
+        # ── 오디오 모드 ──
+        tab_mode = tab.section_audio._mode_key
+        current_mode = compact.combo_audio_mode.currentData()
+        if current_mode != tab_mode:
+            compact.combo_audio_mode.blockSignals(True)
+            for i in range(compact.combo_audio_mode.count()):
+                if compact.combo_audio_mode.itemData(i) == tab_mode:
+                    compact.combo_audio_mode.setCurrentIndex(i)
+                    break
+            compact.combo_audio_mode.blockSignals(False)
+
+        # ── 색상 상태 (D=OFF) ──
+        self._compact_bridge._sync_color_state()
+
+        # ── ★ 미디어 카드 (1초마다 = 5틱마다) ──
+        self._compact_poll_count += 1
+        if self._compact_poll_count >= 5:
+            self._compact_poll_count = 0
+            self._compact_bridge._update_media_card()
+
+    def toggle_compact_view(self):
+        """컴팩트 뷰 열기/닫기 토글."""
+        if self.compact_window.isVisible():
+            self.compact_window.hide()
+            self._compact_bridge.on_compact_hidden()
+        else:
+            self._position_compact_window()
+            self.compact_window.show()
+            self._compact_bridge.on_compact_shown()
+        # ★ 버튼 체크 상태 동기화
+        self.btn_compact_view.setChecked(self.compact_window.isVisible())
+
+    def _expand_from_compact(self):
+        """컴팩트 뷰에서 메인 GUI로 전환."""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _position_compact_window(self):
+        """컴팩트 윈도우를 적절한 위치에 배치.
+
+        메인 윈도우가 보이면 → 우측에 나란히.
+        메인 윈도우가 숨겨져 있으면 → 화면 우측 하단 (트레이 근처).
+        """
+        compact = self.compact_window
+        compact.adjustSize()
+
+        if self.isVisible():
+            # 메인 윈도우 우측에 배치
+            main_geo = self.geometry()
+            x = main_geo.right() + 10
+            y = main_geo.top()
+        else:
+            # 화면 우측 하단
+            screen = QApplication.primaryScreen()
+            if screen:
+                sg = screen.availableGeometry()
+                x = sg.right() - compact.width() - 20
+                y = sg.bottom() - compact.height() - 60
+            else:
+                x, y = 100, 100
+
+        # 화면 밖으로 나가지 않게 보정
+        screen = QApplication.primaryScreen()
+        if screen:
+            sg = screen.availableGeometry()
+            x = min(x, sg.right() - compact.width())
+            y = min(y, sg.bottom() - compact.height())
+            x = max(x, sg.left())
+            y = max(y, sg.top())
+
+        compact.move(x, y)
 
     # ══════════════════════════════════════════════════════════════
     #  엔진 제어
@@ -256,6 +447,10 @@ class MainWindow(QMainWindow):
         if last and self.engine_ctrl.engine:
             self.engine_ctrl.engine._media_detect_last_confirmed = last
 
+        # ★ 컴팩트 동기화
+        if hasattr(self, '_compact_bridge'):
+            self._compact_bridge.notify_tab_changed()
+
     def _toggle_pause(self):
         is_paused = self.engine_ctrl.toggle_pause()
         self.tab_control.update_pause_button(is_paused)
@@ -300,10 +495,13 @@ class MainWindow(QMainWindow):
             self._refresh_tray_presets()
 
     def _refresh_tray_presets(self):
-        """트레이 프리셋 메뉴 갱신."""
+        """트레이 + 컴팩트 프리셋 메뉴 갱신."""
         names = list_presets()
         current = self.tab_control.current_preset_name
         self.tray.update_preset_menu(names, current)
+        # ★ 컴팩트도 갱신
+        if hasattr(self, '_compact_bridge'):
+            self._compact_bridge.notify_preset_changed()
 
     # ══════════════════════════════════════════════════════════════
     #  엔진 상태 콜백
@@ -345,7 +543,7 @@ class MainWindow(QMainWindow):
         self.tab_control.update_pause_button(False)
 
     def _on_config_applied(self):
-        """★ config 저장 + 트레이 프리셋 메뉴 갱신."""
+        """★ config 저장 + 트레이/컴팩트 프리셋 메뉴 갱신."""
         self.tab_control._sync_config_from_ui()
         save_config(self.config)
         self._refresh_tray_presets()
@@ -457,6 +655,14 @@ class MainWindow(QMainWindow):
         self.device_manager.cleanup()
         self.tray.cleanup()
         self.tray.hide()
+
+        # ★ 컴팩트 뷰 정리
+        if hasattr(self, '_compact_sync_timer'):
+            self._compact_sync_timer.stop()
+        if hasattr(self, '_compact_bridge'):
+            self._compact_bridge.cleanup()
+        if hasattr(self, 'compact_window'):
+            self.compact_window.close()
 
         try:
             ctypes.windll.wtsapi32.WTSUnRegisterSessionNotification(

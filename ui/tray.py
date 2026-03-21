@@ -56,6 +56,7 @@ class SystemTray(QSystemTrayIcon):
     preset_selected = Signal(str)          # ★ 프리셋 선택
     show_window_requested = Signal()
     quit_requested = Signal()
+    compact_view_requested = Signal()
 
     def __init__(self, config, parent=None):
         if getattr(sys, 'frozen', False):
@@ -98,6 +99,18 @@ class SystemTray(QSystemTrayIcon):
 
         menu.addSeparator()
 
+        # ★ 컴팩트 뷰
+        self.compact_action = QAction("컴팩트 뷰", menu)
+        self.compact_action.triggered.connect(self.compact_view_requested.emit)
+        menu.addAction(self.compact_action)
+
+        # ★ "설정 열기" → "메인 GUI 열기"
+        show_action = QAction("메인 GUI 열기", menu)
+        show_action.triggered.connect(self.show_window_requested.emit)
+        menu.addAction(show_action)
+
+        menu.addSeparator()
+
         # ★ 프리셋 서브메뉴
         self._preset_menu = QMenu("프리셋", menu)
         self._preset_none_action = QAction("(프리셋 없음)", self._preset_menu)
@@ -114,11 +127,6 @@ class SystemTray(QSystemTrayIcon):
             )
             bright_menu.addAction(action)
         menu.addMenu(bright_menu)
-        menu.addSeparator()
-
-        show_action = QAction("설정 열기", menu)
-        show_action.triggered.connect(self.show_window_requested.emit)
-        menu.addAction(show_action)
         menu.addSeparator()
 
         quit_action = QAction("종료", menu)
@@ -176,7 +184,8 @@ class SystemTray(QSystemTrayIcon):
         hk_toggle = opts.get("hotkey_toggle", "ctrl+shift+o")
         hk_up = opts.get("hotkey_bright_up", "ctrl+shift+up")
         hk_down = opts.get("hotkey_bright_down", "ctrl+shift+down")
-        hk_audio_cycle = opts.get("hotkey_audio_cycle", "")  # ★ 새 핫키
+        hk_audio_cycle = opts.get("hotkey_audio_cycle", "ctrl+shift+a")
+        hk_compact = opts.get("hotkey_compact_view", "ctrl+shift+c")
 
         def _safe_add(hotkey_str, callback):
             if not hotkey_str.strip():
@@ -193,6 +202,7 @@ class SystemTray(QSystemTrayIcon):
         _safe_add(hk_up, lambda: self.brightness_delta.emit(10))
         _safe_add(hk_down, lambda: self.brightness_delta.emit(-10))
         _safe_add(hk_audio_cycle, self.audio_cycle_requested.emit)  # ★
+        _safe_add(hk_compact, self.compact_view_requested.emit)  # ★
 
     def _clear_hotkeys(self):
         if not HAS_KEYBOARD:

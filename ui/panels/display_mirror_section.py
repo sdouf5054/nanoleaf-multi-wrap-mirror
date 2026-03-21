@@ -438,7 +438,7 @@ class DisplayMirrorSection(QWidget):
             self._lbl_source_off.setVisible(False)
             self.lbl_media_source.setText("미디어 연동 활성")
             self.lbl_media_source.setStyleSheet(
-                f"color:{_pal_current()['media_active']};font-size:11px;font-weight:bold;"
+                f"color:{_pal_current()['media_active']};font-size:12px;font-weight:bold;"
                 "border:none;background:transparent;"
             )
             self.lbl_media_song.setText("미디어 정보 대기 중...")
@@ -478,7 +478,7 @@ class DisplayMirrorSection(QWidget):
 
         self.lbl_media_source.setText(text)
         self.lbl_media_source.setStyleSheet(
-            f"color:{color};font-size:11px;font-weight:bold;"
+            f"color:{color};font-size:12px;font-weight:bold;"
             "border:none;background:transparent;"
         )
 

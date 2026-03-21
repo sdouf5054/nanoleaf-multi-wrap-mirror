@@ -133,6 +133,20 @@ DARK = {
     "btn_refresh_bg":       "#363640",
     "btn_refresh_hover":    "#46465a",
     "btn_refresh_pressed":  "#2a2a34",
+
+    # ── 컴팩트 뷰 ──
+    "compact_bg":           "#2b2b30",
+    "compact_border":       "#555555",
+    "compact_status":       "#e0e0e0",
+    "compact_res":          "#999999",
+    "compact_bright":       "#aaaaaa",
+    "compact_close":        "#888888",
+    "compact_close_hover":  "#e74c3c",
+    "compact_preset_bg":    "#3a3a42",
+    "compact_default_star": "#f1c40f",
+    "compact_thumb_bg":     "#3a3a42",
+    "compact_song":         "#aaaaaa",
+    "compact_fix":          "#bbbbbb",
 }
 
 
@@ -236,4 +250,18 @@ LIGHT = {
     "btn_refresh_bg":       "#e8e8ec",
     "btn_refresh_hover":    "#dcdce0",
     "btn_refresh_pressed":  "#d0d0d4",
+
+    # ── 컴팩트 뷰 ──
+    "compact_bg":           "#f5f5f5",
+    "compact_border":       "#cccccc",
+    "compact_status":       "#333333",
+    "compact_res":          "#777777",
+    "compact_bright":       "#888888",
+    "compact_close":        "#aaaaaa",
+    "compact_close_hover":  "#e74c3c",
+    "compact_preset_bg":    "#ffffff",
+    "compact_default_star": "#d4ac0d",
+    "compact_thumb_bg":     "#eeeeee",
+    "compact_song":         "#666666",
+    "compact_fix":          "#888888",
 }

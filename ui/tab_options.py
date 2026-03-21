@@ -204,6 +204,10 @@ class OptionsTab(QWidget):
         audio_cycle_hint.setWordWrap(True)
         hotkey_layout.addWidget(audio_cycle_hint)
 
+        self.edit_compact_view = HotkeyEdit()
+        self.edit_compact_view.setText(self.opt.get("hotkey_compact_view", ""))
+        form.addRow("컴팩트 뷰 토글 :", self.edit_compact_view)
+
         btn_reset_hk = QPushButton("↩ 핫키 기본값 복원"); btn_reset_hk.setFixedWidth(160); btn_reset_hk.clicked.connect(self._reset_hotkeys); hotkey_layout.addWidget(btn_reset_hk)
         layout.addWidget(hotkey_group)
 
@@ -241,10 +245,12 @@ class OptionsTab(QWidget):
     def _on_hotkey_enabled_changed(self, state):
         enabled = bool(state)
         self.edit_toggle.setEnabled(enabled); self.edit_bright_up.setEnabled(enabled); self.edit_bright_down.setEnabled(enabled)
-        self.edit_audio_cycle.setEnabled(enabled)
+        self.edit_audio_cycle.setEnabled(enabled) 
+        self.edit_compact_view.setEnabled(enabled)
     def _reset_hotkeys(self):
         self.edit_toggle.setText("ctrl+shift+o"); self.edit_bright_up.setText("ctrl+shift+up"); self.edit_bright_down.setText("ctrl+shift+down")
-        self.edit_audio_cycle.setText("")
+        self.edit_audio_cycle.setText("ctrl+shift+a")
+        self.edit_compact_view.setText("ctrl+shift+c")
 
     def _on_theme_changed(self, _index):
         """★ 테마 콤보 변경 시 즉시 미리보기 적용."""
@@ -285,6 +291,7 @@ class OptionsTab(QWidget):
         self.opt["hotkey_bright_up"] = self.edit_bright_up.text().strip()
         self.opt["hotkey_bright_down"] = self.edit_bright_down.text().strip()
         self.opt["hotkey_audio_cycle"] = self.edit_audio_cycle.text().strip()
+        self.opt["hotkey_compact_view"] = self.edit_compact_view.text().strip()
 
         self.opt.pop("auto_start_mirror", None)
 
