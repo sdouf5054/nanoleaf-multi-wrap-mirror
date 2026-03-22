@@ -366,13 +366,12 @@ class ControlTab(QWidget):
         )
         orient_row.addWidget(self.combo_rotation)
 
-        # ★ Target FPS를 같은 줄에 추가
         orient_row.addWidget(QLabel("Target FPS:"))
         self.spin_target_fps = QSpinBox()
-        self.spin_target_fps.setRange(10, 60)
-        self.spin_target_fps.setValue(
-            self.config.get("mirror", {}).get("target_fps", 60)
-        )
+        self.spin_target_fps.setRange(2, 32)
+        self.spin_target_fps.setSuffix(" / 32")  # ★ 최대값을 항상 표시
+        saved_fps = self.config.get("mirror", {}).get("target_fps", 32)
+        self.spin_target_fps.setValue(min(saved_fps, 32))
         orient_row.addWidget(self.spin_target_fps)
 
         orient_row.addStretch()
