@@ -237,7 +237,7 @@ class ColorTab(DeviceOwnerMixin, QWidget):
         msg_info(self, "저장", "색상 설정이 저장되었습니다.")
 
     def _reset_defaults(self):
-        self.wb_r.setValue(1.00); self.wb_g.setValue(0.85); self.wb_b.setValue(0.70)
+        self.wb_r.setValue(1.00); self.wb_g.setValue(0.86); self.wb_b.setValue(0.67)
         self.gamma_r.setValue(1.00); self.gamma_g.setValue(1.00); self.gamma_b.setValue(1.00)
         self.bleed.setValue(0.60)
 

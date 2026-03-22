@@ -972,7 +972,7 @@ QLabel#lblFlowingHint {{
     font-size: 12px;
     font-weight: bold;
     padding: 2px 10px;      /* 상하 크기 증가 */
-    margin-top: 8px; 
+    margin-top: 4px; 
     margin-right: 22px;      /* 오른쪽 여백 */
     min-height: 26px;       /* 버튼 높이 확보 */
 }}
