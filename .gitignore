@@ -7,6 +7,10 @@ NanoleafMirror.lnk
 build/
 dist/
 *.spec
+!nanoleaf_mirror.spec
+!nanoleaf_mirror_native.spec
+*.manifest
+*.pdb
 Nanoleaf Mirror.lnk
 *.dll
 personal_config.json
@@ -15,6 +19,3 @@ personal_config.json
 config.json
 tree_nopycache.txt
 presets/
-!nanoleaf_mirror.spec
-*.manifest
-*.pdb

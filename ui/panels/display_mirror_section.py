@@ -64,7 +64,7 @@ _MIRROR_EFFECT_TO_INDEX = {v: k for k, v in _INDEX_MIRROR_EFFECT.items()}
 # ── ★ 미디어 소스 오버라이드 ──
 _MEDIA_SOURCE_ITEMS = [
     ("auto",   "자동 판별"),
-    ("media",  "앨범아트 강제"),
+    ("media",  "미디어 강제"),
     ("mirror", "미러링 강제"),
 ]
 _MEDIA_SOURCE_KEYS = [k for k, _ in _MEDIA_SOURCE_ITEMS]
@@ -158,7 +158,7 @@ class DisplayMirrorSection(QWidget):
         self.btn_refresh_thumbnail.setObjectName("btnRefreshThumb")
         self.btn_refresh_thumbnail.setFixedSize(32, 32)
         self.btn_refresh_thumbnail.setToolTip(
-            "앨범아트를 수동으로 다시 가져옵니다"
+            "미디어 이미지를 수동으로 다시 가져옵니다"
         )
         self.btn_refresh_thumbnail.clicked.connect(
             self.refresh_thumbnail_requested.emit
@@ -193,7 +193,7 @@ class DisplayMirrorSection(QWidget):
         msr.addWidget(self.btn_toggle_source)
 
         self.lbl_media_source_hint = QLabel(
-            "자동: 영상→미러링, 음원→앨범아트"
+            "자동: 영상→미러링, 음원→미디어"
         )
         self.lbl_media_source_hint.setProperty("role", "hint")
         msr.addWidget(self.lbl_media_source_hint)

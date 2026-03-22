@@ -5,6 +5,8 @@ dxcam을 대체하는 네이티브 DXGI 캡처 모듈.
 
 NativeScreenCapture는 StaleDetectionMixin을 사용하여
 capture.py와 동일한 stale detection 로직을 공유합니다.
+
+[디버그 로깅 추가] 로직 변경 없음 — clog() 호출만 삽입
 """
 
 import os
@@ -15,6 +17,7 @@ import time
 
 from core.capture_base import StaleDetectionMixin
 from core.constants import RECREATE_COOLDOWN
+from core.capture_log import clog
 
 # ── FastCapture 전용 상수 ─────────────────────────────────────────
 _ACCESS_LOST_REINIT_THRESHOLD = 5
@@ -50,6 +53,7 @@ class FastCapture:
         self._access_lost_count = 0
 
         dll_path = _find_dll()
+        clog("[native] FastCapture: dll=%s", dll_path)
         self._dll = ctypes.CDLL(dll_path)
         self._dll_path = dll_path
 
@@ -67,6 +71,8 @@ class FastCapture:
         self._dll.capture_cleanup.restype = None
 
         result = self._dll.capture_init(monitor_index, out_width, out_height)
+        clog("[native] capture_init: monitor=%d, out=%dx%d → result=%d",
+             monitor_index, out_width, out_height, result)
         if result != 0:
             error_map = {
                 -1: "D3D11 디바이스 생성 실패",
@@ -78,15 +84,17 @@ class FastCapture:
                 -7: "축소용 텍스처 생성 실패",
                 -8: "STAGING 텍스처 생성 실패",
             }
+            msg = error_map.get(result, '알 수 없는 오류')
+            clog("[native] capture_init 실패: %s", msg)
             raise RuntimeError(
-                f"네이티브 캡처 초기화 실패 (코드 {result}): "
-                f"{error_map.get(result, '알 수 없는 오류')}"
+                f"네이티브 캡처 초기화 실패 (코드 {result}): {msg}"
             )
 
         self._buf_size = out_width * out_height * 4
         self._buffer = ctypes.create_string_buffer(self._buf_size)
         self.screen_w = self._dll.capture_get_width()
         self.screen_h = self._dll.capture_get_height()
+        clog("[native] init OK: screen=%dx%d", self.screen_w, self.screen_h)
 
     def grab(self):
         """BGRA 프레임 캡처. 새 프레임이면 numpy 배열, 없으면 None."""
@@ -104,25 +112,29 @@ class FastCapture:
             return None
         elif result == -2:
             self._access_lost_count += 1
+            clog("[native] grab: access lost (count=%d)", self._access_lost_count)
             if self._access_lost_count <= _ACCESS_LOST_REINIT_THRESHOLD:
                 self._dll.capture_reset()
                 self.screen_w = self._dll.capture_get_width()
                 self.screen_h = self._dll.capture_get_height()
             else:
+                clog("[native] grab: access lost 초과 → full reinit")
                 try:
                     self._dll.capture_cleanup()
                     time.sleep(0.5)
                     init_result = self._dll.capture_init(
                         self.monitor_index, self.out_width, self.out_height
                     )
+                    clog("[native] full reinit result=%d", init_result)
                     if init_result == 0:
                         self.screen_w = self._dll.capture_get_width()
                         self.screen_h = self._dll.capture_get_height()
                         self._access_lost_count = 0
-                except Exception:
-                    pass
+                except Exception as e:
+                    clog("[native] full reinit 예외: %s", e)
             return None
         else:
+            clog("[native] grab: unexpected result=%d", result)
             return None
 
     def grab_rgb(self):
@@ -135,6 +147,7 @@ class FastCapture:
     def reset(self):
         """모니터 변경/해상도 변경 시 재초기화."""
         if not self._closed:
+            clog("[native] reset")
             self._dll.capture_reset()
             self.screen_w = self._dll.capture_get_width()
             self.screen_h = self._dll.capture_get_height()
@@ -145,18 +158,21 @@ class FastCapture:
         if self._closed:
             return False
         try:
+            clog("[native] full_reinit")
             self._dll.capture_cleanup()
             time.sleep(0.3)
             result = self._dll.capture_init(
                 self.monitor_index, self.out_width, self.out_height
             )
+            clog("[native] full_reinit result=%d", result)
             if result == 0:
                 self.screen_w = self._dll.capture_get_width()
                 self.screen_h = self._dll.capture_get_height()
                 self._access_lost_count = 0
                 return True
             return False
-        except Exception:
+        except Exception as e:
+            clog("[native] full_reinit 예외: %s", e)
             return False
 
     def close(self):
@@ -184,9 +200,11 @@ class NativeScreenCapture(StaleDetectionMixin):
         self.screen_w = 0
         self.screen_h = 0
         self._init_stale_detection()  # last_frame, _lock, _consecutive_nones 등
+        clog("[NativeSC] __init__: monitor=%d, grid=%dx%d", monitor_index, grid_cols, grid_rows)
 
     def start(self, max_wait=30, target_fps=60):
         """캡처 초기화."""
+        clog("[NativeSC] start: max_wait=%d, target_fps=%d", max_wait, target_fps)
         try:
             self._cap = FastCapture(
                 monitor_index=self.monitor_index,
@@ -195,29 +213,41 @@ class NativeScreenCapture(StaleDetectionMixin):
             )
             self.screen_w = self._cap.screen_w
             self.screen_h = self._cap.screen_h
+            clog("[NativeSC] FastCapture 생성 OK: screen=%dx%d", self.screen_w, self.screen_h)
 
             deadline = time.time() + max_wait
+            attempt = 0
             while time.time() < deadline:
+                attempt += 1
                 frame = self._cap.grab_rgb()
                 if frame is not None:
                     self.last_frame = frame
                     self._consecutive_nones = 0
+                    clog("[NativeSC] start 성공: attempt=%d, shape=%s, mean=%.1f",
+                         attempt, frame.shape, frame.mean())
                     return True
+                if attempt <= 5 or attempt % 20 == 0:
+                    clog("[NativeSC] start attempt=%d: grab_rgb=None", attempt)
                 time.sleep(0.1)
+
+            clog("[NativeSC] start: 타임아웃 (%d초), 프레임 못 잡음", max_wait)
             return True
 
         except Exception as e:
+            clog("[NativeSC] start 예외: %s → dxcam fallback", e)
             print(f"[NativeScreenCapture] 초기화 실패: {e}")
             print("[NativeScreenCapture] dxcam 폴백으로 전환합니다.")
             return self._fallback_start(max_wait, target_fps)
 
     def _fallback_start(self, max_wait, target_fps):
         """DLL 로드 실패 시 기존 dxcam으로 폴백."""
+        clog("[NativeSC] fallback → dxcam")
         from core.capture import ScreenCapture as DxcamCapture
         self._dxcam_fallback = DxcamCapture(self.monitor_index)
         result = self._dxcam_fallback.start(max_wait, target_fps)
         self.screen_w = self._dxcam_fallback.screen_w
         self.screen_h = self._dxcam_fallback.screen_h
+        clog("[NativeSC] fallback result=%s, screen=%dx%d", result, self.screen_w, self.screen_h)
         return result
 
     # ── StaleDetectionMixin 구현 ─────────────────────────────────
@@ -230,10 +260,12 @@ class NativeScreenCapture(StaleDetectionMixin):
 
     def _do_recreate(self):
         """FastCapture의 full reinit을 시도."""
+        clog("[NativeSC] _do_recreate")
         if self._cap is not None:
             if self._cap.full_reinit():
                 self.screen_w = self._cap.screen_w
                 self.screen_h = self._cap.screen_h
+                clog("[NativeSC] _do_recreate 성공: screen=%dx%d", self.screen_w, self.screen_h)
 
     # ── 프레임 획득 (공개 API) ───────────────────────────────────
 
@@ -266,6 +298,7 @@ class NativeScreenCapture(StaleDetectionMixin):
 
     def stop(self):
         """캡처 종료."""
+        clog("[NativeSC] stop")
         with self._lock:
             if hasattr(self, '_dxcam_fallback'):
                 self._dxcam_fallback.stop()

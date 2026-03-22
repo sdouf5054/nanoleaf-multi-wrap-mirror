@@ -100,7 +100,7 @@ class SystemTray(QSystemTrayIcon):
         menu.addSeparator()
 
         # ★ 컴팩트 뷰
-        self.compact_action = QAction("컴팩트 뷰", menu)
+        self.compact_action = QAction("적게 보기 열기", menu)
         self.compact_action.triggered.connect(self.compact_view_requested.emit)
         menu.addAction(self.compact_action)
 

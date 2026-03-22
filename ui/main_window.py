@@ -130,10 +130,10 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.tab_options, "옵션")
 
         # ★ 컴팩트 뷰 버튼 — 탭바 우측 코너
-        self.btn_compact_view = QPushButton("컴팩트 뷰")
+        self.btn_compact_view = QPushButton("적게 보기")
         self.btn_compact_view.setObjectName("btnCompactView")
         self.btn_compact_view.setCheckable(True)
-        self.btn_compact_view.setToolTip("컴팩트 뷰 열기/닫기")
+        self.btn_compact_view.setToolTip("적게 보기 열기/닫기")
         self.btn_compact_view.clicked.connect(self.toggle_compact_view)
         self.tabs.setCornerWidget(self.btn_compact_view, Qt.Corner.TopRightCorner)
 

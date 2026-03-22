@@ -28,7 +28,7 @@ display_enabled / audio_enabled 플래그로 모든 모드를 통합.
 [Refactor] _run_loop() 분해 + MirrorFrameResult 구조화
 (생략 — 기존과 동일)
 """
-
+from core.capture_log import clog
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -252,9 +252,15 @@ class UnifiedEngine(BaseEngine):
         try:
             h, w = frame.shape[:2]
         except (AttributeError, ValueError):
+            clog("[mirror] _downsample: frame shape 오류: %s", type(frame))  # ★ 추가
             return frame
         if h == self._active_grid_rows and w == self._active_grid_cols:
             return frame
+         # ★ 추가 (첫 번째 resize만 로깅)
+        if not hasattr(self, '_downsample_logged'):
+            clog("[mirror] _downsample: %dx%d → %dx%d", w, h,
+                 self._active_grid_cols, self._active_grid_rows)
+            self._downsample_logged = True
         return cv2.resize(
             frame,
             (self._active_grid_cols, self._active_grid_rows),
@@ -986,6 +992,12 @@ class UnifiedEngine(BaseEngine):
         # ── ★ 캡처 소스 선택 ──
         frame = self._grab_frame(ep)
         if frame is None:
+            # ★ 추가 (매 프레임 출력하면 로그 폭주하므로 100번마다)
+            if not hasattr(self, '_grab_none_count'):
+                self._grab_none_count = 0
+            self._grab_none_count += 1
+            if self._grab_none_count <= 3 or self._grab_none_count % 100 == 0:
+                clog("[mirror] _grab_frame → None (count=%d)", self._grab_none_count)
             return None
 
         new_last_good = time.monotonic()
@@ -1005,6 +1017,9 @@ class UnifiedEngine(BaseEngine):
                 cap_h = getattr(self._capture, 'screen_h', 0)
                 if (cap_w > 0 and cap_h > 0
                         and (cap_w != self._active_w or cap_h != self._active_h)):
+                    # ★ 추가
+                    clog("[mirror] 해상도 불일치 감지: cap=%dx%d vs active=%dx%d → display_change",
+                        cap_w, cap_h, self._active_w, self._active_h)
                     self._display_change_flag.set()
                     return None
             else:
@@ -1012,9 +1027,12 @@ class UnifiedEngine(BaseEngine):
                 cap_h = self._capture.screen_h
                 if (cap_w > 0 and cap_h > 0
                         and (cap_w != self._active_w or cap_h != self._active_h)):
+                    # ★ 추가
+                    clog("[mirror] 해상도 불일치 감지(native): cap=%dx%d vs active=%dx%d → display_change",
+                        cap_w, cap_h, self._active_w, self._active_h)
                     self._display_change_flag.set()
                     return None
-
+                
         # ── 색상 연산 ──
         _gradient_active = _has_mirror_gradient_effect(
             ep.color_effect, ep.gradient_sv_range, ep.gradient_hue_range
@@ -1146,6 +1164,11 @@ class UnifiedEngine(BaseEngine):
         new_led_off = False
         if led_turned_off:
             self.status_changed.emit("디스플레이 미러링 실행 중")
+        # ★ 추가
+        if hasattr(self, '_grab_none_count') and self._grab_none_count > 0:
+            clog("[mirror] 프레임 획득 성공 (이전 None %d회), shape=%s",
+                 self._grab_none_count, frame.shape)
+            self._grab_none_count = 0
 
         # ── 해상도 변경 감지 (기존과 동일) ──
         if not ep.use_media_frame:
@@ -1290,6 +1313,7 @@ class UnifiedEngine(BaseEngine):
         if stale_duration > _STALE_THRESHOLD:
             if now - last_recreate_time >= _STALE_RECREATE_COOLDOWN:
                 last_recreate_time = now
+                clog("[mirror] stale %.1fs → recreate 시도", stale_duration)
                 self.status_changed.emit("캡처 복구 중...")
                 self._capture._recreate()
                 new_w = self._capture.screen_w

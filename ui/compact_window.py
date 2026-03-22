@@ -397,7 +397,7 @@ class CompactWindow(QWidget):
         self.btn_media_refresh = QPushButton("↻")
         self.btn_media_refresh.setObjectName("btnRefreshThumb")
         self.btn_media_refresh.setFixedSize(28, 28)
-        self.btn_media_refresh.setToolTip("앨범아트 새로고침")
+        self.btn_media_refresh.setToolTip("미디어 새로고침")
         self.btn_media_refresh.clicked.connect(self._on_media_refresh_clicked)
         source_row.addWidget(self.btn_media_refresh)
 

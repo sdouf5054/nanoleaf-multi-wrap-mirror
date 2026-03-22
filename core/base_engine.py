@@ -32,6 +32,7 @@ from core.engine_utils import (
     _build_led_zone_map_by_side,
 )
 from core.platform import get_monitor_count, get_primary_resolution
+from core.capture_log import clog
 
 
 class BaseEngine(QThread):
@@ -205,6 +206,7 @@ class BaseEngine(QThread):
         mirror_cfg = self.config["mirror"]
         target_fps = mirror_cfg["target_fps"]
         init_res = get_primary_resolution()
+        clog("[engine] _init_capture: init_res=%s", init_res)           # ★ 추가
         if init_res[0] > 0 and init_res[1] > 0:
             grid_cols, grid_rows = self._resolve_grid_size(init_res[0], init_res[1])
         else:
@@ -212,6 +214,7 @@ class BaseEngine(QThread):
             grid_rows = mirror_cfg.get("grid_rows", 32)
         self._active_grid_cols = grid_cols
         self._active_grid_rows = grid_rows
+        clog("[engine] _init_capture: grid=%dx%d", grid_cols, grid_rows)  # ★ 추가
         self.status_changed.emit("화면 캡처 초기화...")
         try:
             from native_capture import NativeScreenCapture as ScreenCapture
@@ -220,14 +223,24 @@ class BaseEngine(QThread):
                 monitor_index=mirror_cfg["monitor_index"],
                 grid_cols=grid_cols, grid_rows=grid_rows,
             )
+            clog("[engine] using NativeScreenCapture")                   # ★ 추가
         except ImportError:
             from core.capture import ScreenCapture
             self._native_capture = False
             self._capture = ScreenCapture(mirror_cfg["monitor_index"])
+            clog("[engine] using dxcam ScreenCapture")                   # ★ 추가
         self._capture.start(target_fps=target_fps)
+
+        # ★ 아래 블록 추가 (start 직후)
+        clog("[engine] start() 완료: screen=%dx%d, last_frame=%s",
+             self._capture.screen_w, self._capture.screen_h,
+             "None" if self._capture.last_frame is None
+             else "shape=%s" % (self._capture.last_frame.shape,))
+
         self.status_changed.emit("가중치 행렬 생성...")
         self._active_w = self._capture.screen_w
         self._active_h = self._capture.screen_h
+        clog("[engine] active=%dx%d", self._active_w, self._active_h)   # ★ 추가
         self._weight_matrix = self._build_layout(self._active_w, self._active_h)
 
     def _init_usb(self):
@@ -327,6 +340,7 @@ class BaseEngine(QThread):
 
     def _handle_display_change(self):
         self._display_change_flag.clear()
+        clog("[engine] _handle_display_change: active was %dx%d", self._active_w, self._active_h)
         self.status_changed.emit("디스플레이 변경 — 재초기화 중...")
         if self._capture is not None:
             try:
@@ -369,6 +383,9 @@ class BaseEngine(QThread):
         except (ValueError, IndexError, np.linalg.LinAlgError) as e:
             self.status_changed.emit(f"layout 재빌드 실패: {e}")
         self._expected_resolution = new_res
+        clog("[engine] _handle_display_change 완료: active=%dx%d, grid=%dx%d",
+             self._active_w, self._active_h,
+             self._active_grid_cols, self._active_grid_rows)
 
     # ══════════════════════════════════════════════════════════════
     #  QThread 진입점
