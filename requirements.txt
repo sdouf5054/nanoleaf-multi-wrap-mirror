@@ -1,23 +1,30 @@
-# Core dependencies
+# Nanoleaf Screen Mirror — Dependencies
+
+# Core
 numpy>=1.24
 opencv-python>=4.8
+Pillow>=10.0
 
-# Qt framework
+# Qt
 PySide6>=6.6
 
-# USB HID (Windows only)
+# Screen capture
+mss>=9.0
+dxcam                          # DXGI Desktop Duplication (Windows, optional fallback)
+
+# Audio capture (Windows WASAPI Loopback)
+PyAudioWPatch
+
+# USB HID
 hidapi>=0.14
 
-# Screen capture (Windows only — install manually)
-# pip install dxcam
-
-# Audio capture (Windows only)
-# pip install PyAudioWPatch
-
-# Utilities
+# System
 keyboard>=0.13
-Pillow>=10.0
 psutil>=5.9
 
-# 미디어 연동 (선택 — 앨범 아트 + PlaybackType 판별)
-# pip install winrt-runtime winrt-Windows.Media.Control winrt-Windows.Storage.Streams winrt-Windows.Foundation winrt-Windows.Media
+# Media session (Windows SMTC — album art + playback type)
+winrt-runtime
+winrt-Windows.Media.Control
+winrt-Windows.Storage.Streams
+winrt-Windows.Foundation
+winrt-Windows.Media

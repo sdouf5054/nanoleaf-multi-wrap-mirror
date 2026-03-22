@@ -10,6 +10,10 @@
 - ctypes.windll 직접 호출 제거
 - core.platform.get_monitor_count / get_primary_resolution 사용
 - 비-Windows 환경에서도 import 및 테스트 가능
+
+[mss fallback 대응]
+- _init_capture: mss fallback 시 set_grid_size() 전달
+- debug_profile 옵션에 따라 캡처 로깅 활성화 (capture_debug.log)
 """
 
 import time
@@ -32,7 +36,7 @@ from core.engine_utils import (
     _build_led_zone_map_by_side,
 )
 from core.platform import get_monitor_count, get_primary_resolution
-from core.capture_log import clog
+from core.capture_log import clog, enable_capture_log
 
 
 class BaseEngine(QThread):
@@ -206,7 +210,12 @@ class BaseEngine(QThread):
         mirror_cfg = self.config["mirror"]
         target_fps = mirror_cfg["target_fps"]
         init_res = get_primary_resolution()
-        clog("[engine] _init_capture: init_res=%s", init_res)           # ★ 추가
+
+        # debug_profile이 켜져 있으면 캡처 로깅 활성화
+        if self.config.get("options", {}).get("debug_profile", False):
+            enable_capture_log()
+
+        clog("[engine] _init_capture: init_res=%s", init_res)
         if init_res[0] > 0 and init_res[1] > 0:
             grid_cols, grid_rows = self._resolve_grid_size(init_res[0], init_res[1])
         else:
@@ -214,7 +223,7 @@ class BaseEngine(QThread):
             grid_rows = mirror_cfg.get("grid_rows", 32)
         self._active_grid_cols = grid_cols
         self._active_grid_rows = grid_rows
-        clog("[engine] _init_capture: grid=%dx%d", grid_cols, grid_rows)  # ★ 추가
+        clog("[engine] _init_capture: grid=%dx%d", grid_cols, grid_rows)
         self.status_changed.emit("화면 캡처 초기화...")
         try:
             from native_capture import NativeScreenCapture as ScreenCapture
@@ -223,24 +232,26 @@ class BaseEngine(QThread):
                 monitor_index=mirror_cfg["monitor_index"],
                 grid_cols=grid_cols, grid_rows=grid_rows,
             )
-            clog("[engine] using NativeScreenCapture")                   # ★ 추가
+            clog("[engine] using NativeScreenCapture")
         except ImportError:
             from core.capture import ScreenCapture
             self._native_capture = False
             self._capture = ScreenCapture(mirror_cfg["monitor_index"])
-            clog("[engine] using dxcam ScreenCapture")                   # ★ 추가
+            clog("[engine] using dxcam ScreenCapture")
+        # mss fallback 시 grid 크기 전달
+        if hasattr(self._capture, 'set_grid_size'):
+            self._capture.set_grid_size(grid_cols, grid_rows)
         self._capture.start(target_fps=target_fps)
-
-        # ★ 아래 블록 추가 (start 직후)
-        clog("[engine] start() 완료: screen=%dx%d, last_frame=%s",
+        clog("[engine] start() 완료: screen=%dx%d, last_frame=%s, mode=%s",
              self._capture.screen_w, self._capture.screen_h,
              "None" if self._capture.last_frame is None
-             else "shape=%s" % (self._capture.last_frame.shape,))
+             else "shape=%s" % (self._capture.last_frame.shape,),
+             getattr(self._capture, '_mode', getattr(self._capture, '_fallback', 'N/A')))
 
         self.status_changed.emit("가중치 행렬 생성...")
         self._active_w = self._capture.screen_w
         self._active_h = self._capture.screen_h
-        clog("[engine] active=%dx%d", self._active_w, self._active_h)   # ★ 추가
+        clog("[engine] active=%dx%d", self._active_w, self._active_h)
         self._weight_matrix = self._build_layout(self._active_w, self._active_h)
 
     def _init_usb(self):

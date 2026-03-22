@@ -45,7 +45,8 @@ a = Analysis(
         'cv2',
         'numpy',
         'psutil',
-
+        'mss',
+        
         # ── PySide6 플러그인 (누락 방지) ──
         'PySide6.QtSvg',
 
