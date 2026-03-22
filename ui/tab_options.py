@@ -279,7 +279,14 @@ class OptionsTab(QWidget):
         layout.addLayout(btn_layout); layout.addStretch()
         self._on_hotkey_enabled_changed(self.chk_hotkey.checkState())
 
-    def _on_tray_changed(self, state): self.chk_minimize.setEnabled(bool(state))
+    def _on_tray_changed(self, state):
+        if not bool(state):
+            # ★ 트레이 해제 → 최소화도 같이 해제 + 비활성화
+            self.chk_minimize.setChecked(False)
+            self.chk_minimize.setEnabled(False)
+        else:
+            # ★ 트레이 활성 → 최소화 체크박스 활성화 (수동으로 켜야 함)
+            self.chk_minimize.setEnabled(True)
     def _on_hotkey_enabled_changed(self, state):
         enabled = bool(state)
         self.edit_toggle.setEnabled(enabled); self.edit_bright_up.setEnabled(enabled); self.edit_bright_down.setEnabled(enabled)

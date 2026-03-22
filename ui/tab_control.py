@@ -134,6 +134,7 @@ class ControlTab(QWidget):
         self._audio_on = opts.get("default_audio_enabled", False)
         self._media_on = opts.get("default_media_enabled", False)
         self._last_media_confirmed = None  # ★ 엔진 재시작 시 판별값 보존
+        self._media_before_display_off = False  # ★ 디스플레이 OFF 시 미디어 토글 상태 보존
 
         # ★ 프리셋 상태
         self._current_preset_name = None   # 현재 선택된 프리셋 이름 (None=미선택)
@@ -347,6 +348,7 @@ class ControlTab(QWidget):
         lay.addWidget(self._make_separator())
 
         # 공통 설정
+        # 화면 방향 + 세로 회전 + Target FPS — 한 줄
         orient_row = QHBoxLayout()
         orient_row.addWidget(QLabel("화면 방향:"))
         self.combo_orientation = QComboBox()
@@ -363,19 +365,18 @@ class ControlTab(QWidget):
             0 if self.config.get("mirror", {}).get("portrait_rotation", "cw") == "cw" else 1
         )
         orient_row.addWidget(self.combo_rotation)
-        orient_row.addStretch()
-        lay.addLayout(orient_row)
 
-        fps_row = QHBoxLayout()
-        fps_row.addWidget(QLabel("Target FPS:"))
+        # ★ Target FPS를 같은 줄에 추가
+        orient_row.addWidget(QLabel("Target FPS:"))
         self.spin_target_fps = QSpinBox()
         self.spin_target_fps.setRange(10, 60)
         self.spin_target_fps.setValue(
             self.config.get("mirror", {}).get("target_fps", 60)
         )
-        fps_row.addWidget(self.spin_target_fps)
-        fps_row.addStretch()
-        lay.addLayout(fps_row)
+        orient_row.addWidget(self.spin_target_fps)
+
+        orient_row.addStretch()
+        lay.addLayout(orient_row)
 
         audio_row = QHBoxLayout()
         audio_row.addWidget(QLabel("오디오 디바이스:"))
@@ -936,15 +937,26 @@ class ControlTab(QWidget):
         if hasattr(self, 'section_audio'):
             self.section_audio.set_display_enabled(checked)
 
-        # ★ 디스플레이 OFF → 미디어 토글도 끄기 (종속 관계)
-        if not checked and self._media_on:
-            self._media_on = False
-            self.toggle_media.blockSignals(True)
-            self.toggle_media.setChecked(False)
-            self.toggle_media.blockSignals(False)
-            self._media_thumbnail_timer.stop()
+        if not checked:
+            # ★ OFF 전 미디어 상태를 기억한 뒤 끄기
+            self._media_before_display_off = self._media_on
+            if self._media_on:
+                self._media_on = False
+                self.toggle_media.blockSignals(True)
+                self.toggle_media.setChecked(False)
+                self.toggle_media.blockSignals(False)
+                self._media_thumbnail_timer.stop()
+        else:
+            # ★ ON 시 직전 상태 복원
+            if self._media_before_display_off and HAS_MEDIA_SESSION:
+                self._media_on = True
+                self.toggle_media.blockSignals(True)
+                self.toggle_media.setChecked(True)
+                self.toggle_media.blockSignals(False)
+
         # 미디어 토글은 디스플레이 ON일 때만 활성
         self.toggle_media.setEnabled(checked and HAS_MEDIA_SESSION)
+        
         # 미러링 패널에 소스 상태 갱신
         if hasattr(self, 'section_mirror'):
             self.section_mirror.set_media_active(self._media_on and checked)
