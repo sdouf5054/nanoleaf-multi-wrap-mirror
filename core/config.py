@@ -58,7 +58,7 @@ DEFAULT_CONFIG = {
     },
     "mirror": {
         "monitor_index": 0,
-        "target_fps": 32,
+        "target_fps": 36,
         "grid_cols": 64,
         "grid_rows": 32,
         "decay_radius": 0.30,
