@@ -1085,10 +1085,10 @@ class ControlTab(QWidget):
 
         # ★ 미러링 패널의 앨범아트 썸네일 갱신
         if hasattr(self, 'section_mirror'):
-            frame = provider.get_frame()
-            if frame is not None:
-                self.section_mirror.update_media_thumbnail(frame)
-            else:
+            thumb = provider.get_thumbnail()
+            if thumb is not None:
+                self.section_mirror.update_media_thumbnail(thumb)
+            if thumb is None:
                 self.section_mirror.set_media_thumbnail_placeholder()
 
         # ★ 곡 정보를 카드 라벨 + 썸네일 툴팁에 설정

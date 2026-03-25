@@ -189,6 +189,30 @@ def _thumbnail_bytes_to_frame(raw_bytes, grid_cols, grid_rows):
         return None
 
 
+def _thumbnail_bytes_to_square(raw_bytes, size=128):
+    """raw 이미지 바이트 → 정사각형 썸네일 (원본 비율 유지, 패딩 없음).
+
+    UI 표시용. LED 파이프라인과 무관하게 원본 비율을 유지한 채
+    size×size 안에 맞춰 리사이즈.
+
+    Args:
+        raw_bytes: bytes — JPEG/PNG 등 이미지 데이터
+        size: int — 최대 변 길이 (기본 128)
+
+    Returns:
+        (h, w, 3) uint8 RGB (h, w ≤ size) 또는 None
+    """
+    if not HAS_PIL or raw_bytes is None:
+        return None
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        img = img.convert("RGB")
+        img.thumbnail((size, size), Image.LANCZOS)
+        return np.array(img, dtype=np.uint8)
+    except Exception:
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════
 #  MediaFrameProvider
 # ══════════════════════════════════════════════════════════════════
@@ -216,6 +240,7 @@ class MediaFrameProvider:
         # ── 캐시 (lock 보호) ──
         self._lock = threading.Lock()
         self._cached_frame: Optional[np.ndarray] = None  # (rows, cols, 3) uint8
+        self._cached_thumbnail: Optional[np.ndarray] = None  # ★ 원본 비율 썸네일 (UI용)
         self._cached_title: str = ""
         self._cached_artist: str = ""
         self._cached_playback_type: str = "unknown"  # ★ music/video/image/unknown
@@ -253,6 +278,7 @@ class MediaFrameProvider:
             self._thread = None
         with self._lock:
             self._cached_frame = None
+            self._cached_thumbnail = None
             self._cached_title = ""
             self._cached_artist = ""
             self._cached_playback_type = "unknown"
@@ -286,6 +312,20 @@ class MediaFrameProvider:
                 "artist": self._cached_artist,
                 "playback_type": self._cached_playback_type,
             }
+
+    def get_thumbnail(self, size: int = 128) -> Optional[np.ndarray]:
+        """원본 비율 정사각형 썸네일 반환 (UI 표시용).
+
+        get_frame()은 LED 파이프라인용 (grid_rows × grid_cols)으로
+        비율이 왜곡되므로, UI 썸네일에는 이 메서드를 사용.
+
+        Returns:
+            (size, size, 3) uint8 RGB 또는 None
+        """
+        with self._lock:
+            if self._cached_thumbnail is None:
+                return None
+            return self._cached_thumbnail.copy()
 
     def update_grid_size(self, grid_cols, grid_rows):
         """grid 크기 변경 시 호출 — 캐시된 프레임을 새 크기로 리사이즈.
@@ -364,6 +404,8 @@ class MediaFrameProvider:
         frame = _thumbnail_bytes_to_frame(
             raw_bytes, self.grid_cols, self.grid_rows
         )
+        # ★ UI용 정사각형 썸네일 (원본 비율 유지)
+        thumbnail = _thumbnail_bytes_to_square(raw_bytes, 128)
 
         with self._lock:
             self._cached_title = title
@@ -371,6 +413,8 @@ class MediaFrameProvider:
             self._media_hash = new_hash
             if frame is not None:
                 self._cached_frame = frame
+            if thumbnail is not None:
+                self._cached_thumbnail = thumbnail
             # frame이 None이면 기존 캐시 유지 (이전 곡 프레임)
             # → 썸네일 실패 시 깜빡임 방지
 
@@ -382,3 +426,4 @@ class MediaFrameProvider:
             self._cached_playback_type = "unknown"
             self._media_hash = 0
             self._cached_frame = None
+            self._cached_thumbnail = None

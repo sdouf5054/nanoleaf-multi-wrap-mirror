@@ -394,12 +394,12 @@ class CompactBridge(QObject):
             source_state = "active"
 
         thumb_pixmap = None
-        frame = provider.get_frame()
-        if frame is not None:
+        thumb = provider.get_thumbnail()
+        if thumb is not None:
             try:
                 from PySide6.QtGui import QImage, QPixmap
-                h, w = frame.shape[:2]
-                qimg = QImage(frame.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+                h, w = thumb.shape[:2]
+                qimg = QImage(thumb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
                 pixmap = QPixmap.fromImage(qimg)
                 thumb_pixmap = pixmap.scaled(
                     42, 42,
