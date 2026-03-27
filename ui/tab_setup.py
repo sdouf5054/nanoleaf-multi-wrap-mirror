@@ -6,6 +6,20 @@
   - 코너 테이블 행 수가 바퀴 수에 맞게 동적 조절.
   - _load_from_config / _generate_segments가 임의 바퀴 수를 지원.
   - 모니터 크기 프리셋 힌트 제공.
+
+[★ 감는 방향(CW/CCW) 실제 반영]
+  기존 문제: combo_direction이 UI에 존재했지만 세그먼트 생성에 반영되지 않음.
+  모든 시작 위치에서 항상 시계방향 sides_order만 사용.
+
+  해결:
+  - _START_POSITIONS에 CW/CCW 양방향 sides + headers 정의
+  - combo_direction 변경 시 _rebuild_corner_table()로 헤더 갱신
+  - _generate_segments()에서 현재 방향에 맞는 sides_order 사용
+  - config에 wrap_direction 저장/복원
+
+  예시 — "우하" 시작:
+    CW:  bottom → left → top → right  (우하→좌하→좌상→우상)
+    CCW: right → top → left → bottom  (우하→우상→좌상→좌하) ← 댓글 케이스
 """
 
 import time
@@ -34,34 +48,80 @@ _MONITOR_PRESETS = [
     ("34인치 울트라와이드 — 권장 1바퀴", 1),
 ]
 
-# 시작 코너 위치 — sides_order + column_headers 매핑
-# sides: 시작 코너에서 시계방향으로 4변의 순서
-# corners: config에 저장되는 코너 약어 (시작→끝 순서)
-# headers: 코너 테이블 열 헤더
+# ══════════════════════════════════════════════════════════════════
+#  시작 코너 × 감는 방향 정의
+# ══════════════════════════════════════════════════════════════════
+#
+# 각 시작 위치에서 CW(시계방향)와 CCW(반시계방향)의:
+#   - sides: 코너를 순서대로 지나는 4변의 이름
+#   - corners: config에 저장되는 코너 약어 (시작 코너부터 순서대로)
+#   - headers: 코너 테이블 열 헤더
+#
+# 예: "우하" 시작
+#   CW:  우하→좌하→좌상→우상  (bottom, left, top, right)
+#   CCW: 우하→우상→좌상→좌하  (right, top, left, bottom)
+
 _START_POSITIONS = {
     "좌하 (기본)": {
-        "sides": ["left", "top", "right", "bottom"],
-        "corners": ("bl", "tl", "tr", "br"),
-        "headers": ["시작(좌하)", "좌상", "우상", "우하", "끝점"],
+        "cw": {
+            "sides": ["left", "top", "right", "bottom"],
+            "corners": ("bl", "tl", "tr", "br"),
+            "headers": ["시작(좌하)", "좌상", "우상", "우하", "끝점"],
+        },
+        "ccw": {
+            "sides": ["bottom", "right", "top", "left"],
+            "corners": ("bl", "br", "tr", "tl"),
+            "headers": ["시작(좌하)", "우하", "우상", "좌상", "끝점"],
+        },
     },
     "좌상": {
-        "sides": ["top", "right", "bottom", "left"],
-        "corners": ("tl", "tr", "br", "bl"),
-        "headers": ["시작(좌상)", "우상", "우하", "좌하", "끝점"],
+        "cw": {
+            "sides": ["top", "right", "bottom", "left"],
+            "corners": ("tl", "tr", "br", "bl"),
+            "headers": ["시작(좌상)", "우상", "우하", "좌하", "끝점"],
+        },
+        "ccw": {
+            "sides": ["left", "bottom", "right", "top"],
+            "corners": ("tl", "bl", "br", "tr"),
+            "headers": ["시작(좌상)", "좌하", "우하", "우상", "끝점"],
+        },
     },
     "우상": {
-        "sides": ["right", "bottom", "left", "top"],
-        "corners": ("tr", "br", "bl", "tl"),
-        "headers": ["시작(우상)", "우하", "좌하", "좌상", "끝점"],
+        "cw": {
+            "sides": ["right", "bottom", "left", "top"],
+            "corners": ("tr", "br", "bl", "tl"),
+            "headers": ["시작(우상)", "우하", "좌하", "좌상", "끝점"],
+        },
+        "ccw": {
+            "sides": ["top", "left", "bottom", "right"],
+            "corners": ("tr", "tl", "bl", "br"),
+            "headers": ["시작(우상)", "좌상", "좌하", "우하", "끝점"],
+        },
     },
     "우하": {
-        "sides": ["bottom", "left", "top", "right"],
-        "corners": ("br", "bl", "tl", "tr"),
-        "headers": ["시작(우하)", "좌하", "좌상", "우상", "끝점"],
+        "cw": {
+            "sides": ["bottom", "left", "top", "right"],
+            "corners": ("br", "bl", "tl", "tr"),
+            "headers": ["시작(우하)", "좌하", "좌상", "우상", "끝점"],
+        },
+        "ccw": {
+            "sides": ["right", "top", "left", "bottom"],
+            "corners": ("br", "tr", "tl", "bl"),
+            "headers": ["시작(우하)", "우상", "좌상", "좌하", "끝점"],
+        },
     },
 }
 
 _START_POS_KEYS = list(_START_POSITIONS.keys())
+
+# 감는 방향 콤보 인덱스 ↔ 키
+_DIR_INDEX_TO_KEY = {0: "cw", 1: "ccw"}
+_DIR_KEY_TO_INDEX = {"cw": 0, "ccw": 1}
+
+
+def _get_pos_info(start_position, direction):
+    """시작 위치 + 방향에 해당하는 sides/corners/headers dict 반환."""
+    return _START_POSITIONS[start_position][direction]
 
 
 class LedScanThread(QThread):
@@ -138,6 +198,9 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         # ★ 시작 위치
         saved_start = self.layout_cfg.get("start_position", "좌하 (기본)")
         self._start_position = saved_start if saved_start in _START_POS_KEYS else "좌하 (기본)"
+        # ★ 감는 방향: config에서 읽기 (기본 "cw")
+        saved_dir = self.layout_cfg.get("wrap_direction", "cw")
+        self._wrap_direction = saved_dir if saved_dir in ("cw", "ccw") else "cw"
 
         self._init_device_owner(device_manager)
         self._build_ui()
@@ -187,6 +250,9 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         row1.addWidget(QLabel("감는 방향:"))
         self.combo_direction = QComboBox()
         self.combo_direction.addItems(["시계방향 (LED 번호 감소)", "반시계방향 (LED 번호 증가)"])
+        # ★ config에서 복원
+        self.combo_direction.setCurrentIndex(_DIR_KEY_TO_INDEX.get(self._wrap_direction, 0))
+        self.combo_direction.currentIndexChanged.connect(self._on_direction_changed)
         row1.addWidget(self.combo_direction)
         row1.addStretch()
         basic_layout.addLayout(row1)
@@ -216,14 +282,12 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         for label in _START_POS_KEYS:
             self.combo_start_pos.addItem(label)
         # config에서 복원
-        saved_start = self.layout_cfg.get("start_position", "좌하 (기본)")
-        idx = _START_POS_KEYS.index(saved_start) if saved_start in _START_POS_KEYS else 0
-        self._start_position = _START_POS_KEYS[idx]
+        idx = _START_POS_KEYS.index(self._start_position) if self._start_position in _START_POS_KEYS else 0
         self.combo_start_pos.setCurrentIndex(idx)
         self.combo_start_pos.currentIndexChanged.connect(self._on_start_pos_changed)
         self.combo_start_pos.setToolTip(
             "LED 스트립이 시작되는 모니터 코너.\n"
-            "선택한 코너부터 시계방향으로 코너를 순서대로 기록합니다."
+            "선택한 코너부터 감는 방향에 따라 코너를 순서대로 기록합니다."
         )
         row3.addWidget(self.combo_start_pos)
         row3.addStretch()
@@ -321,14 +385,14 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         btn_save = QPushButton("LED 레이아웃 저장")
         btn_save.clicked.connect(self._save)
         btn_layout.addWidget(btn_save)
-        
+
         layout.addLayout(btn_layout)
 
-    # ── ★ 바퀴 수 동적 변경 ──
+    # ── ★ 바퀴 수 / 방향 / 시작 위치 동적 변경 ──
 
     def _rebuild_corner_table(self):
-        """바퀴 수 + 시작 위치에 맞게 코너 테이블을 재구성."""
-        pos_info = _START_POSITIONS[self._start_position]
+        """바퀴 수 + 시작 위치 + 감는 방향에 맞게 코너 테이블을 재구성."""
+        pos_info = _get_pos_info(self._start_position, self._wrap_direction)
         self.corner_table.setRowCount(self._n_wraps)
         self.corner_table.setColumnCount(5)
         self.corner_table.setHorizontalHeaderLabels(pos_info["headers"])
@@ -380,6 +444,11 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self._start_position = _START_POS_KEYS[index]
         self._rebuild_corner_table()
 
+    def _on_direction_changed(self, index):
+        """★ 감는 방향 콤보 변경 시 테이블 헤더 갱신."""
+        self._wrap_direction = _DIR_INDEX_TO_KEY.get(index, "cw")
+        self._rebuild_corner_table()
+
     # ── config 로드 ──
 
     def _load_from_config(self):
@@ -394,6 +463,16 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self.combo_start_pos.setCurrentIndex(idx)
         self.combo_start_pos.blockSignals(False)
 
+        # ★ 감는 방향 복원
+        saved_dir = self.layout_cfg.get("wrap_direction", "cw")
+        if saved_dir in ("cw", "ccw"):
+            self._wrap_direction = saved_dir
+        else:
+            self._wrap_direction = "cw"
+        self.combo_direction.blockSignals(True)
+        self.combo_direction.setCurrentIndex(_DIR_KEY_TO_INDEX.get(self._wrap_direction, 0))
+        self.combo_direction.blockSignals(False)
+
         # ★ 바퀴 수 복원
         saved_wraps = self.layout_cfg.get("n_wraps", 2)
         if saved_wraps != self._n_wraps:
@@ -405,8 +484,8 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self._rebuild_corner_table()
         self._corner_group.setTitle(f"코너 데이터 ({self._n_wraps}바퀴)")
 
-        # ★ 코너 데이터 복원 — 시작 위치의 corners 순서에 맞게 매핑
-        pos_info = _START_POSITIONS[self._start_position]
+        # ★ 코너 데이터 복원 — 시작 위치 + 방향의 corners 순서에 맞게 매핑
+        pos_info = _get_pos_info(self._start_position, self._wrap_direction)
         corner_abbrs = pos_info["corners"]  # (c0, c1, c2, c3)
         corners = self.layout_cfg.get("corners", {})
         for w in range(self._n_wraps):
@@ -523,10 +602,10 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         return True, ""
 
     def _generate_segments(self):
-        pos_info = _START_POSITIONS[self._start_position]
+        """★ 시작 위치 + 감는 방향에 따라 세그먼트를 생성."""
+        pos_info = _get_pos_info(self._start_position, self._wrap_direction)
         sides_order = pos_info["sides"]
         corner_names = pos_info["corners"]  # 4개: (c0, c1, c2, c3)
-        # 컬럼 순서: 시작(c0), c1, c2, c3, 끝점(=c0 of next wrap)
 
         try:
             corners_all = []
@@ -563,6 +642,7 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self.layout_cfg["segments"] = segments
         self.layout_cfg["n_wraps"] = self._n_wraps
         self.layout_cfg["start_position"] = self._start_position
+        self.layout_cfg["wrap_direction"] = self._wrap_direction  # ★ 방향 저장
         self._update_seg_preview()
         msg_info(self, "세그먼트", f"{len(segments)}개 세그먼트 생성 완료.")
 
@@ -577,6 +657,7 @@ class SetupTab(DeviceOwnerMixin, QWidget):
         self.config["device"]["led_count"] = self.spin_led_count.value()
         self.layout_cfg["n_wraps"] = self._n_wraps
         self.layout_cfg["start_position"] = self._start_position
+        self.layout_cfg["wrap_direction"] = self._wrap_direction  # ★ 방향 저장
         if not self.layout_cfg.get("segments"):
             self._generate_segments()
         save_config(self.config)
