@@ -16,6 +16,15 @@
   기존 미러링: 화면 캡처 → 64×32 grid → weight_matrix → color pipeline → LED
   미디어 연동: 앨범 아트 → cols×rows resize → (동일 파이프라인) → LED
 
+[v3 — 커버아트 지연 재시도]
+  문제: SMTC에서 곡 변경 시 메타데이터는 즉시 갱신되지만, 썸네일(커버아트)은
+  BT/SMTC 내부 처리로 0.5~1.5초 늦게 갱신됨. 곡 변경 직후 읽으면
+  이전 곡의 커버아트가 캐시되고, 이후 media_hash가 같아 재추출을 안 함.
+
+  해결: 곡 변경 감지 시 _pending_retry_hash를 설정하고, 폴링 주기를
+  일시적으로 0.8초로 단축하여 최대 3회 재시도. 재시도 시 SMTC에서
+  썸네일을 다시 읽어 갱신된 커버아트를 캐시에 반영.
+
 [의존성]
 winrt 패키지가 없으면 HAS_MEDIA_SESSION = False로 설정되며,
 모든 기능이 graceful하게 비활성화된다.
@@ -74,8 +83,10 @@ except ImportError:
     pass
 
 # ── 상수 ──────────────────────────────────────────────────────────
-POLL_INTERVAL = 2.5            # 폴링 주기 (초)
+POLL_INTERVAL = 2.5            # 폴링 주기 (초) — 평상시
+POLL_INTERVAL_RETRY = 0.8     # ★ 곡 변경 직후 재시도 주기 (초)
 THUMBNAIL_READ_SIZE = 1048576  # 썸네일 최대 읽기 크기 (1MB)
+THUMBNAIL_RETRY_MAX = 3       # ★ 최대 재시도 횟수
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -228,6 +239,11 @@ class MediaFrameProvider:
     엔진은 캡처 소스만 교체하면 기존 파이프라인이 그대로 동작:
       weight_matrix → 구역 분할 → 색상 보정 → 스무딩 → GRB 변환
 
+    [v3 — 커버아트 지연 재시도]
+    _pending_retry_hash: 곡 변경 직후 설정. 이 값이 0이 아니면
+    폴링 주기를 0.8초로 단축하여 최대 3회 재시도.
+    재시도 시 SMTC에서 썸네일을 다시 읽어 갱신된 커버아트를 캐시.
+
     Attributes:
         grid_cols: int — 프레임 가로 크기 (캡처 grid와 동일)
         grid_rows: int — 프레임 세로 크기 (캡처 grid와 동일)
@@ -245,6 +261,11 @@ class MediaFrameProvider:
         self._cached_artist: str = ""
         self._cached_playback_type: str = "unknown"  # ★ music/video/image/unknown
         self._media_hash: int = 0  # hash(title + artist) — 변경 감지용
+
+        # ── ★ 커버아트 재시도 상태 ──
+        self._pending_retry_hash: int = 0   # 곡 변경 시 설정, 재시도 완료 시 0
+        self._retry_count: int = 0          # 현재 재시도 횟수
+        self._last_thumb_bytes_len: int = 0 # 이전 썸네일 바이트 길이 (변경 감지용)
 
         # ── 폴링 스레드 ──
         self._thread: Optional[threading.Thread] = None
@@ -283,6 +304,9 @@ class MediaFrameProvider:
             self._cached_artist = ""
             self._cached_playback_type = "unknown"
             self._media_hash = 0
+            self._pending_retry_hash = 0
+            self._retry_count = 0
+            self._last_thumb_bytes_len = 0
 
     def get_frame(self) -> Optional[np.ndarray]:
         """최신 앨범 아트 프레임 반환.
@@ -350,7 +374,11 @@ class MediaFrameProvider:
     # ══════════════════════════════════════════════════════════════
 
     def _poll_loop(self):
-        """백그라운드 폴링 — 독립 asyncio event loop 사용."""
+        """백그라운드 폴링 — 독립 asyncio event loop 사용.
+
+        ★ v3: 곡 변경 직후(_pending_retry_hash != 0)에는 0.8초 간격,
+        평상시에는 2.5초 간격으로 폴링.
+        """
         while not self._stop_event.is_set():
             try:
                 loop = asyncio.new_event_loop()
@@ -362,10 +390,14 @@ class MediaFrameProvider:
             except Exception:
                 pass
 
-            self._stop_event.wait(timeout=POLL_INTERVAL)
+            # ★ 재시도 중이면 짧은 주기, 아니면 평상시 주기
+            if self._pending_retry_hash != 0:
+                self._stop_event.wait(timeout=POLL_INTERVAL_RETRY)
+            else:
+                self._stop_event.wait(timeout=POLL_INTERVAL)
 
     async def _poll_once(self):
-        """한 번의 폴링 — 세션 확인 + 변경 감지 + 프레임 추출."""
+        """한 번의 폴링 — 세션 확인 + 변경 감지 + 프레임 추출 + 재시도."""
         session = await _get_current_session()
         if session is None:
             self._clear_cache()
@@ -395,28 +427,73 @@ class MediaFrameProvider:
 
         # ── 변경 감지: hash(title + artist) 비교 ──
         new_hash = hash((title, artist))
-        if new_hash == self._media_hash:
-            # 동일 곡 — 캐시 유지, 재추출 안 함
+
+        if new_hash != self._media_hash:
+            # ═══ 새 곡 감지 ═══
+            # 1차: 메타데이터 즉시 반영 + 썸네일 시도
+            raw_bytes = await _read_thumbnail_bytes(thumbnail_ref)
+            frame = _thumbnail_bytes_to_frame(
+                raw_bytes, self.grid_cols, self.grid_rows
+            )
+            thumbnail = _thumbnail_bytes_to_square(raw_bytes, 128)
+
+            with self._lock:
+                self._cached_title = title
+                self._cached_artist = artist
+                self._media_hash = new_hash
+                self._last_thumb_bytes_len = len(raw_bytes) if raw_bytes else 0
+                if frame is not None:
+                    self._cached_frame = frame
+                if thumbnail is not None:
+                    self._cached_thumbnail = thumbnail
+
+            # ★ 재시도 예약: SMTC 썸네일이 아직 이전 곡일 수 있음
+            self._pending_retry_hash = new_hash
+            self._retry_count = 0
             return
 
-        # ── 새 곡 — 썸네일을 grid 크기 프레임으로 변환 ──
-        raw_bytes = await _read_thumbnail_bytes(thumbnail_ref)
-        frame = _thumbnail_bytes_to_frame(
-            raw_bytes, self.grid_cols, self.grid_rows
-        )
-        # ★ UI용 정사각형 썸네일 (원본 비율 유지)
-        thumbnail = _thumbnail_bytes_to_square(raw_bytes, 128)
+        # ── 동일 곡: 재시도 체크 ──
+        if (self._pending_retry_hash != 0
+                and self._pending_retry_hash == self._media_hash
+                and self._retry_count < THUMBNAIL_RETRY_MAX):
 
-        with self._lock:
-            self._cached_title = title
-            self._cached_artist = artist
-            self._media_hash = new_hash
-            if frame is not None:
-                self._cached_frame = frame
-            if thumbnail is not None:
-                self._cached_thumbnail = thumbnail
-            # frame이 None이면 기존 캐시 유지 (이전 곡 프레임)
-            # → 썸네일 실패 시 깜빡임 방지
+            self._retry_count += 1
+
+            # SMTC에서 썸네일을 다시 읽기
+            # (세션을 다시 가져와서 최신 thumbnail_ref를 확보)
+            retry_session = await _get_current_session()
+            if retry_session is not None:
+                _, _, retry_thumb_ref = await _get_media_properties(retry_session)
+                retry_bytes = await _read_thumbnail_bytes(retry_thumb_ref)
+
+                if retry_bytes is not None:
+                    retry_len = len(retry_bytes)
+
+                    # 이전 시도와 바이트 길이가 다르면 → 썸네일이 갱신됨
+                    # (동일 길이라도 내용이 다를 수 있지만, 길이 변경은
+                    #  곡 변경의 확실한 신호이므로 이것만으로 충분)
+                    if retry_len != self._last_thumb_bytes_len:
+                        new_frame = _thumbnail_bytes_to_frame(
+                            retry_bytes, self.grid_cols, self.grid_rows
+                        )
+                        new_thumb = _thumbnail_bytes_to_square(retry_bytes, 128)
+
+                        with self._lock:
+                            self._last_thumb_bytes_len = retry_len
+                            if new_frame is not None:
+                                self._cached_frame = new_frame
+                            if new_thumb is not None:
+                                self._cached_thumbnail = new_thumb
+
+                        # 갱신 성공 → 재시도 종료
+                        self._pending_retry_hash = 0
+                        self._retry_count = 0
+                        return
+
+            # 최대 재시도 횟수 도달 → 재시도 종료
+            if self._retry_count >= THUMBNAIL_RETRY_MAX:
+                self._pending_retry_hash = 0
+                self._retry_count = 0
 
     def _clear_cache(self):
         """미디어 세션 없음 — 캐시 클리어."""
@@ -427,3 +504,6 @@ class MediaFrameProvider:
             self._media_hash = 0
             self._cached_frame = None
             self._cached_thumbnail = None
+        self._pending_retry_hash = 0
+        self._retry_count = 0
+        self._last_thumb_bytes_len = 0
